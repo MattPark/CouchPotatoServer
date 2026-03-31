@@ -39,6 +39,7 @@ class Plugin(object):
     http_time_between_calls = 0
     http_failed_request = {}
     http_failed_disabled = {}
+    http_max_cache_entries = 500
 
     def __new__(cls, *args, **kwargs):
         new_plugin = super(Plugin, cls).__new__(cls)
@@ -255,6 +256,8 @@ class Plugin(object):
 
         self.http_last_use[host] = time.time()
 
+        self._purgeHttpCaches()
+
         return data
 
     def wait(self, host = '', url = ''):
@@ -285,6 +288,26 @@ class Plugin(object):
             log.error('Failed handling waiting call: %s', traceback.format_exc())
             time.sleep(self.http_time_between_calls)
 
+
+    def _purgeHttpCaches(self):
+        """Evict the oldest half of entries when any HTTP dict exceeds the size cap."""
+        max_entries = self.http_max_cache_entries
+
+        if len(self.http_last_use) > max_entries:
+            sorted_hosts = sorted(self.http_last_use, key=self.http_last_use.get)
+            for host in sorted_hosts[:len(sorted_hosts) // 2]:
+                del self.http_last_use[host]
+
+        if len(self.http_last_use_queue) > max_entries:
+            sorted_hosts = sorted(self.http_last_use_queue, key=lambda h: self.http_last_use.get(h, 0))
+            for host in sorted_hosts[:len(sorted_hosts) // 2]:
+                del self.http_last_use_queue[host]
+
+        if len(self.http_failed_request) > max_entries:
+            sorted_hosts = sorted(self.http_failed_request, key=self.http_failed_request.get)
+            for host in sorted_hosts[:len(sorted_hosts) // 2]:
+                self.http_failed_request.pop(host, None)
+                self.http_failed_disabled.pop(host, None)
 
     def beforeCall(self, handler):
         self.isRunning('%s.%s' % (self.getName(), handler.__name__))

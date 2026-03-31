@@ -44,11 +44,11 @@ class FileManager(Plugin):
             cache_dir = Env.get('cache_dir')
             medias = db.all('media', with_doc = True)
 
-            files = []
+            files = set()
             for media in medias:
                 file_dict = media['doc'].get('files', {})
                 for x in file_dict.keys():
-                    files.extend(file_dict[x])
+                    files.update(file_dict[x])
 
             for f in os.listdir(cache_dir):
                 if os.path.splitext(f)[1] in ['.png', '.jpg', '.jpeg']:

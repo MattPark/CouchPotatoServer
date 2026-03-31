@@ -35,13 +35,14 @@ def addEvent(name, handler, priority = 100):
                 bc = hasattr(parent, 'beforeCall')
                 if bc: parent.beforeCall(handler)
 
-            # Main event
-            h = runHandler(name, handler, *args, **kwargs)
-
-            # Close handler
-            if parent and has_parent:
-                ac = hasattr(parent, 'afterCall')
-                if ac: parent.afterCall(handler)
+            try:
+                # Main event
+                h = runHandler(name, handler, *args, **kwargs)
+            finally:
+                # Close handler — always clean up _running even on exception
+                if parent and has_parent:
+                    ac = hasattr(parent, 'afterCall')
+                    if ac: parent.afterCall(handler)
         except:
             log.error('Failed creating handler %s %s: %s', (name, handler, traceback.format_exc()))
 
