@@ -2,6 +2,7 @@ import fnmatch
 import os
 import re
 import shutil
+import threading
 import time
 import traceback
 
@@ -27,6 +28,8 @@ autoload = 'Renamer'
 
 class Renamer(Plugin):
 
+    _rename_lock = threading.RLock()
+    _snatch_lock = threading.RLock()
     renaming_started = False
     checking_snatched = False
 
@@ -82,7 +85,7 @@ class Renamer(Plugin):
 
     def scanView(self, **kwargs):
 
-        async = tryInt(kwargs.get('async', 0))
+        run_async = tryInt(kwargs.get('async', 0))
         base_folder = kwargs.get('base_folder')
         media_folder = sp(kwargs.get('media_folder'))
         to_folder = kwargs.get('to_folder')
@@ -108,7 +111,7 @@ class Renamer(Plugin):
                     'files': files
                 })
 
-        fire_handle = fireEvent if not async else fireEventAsync
+        fire_handle = fireEvent if not run_async else fireEventAsync
         fire_handle('renamer.scan', base_folder = base_folder, release_download = release_download, to_folder = to_folder)
 
         return {
@@ -121,9 +124,21 @@ class Renamer(Plugin):
         if self.isDisabled():
             return
 
-        if self.renaming_started is True:
+        if not self._rename_lock.acquire(blocking=False):
             log.info('Renamer is already running, if you see this often, check the logs above for errors.')
             return
+
+        self.renaming_started = True
+        try:
+            self._doScan(base_folder, release_download, to_folder)
+        except:
+            log.error('Renamer scan failed: %s', traceback.format_exc())
+        finally:
+            self.renaming_started = False
+            self._rename_lock.release()
+
+    def _doScan(self, base_folder = None, release_download = None, to_folder = None):
+        if not release_download: release_download = {}
 
         if not base_folder:
             base_folder = sp(self.conf('from'))
@@ -369,7 +384,7 @@ class Renamer(Plugin):
                 for file_type in group['files']:
 
                     # Move nfo depending on settings
-                    if file_type is 'nfo' and not self.conf('rename_nfo'):
+                    if file_type == 'nfo' and not self.conf('rename_nfo'):
                         log.debug('Skipping, renaming of %s disabled', file_type)
                         for current_file in group['files'][file_type]:
                             if self.conf('cleanup') and (not keep_original or self.fileIsAdded(current_file, group)):
@@ -377,7 +392,7 @@ class Renamer(Plugin):
                         continue
 
                     # Subtitle extra
-                    if file_type is 'subtitle_extra':
+                    if file_type == 'subtitle_extra':
                         continue
 
                     # Move other files
@@ -407,13 +422,13 @@ class Renamer(Plugin):
                         replacements['filename'] = final_file_name[:-(len(getExt(final_file_name)) + 1)]
 
                         # Meta naming
-                        if file_type is 'trailer':
+                        if file_type == 'trailer':
                             final_file_name = self.doReplace(trailer_name, replacements, remove_multiple = True)
-                        elif file_type is 'nfo':
+                        elif file_type == 'nfo':
                             final_file_name = self.doReplace(nfo_name, replacements, remove_multiple = True)
 
                         # Move DVD files (no structure renaming)
-                        if group['is_dvd'] and file_type is 'movie':
+                        if group['is_dvd'] and file_type == 'movie':
                             found = False
                             for top_dir in ['video_ts', 'audio_ts', 'bdmv', 'certificate']:
                                 has_string = current_file.lower().find(os.path.sep + top_dir + os.path.sep)
@@ -428,14 +443,14 @@ class Renamer(Plugin):
 
                         # Do rename others
                         else:
-                            if file_type is 'leftover':
+                            if file_type == 'leftover':
                                 if self.conf('move_leftover'):
                                     rename_files[current_file] = os.path.join(destination, final_folder_name, os.path.basename(current_file))
                             elif file_type not in ['subtitle']:
                                 rename_files[current_file] = os.path.join(destination, final_folder_name, final_file_name)
 
                         # Check for extra subtitle files
-                        if file_type is 'subtitle':
+                        if file_type == 'subtitle':
 
                             remove_multiple = False
                             if len(group['files']['movie']) == 1:
@@ -470,7 +485,7 @@ class Renamer(Plugin):
                             rename_files = mergeDicts(rename_files, rename_extras)
 
                         # Filename without cd etc
-                        elif file_type is 'movie':
+                        elif file_type == 'movie':
                             rename_extras = self.getRenameExtras(
                                 extra_type = 'movie_extra',
                                 replacements = replacements,
@@ -690,8 +705,6 @@ class Renamer(Plugin):
             # Break if CP wants to shut down
             if self.shuttingDown():
                 break
-
-        self.renaming_started = False
 
     def getRenameExtras(self, extra_type = '', replacements = None, folder_name = '', file_name = '', destination = '', group = None, current_file = '', remove_multiple = False):
         if not group: group = {}
@@ -944,12 +957,11 @@ Remove it if you want it to be renamed (again, or at least let it try again)
 
     def checkSnatched(self, fire_scan = True):
 
-        if self.checking_snatched:
+        if not self._snatch_lock.acquire(blocking=False):
             log.debug('Already checking snatched')
             return False
 
         self.checking_snatched = True
-
         try:
             db = get_db()
 
@@ -957,7 +969,6 @@ Remove it if you want it to be renamed (again, or at least let it try again)
 
             if not rels:
                 #No releases found that need status checking
-                self.checking_snatched = False
                 return True
 
             # Collect all download information with the download IDs from the releases
@@ -975,7 +986,6 @@ Remove it if you want it to be renamed (again, or at least let it try again)
                         no_status_support.append(ss(rel['download_info'].get('downloader')))
             except:
                 log.error('Error getting download IDs from database')
-                self.checking_snatched = False
                 return False
 
             release_downloads = fireEvent('download.status', download_ids, merge = True) if download_ids else []
@@ -987,7 +997,6 @@ Remove it if you want it to be renamed (again, or at least let it try again)
                 if fire_scan:
                     self.scan()
 
-                self.checking_snatched = False
                 return True
 
             scan_releases = []
@@ -1141,13 +1150,13 @@ Remove it if you want it to be renamed (again, or at least let it try again)
             if fire_scan and (scan_required or len(no_status_support) > 0):
                 self.scan()
 
-            self.checking_snatched = False
             return True
         except:
             log.error('Failed checking snatched: %s', traceback.format_exc())
-
-        self.checking_snatched = False
-        return False
+            return False
+        finally:
+            self.checking_snatched = False
+            self._snatch_lock.release()
 
     def extendReleaseDownload(self, release_download):
 
