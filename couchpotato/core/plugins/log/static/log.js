@@ -245,16 +245,16 @@ Page.Log = new Class({
 				}),
 				new Element('span').adopt(
 					new Element('span', {
-					'text': 'Check '
-				}),
-				new Element('a.button', {
-					'target': '_blank',
-					'text': 'existing issues',
-					'href': 'https://github.com/MattPark/CouchPotatoServer/issues'
-				}),
-				new Element('span', {
-					'html': ' before posting, then copy the text below and <strong>FILL IN</strong> the dots.'
-				})
+						'text': 'Check '
+					}),
+					new Element('a.button', {
+						'target': '_blank',
+						'text': 'existing issues',
+						'href': 'https://github.com/MattPark/CouchPotatoServer/issues'
+					}),
+					new Element('span', {
+						'html': ' before posting, then copy the text below and <strong>FILL IN</strong> the dots.'
+					})
 				),
 				textarea = new Element('textarea', {
 					'text': body
