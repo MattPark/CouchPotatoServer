@@ -59,20 +59,14 @@ var AboutSettingTab = new Class({
 		);
 
 		if (!self.hide_about_update){
-			self.version_text.addEvents({
-				'click': App.checkForUpdate.bind(App, function(json){
-					self.fillVersion(json.info);
-				}),
-				'mouseenter': function(){
-					this.set('text', 'Check for updates');
-				},
-				'mouseleave': function(){
-					self.fillVersion(Updater.getInfo());
+			self.update_link = new Element('a.check_for_updates', {
+				'text': 'Check for updates',
+				'events': {
+					'click': App.checkForUpdate.bind(App, function(json){
+						self.fillVersion(json.info);
+					})
 				}
-			});
-		} else {
-			// override cursor style from CSS
-			self.version_text.setProperty('style', 'cursor: auto');
+			}).inject(self.version_text, 'after');
 		}
 
 		if (!self.hide_about_dirs){
