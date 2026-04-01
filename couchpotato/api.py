@@ -74,7 +74,18 @@ class ApiHandler(RequestHandler):
 
     async def get(self, route, *args, **kwargs):
         self.route = route = route.strip('/')
-        if not api.get(route):
+
+        # Exact match first, then try prefix match for routes like "file.cache/filename.jpg"
+        handler = api.get(route)
+        extra_path = None
+        if not handler and '/' in route:
+            prefix = route.rsplit('/', 1)[0]
+            handler = api.get(prefix)
+            if handler:
+                extra_path = route[len(prefix) + 1:]
+                route = prefix
+
+        if not handler:
             self.write('API call doesn\'t seem to exist')
             self.finish()
             return
@@ -93,6 +104,10 @@ class ApiHandler(RequestHandler):
             # Split array arguments
             kwargs = getParams(kwargs)
             kwargs['_request'] = self
+
+            # Pass sub-path as 'filename' for static-style routes (e.g. file.cache/image.jpg)
+            if extra_path is not None:
+                kwargs['filename'] = extra_path
 
             # Remove t random string
             try: del kwargs['t']
@@ -144,6 +159,12 @@ class ApiHandler(RequestHandler):
                 self.finish(str(jsonp_callback) + '(' + json.dumps(result) + ')')
             elif isinstance(result, tuple) and result[0] == 'redirect':
                 self.redirect(result[1])
+            elif isinstance(result, tuple) and result[0] == 'file':
+                # Binary file serving: ('file', content_type, bytes_data)
+                _, content_type, data = result
+                self.set_header('Content-Type', content_type)
+                self.set_header('Cache-Control', 'public, max-age=604800')
+                self.finish(data)
             else:
                 self.finish(result)
         except UnicodeDecodeError:

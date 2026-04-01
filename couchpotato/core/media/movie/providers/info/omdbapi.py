@@ -76,6 +76,8 @@ class OMDBAPI(MovieProvider):
         try:
 
             try:
+                if isinstance(movie, bytes):
+                    movie = movie.decode('utf-8')
                 if isinstance(movie, str):
                     movie = json.loads(movie)
             except ValueError:

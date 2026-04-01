@@ -1,3 +1,4 @@
+import mimetypes
 import os.path
 import traceback
 
@@ -9,7 +10,6 @@ from couchpotato.core.helpers.variable import md5, getExt, isSubFolder
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
 from couchpotato.environment import Env
-from tornado.web import StaticFileHandler
 
 
 log = CPLog(__name__)
@@ -22,7 +22,7 @@ class FileManager(Plugin):
     def __init__(self):
         addEvent('file.download', self.download)
 
-        addApiView('file.cache/(.*)', self.showCacheFile, static = True, docs = {
+        addApiView('file.cache', self.serveCacheFile, docs = {
             'desc': 'Return a file from the cp_data/cache directory',
             'params': {
                 'filename': {'desc': 'path/filename of the wanted file'}
@@ -44,22 +44,75 @@ class FileManager(Plugin):
             cache_dir = Env.get('cache_dir')
             medias = db.all('media', with_doc = True)
 
-            files = set()
+            # Collect basenames of referenced files (paths may reference old Docker paths)
+            referenced_basenames = set()
             for media in medias:
                 file_dict = media['doc'].get('files', {})
                 for x in file_dict.keys():
-                    files.update(file_dict[x])
+                    for path in file_dict[x]:
+                        referenced_basenames.add(os.path.basename(path))
 
             for f in os.listdir(cache_dir):
                 if os.path.splitext(f)[1] in ['.png', '.jpg', '.jpeg']:
-                    file_path = os.path.join(cache_dir, f)
-                    if toUnicode(file_path) not in files:
+                    if f not in referenced_basenames:
+                        file_path = os.path.join(cache_dir, f)
                         os.remove(file_path)
         except:
             log.error('Failed removing unused file: %s', traceback.format_exc())
 
-    def showCacheFile(self, route, **kwargs):
-        Env.get('app').add_handlers(".*$", [('%s%s' % (Env.get('api_base'), route), StaticFileHandler, {'path': toUnicode(Env.get('cache_dir'))})])
+    def serveCacheFile(self, filename=None, _request=None, **kwargs):
+        cache_dir = sp(Env.get('cache_dir'))
+
+        if not filename:
+            return ''
+
+        # Sanitize: only allow the basename (no path traversal)
+        filename = os.path.basename(filename)
+        file_path = os.path.join(cache_dir, filename)
+
+        if not os.path.isfile(file_path):
+            # Image not cached yet — try to download it on the fly
+            # by looking up which media references this filename
+            file_path = self._tryDownloadMissing(filename, cache_dir)
+            if not file_path or not os.path.isfile(file_path):
+                return ''
+
+        # Return a special tuple that ApiHandler.sendData recognizes for binary file serving
+        content_type, _ = mimetypes.guess_type(file_path)
+        if not content_type:
+            content_type = 'application/octet-stream'
+
+        try:
+            with open(file_path, 'rb') as f:
+                return ('file', content_type, f.read())
+        except:
+            log.error('Failed serving cache file %s: %s', (filename, traceback.format_exc()))
+            return ''
+
+    def _tryDownloadMissing(self, filename, cache_dir):
+        """Try to find the poster URL for a missing cached file and download it."""
+        try:
+            db = get_db()
+            medias = db.all('media', with_doc=True)
+            for media in medias:
+                file_dict = media['doc'].get('files', {})
+                for file_type, paths in file_dict.items():
+                    for path in paths:
+                        if os.path.basename(path) == filename:
+                            # Found the media that references this file
+                            # Get the URL from info.images
+                            info = media['doc'].get('info', {})
+                            images = info.get('images', {})
+                            poster_urls = images.get('poster', [])
+                            if poster_urls:
+                                dest = os.path.join(cache_dir, filename)
+                                result = fireEvent('file.download', url=poster_urls[0], dest=dest, single=True)
+                                if result:
+                                    return result
+            return None
+        except:
+            log.debug('Failed trying to download missing cache file %s: %s', (filename, traceback.format_exc()))
+            return None
 
     def download(self, url = '', dest = None, overwrite = False, urlopen_kwargs = None):
         if not urlopen_kwargs: urlopen_kwargs = {}

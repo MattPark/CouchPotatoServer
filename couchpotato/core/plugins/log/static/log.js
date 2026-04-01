@@ -245,16 +245,16 @@ Page.Log = new Class({
 				}),
 				new Element('span').adopt(
 					new Element('span', {
-						'text': 'Read '
-					}),
-					new Element('a.button', {
-						'target': '_blank',
-						'text': 'the contributing guide',
-						'href': 'https://github.com/CouchPotato/CouchPotatoServer/wiki/Developer-branch'
-					}),
-					new Element('span', {
-						'html': ' before posting, then copy the text below and <strong>FILL IN</strong> the dots.'
-					})
+					'text': 'Check '
+				}),
+				new Element('a.button', {
+					'target': '_blank',
+					'text': 'existing issues',
+					'href': 'https://github.com/MattPark/CouchPotatoServer/issues'
+				}),
+				new Element('span', {
+					'html': ' before posting, then copy the text below and <strong>FILL IN</strong> the dots.'
+				})
 				),
 				textarea = new Element('textarea', {
 					'text': body
@@ -262,7 +262,7 @@ Page.Log = new Class({
 				new Element('a.button', {
 					'target': '_blank',
 					'text': 'Create a new issue on GitHub with the text above',
-					'href': 'https://github.com/CouchPotato/CouchPotatoServer/issues/new',
+					'href': 'https://github.com/MattPark/CouchPotatoServer/issues/new',
 					'events': {
 						'click': function(e){
 							(e).stop();
