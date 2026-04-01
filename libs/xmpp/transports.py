@@ -27,10 +27,11 @@ Transports are stackable so you - f.e. TLS use HTPPROXYsocket or TCPsocket as mo
 Also exception 'error' is defined to allow capture of this module specific exceptions.
 """
 
-import socket, ssl, select, base64, dispatcher, sys
-from simplexml import ustr
-from client import PlugIn
-from protocol import *
+import socket, ssl, select, base64, sys
+from . import dispatcher
+from .simplexml import ustr
+from .client import PlugIn
+from .protocol import *
 
 # determine which DNS resolution library is available
 HAVE_DNSPYTHON = False
@@ -133,17 +134,17 @@ class TCPsocket(PlugIn):
             self._sock.connect((server[0], int(server[1])))
             self._send = self._sock.sendall
             self._recv = self._sock.recv
-            self.DEBUG("Successfully connected to remote host %s" % `server`, 'start')
+            self.DEBUG("Successfully connected to remote host %s" % repr(server), 'start')
             return 'ok'
-        except socket.error, (errno, strerror):
-            self.DEBUG("Failed to connect to remote host %s: %s (%s)" % (`server`, strerror, errno), 'error')
+        except socket.error as e:
+            self.DEBUG("Failed to connect to remote host %s: %s (%s)" % (repr(server), e.strerror, e.errno), 'error')
         except: pass
 
     def plugout(self):
         """ Disconnect from the remote server and unregister self.disconnected method from
             the owner's dispatcher. """
         self._sock.close()
-        if self._owner.__dict__.has_key('Connection'):
+        if 'Connection' in self._owner.__dict__:
             del self._owner.Connection
             self._owner.UnregisterDisconnectHandler(self.disconnected)
 
@@ -151,12 +152,12 @@ class TCPsocket(PlugIn):
         """ Reads all pending incoming data.
             In case of disconnection calls owner's disconnected() method and then raises IOError exception."""
         try: received = self._recv(BUFLEN)
-        except socket.sslerror, e:
+        except ssl.SSLError as e:
             self._seen_data = 0
-            if e[0] == socket.SSL_ERROR_WANT_READ: return ''
-            if e[0] == socket.SSL_ERROR_WANT_WRITE: return ''
+            if e.args[0] == ssl.SSL_ERROR_WANT_READ: return ''
+            if e.args[0] == ssl.SSL_ERROR_WANT_WRITE: return ''
             self.DEBUG('Socket error while receiving data', 'error')
-            sys.exc_clear()
+            pass  # sys.exc_clear() removed in Python 3
             self._owner.disconnected()
             raise IOError("Disconnected from server")
         except: received = ''
@@ -182,7 +183,7 @@ class TCPsocket(PlugIn):
         """ Writes raw outgoing data. Blocks until done.
             If supplied data is unicode string, encodes it to utf-8 before send."""
         if type(raw_data) == type(u''): raw_data = raw_data.encode('utf-8')
-        elif type(raw_data) <> type(''): raw_data = ustr(raw_data).encode('utf-8')
+        elif type(raw_data) != type(''): raw_data = ustr(raw_data).encode('utf-8')
         try:
             self._send(raw_data)
             # Avoid printing messages that are empty keepalive packets.
@@ -238,9 +239,9 @@ class HTTPPROXYsocket(TCPsocket):
             'Pragma: no-cache',
             'Host: %s:%s' % self._server,
             'User-Agent: HTTPPROXYsocket/v0.1']
-        if self._proxy.has_key('user') and self._proxy.has_key('password'):
+        if 'user' in self._proxy and 'password' in self._proxy:
             credentials = '%s:%s' % (self._proxy['user'], self._proxy['password'])
-            credentials = base64.encodestring(credentials).strip()
+            credentials = base64.b64encode(credentials.encode()).decode().strip()
             connector.append('Proxy-Authorization: Basic ' + credentials)
         connector.append('\r\n')
         self.send('\r\n'.join(connector))
@@ -251,7 +252,7 @@ class HTTPPROXYsocket(TCPsocket):
             return
         try: proto, code, desc = reply.split('\n')[0].split(' ', 2)
         except: raise error('Invalid proxy reply')
-        if code <> '200':
+        if code != '200':
             self.DEBUG('Invalid proxy reply: %s %s %s' % (proto, code, desc), 'error')
             self._owner.disconnected()
             return
@@ -275,7 +276,7 @@ class TLS(PlugIn):
             If 'now' in false then starts encryption as soon as TLS feature is
             declared by the server (if it were already declared - it is ok).
         """
-        if owner.__dict__.has_key('TLS'): return # Already enabled.
+        if 'TLS' in owner.__dict__: return # Already enabled.
         PlugIn.PlugIn(self, owner)
         DBG_LINE = 'TLS'
         if now: return self._startSSL()
@@ -328,7 +329,7 @@ class TLS(PlugIn):
     def StartTLSHandler(self, conn, starttls):
         """ Handle server reply if TLS is allowed to process. Behaves accordingly.
             Used internally."""
-        if starttls.getNamespace() <> NS_TLS: return
+        if starttls.getNamespace() != NS_TLS: return
         self.starttls = starttls.getName()
         if self.starttls == 'failure':
             self.DEBUG("Got starttls response: " + self.starttls, 'error')

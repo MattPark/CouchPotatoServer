@@ -24,8 +24,16 @@ import os
 import struct
 import logging
 import stat
-from exceptions import ParseError
-import core
+import sys
+from .exceptions import ParseError
+from . import core
+
+if sys.version_info[0] >= 3:
+    long = int
+
+def _bord(x):
+    """Return byte value as int, compatible with both Python 2 and 3."""
+    return x if isinstance(x, int) else ord(x)
 
 # get logging object
 log = logging.getLogger(__name__)
@@ -222,7 +230,7 @@ class MPEG(core.AVContainer):
         Search for the Sequence_Extension in the extension header (01B5)
         """
         file.seek(0)
-        buffer = ''
+        buffer = b''
         count = 0
         while 1:
             if len(buffer) < 1000:
@@ -232,15 +240,15 @@ class MPEG(core.AVContainer):
                 buffer += file.read(1024)
             if len(buffer) < 1000:
                 break
-            pos = buffer.find('\x00\x00\x01\xb5')
+            pos = buffer.find(b'\x00\x00\x01\xb5')
             if pos == -1 or len(buffer) - pos < 5:
                 buffer = buffer[-10:]
                 continue
-            ext = (ord(buffer[pos + 4]) >> 4)
+            ext = (_bord(buffer[pos + 4]) >> 4)
             if ext == 8:
                 pass
             elif ext == 1:
-                if (ord(buffer[pos + 5]) >> 3) & 1:
+                if (_bord(buffer[pos + 5]) >> 3) & 1:
                     self._set('progressive', True)
                 else:
                     self._set('interlaced', True)
@@ -307,18 +315,18 @@ class MPEG(core.AVContainer):
         if len(buffer) < 6:
             return None
 
-        highbit = (ord(buffer[0]) & 0x20) >> 5
+        highbit = (_bord(buffer[0]) & 0x20) >> 5
 
-        low4Bytes = ((long(ord(buffer[0])) & 0x18) >> 3) << 30
-        low4Bytes |= (ord(buffer[0]) & 0x03) << 28
-        low4Bytes |= ord(buffer[1]) << 20
-        low4Bytes |= (ord(buffer[2]) & 0xF8) << 12
-        low4Bytes |= (ord(buffer[2]) & 0x03) << 13
-        low4Bytes |= ord(buffer[3]) << 5
-        low4Bytes |= (ord(buffer[4])) >> 3
+        low4Bytes = ((long(_bord(buffer[0])) & 0x18) >> 3) << 30
+        low4Bytes |= (_bord(buffer[0]) & 0x03) << 28
+        low4Bytes |= _bord(buffer[1]) << 20
+        low4Bytes |= (_bord(buffer[2]) & 0xF8) << 12
+        low4Bytes |= (_bord(buffer[2]) & 0x03) << 13
+        low4Bytes |= _bord(buffer[3]) << 5
+        low4Bytes |= (_bord(buffer[4])) >> 3
 
-        sys_clock_ref = (ord(buffer[4]) & 0x3) << 7
-        sys_clock_ref |= (ord(buffer[5]) >> 1)
+        sys_clock_ref = (_bord(buffer[4]) & 0x3) << 7
+        sys_clock_ref |= (_bord(buffer[5]) >> 1)
 
         return (long(highbit * (1 << 16) * (1 << 16)) + low4Bytes) / 90000
 
@@ -330,13 +338,13 @@ class MPEG(core.AVContainer):
         if len(buffer) < 5:
             return None
 
-        highbit = (ord(buffer[0]) >> 3) & 0x01
+        highbit = (_bord(buffer[0]) >> 3) & 0x01
 
-        low4Bytes = ((long(ord(buffer[0])) >> 1) & 0x03) << 30
-        low4Bytes |= ord(buffer[1]) << 22;
-        low4Bytes |= (ord(buffer[2]) >> 1) << 15;
-        low4Bytes |= ord(buffer[3]) << 7;
-        low4Bytes |= ord(buffer[4]) >> 1;
+        low4Bytes = ((long(_bord(buffer[0])) >> 1) & 0x03) << 30
+        low4Bytes |= _bord(buffer[1]) << 22;
+        low4Bytes |= (_bord(buffer[2]) >> 1) << 15;
+        low4Bytes |= _bord(buffer[3]) << 7;
+        low4Bytes |= _bord(buffer[4]) >> 1;
 
         return (long(highbit) * (1 << 16) * (1 << 16) + low4Bytes) / 90000;
 
@@ -345,9 +353,9 @@ class MPEG(core.AVContainer):
         """
         read PTS (PES timestamp) at the buffer beginning (5 Bytes)
         """
-        high = ((ord(buffer[0]) & 0xF) >> 1)
-        med = (ord(buffer[1]) << 7) + (ord(buffer[2]) >> 1)
-        low = (ord(buffer[3]) << 7) + (ord(buffer[4]) >> 1)
+        high = ((_bord(buffer[0]) & 0xF) >> 1)
+        med = (_bord(buffer[1]) << 7) + (_bord(buffer[2]) >> 1)
+        low = (_bord(buffer[3]) << 7) + (_bord(buffer[4]) >> 1)
         return ((long(high) << 30) + (med << 15) + low) / 90000
 
 
@@ -356,25 +364,25 @@ class MPEG(core.AVContainer):
         Handle MPEG header in buffer on position offset
         Return None on error, new offset or 0 if the new offset can't be scanned
         """
-        if buffer[offset:offset + 3] != '\x00\x00\x01':
+        if buffer[offset:offset + 3] != b'\x00\x00\x01':
             return None
 
-        id = ord(buffer[offset + 3])
+        id = _bord(buffer[offset + 3])
 
         if id == PADDING_PKT:
-            return offset + (ord(buffer[offset + 4]) << 8) + \
-                   ord(buffer[offset + 5]) + 6
+            return offset + (_bord(buffer[offset + 4]) << 8) + \
+                   _bord(buffer[offset + 5]) + 6
 
         if id == PACK_PKT:
-            if ord(buffer[offset + 4]) & 0xF0 == 0x20:
+            if _bord(buffer[offset + 4]) & 0xF0 == 0x20:
                 self.type = 'MPEG-1 Video'
                 self.get_time = self.ReadSCRMpeg1
                 self.mpeg_version = 1
                 return offset + 12
-            elif (ord(buffer[offset + 4]) & 0xC0) == 0x40:
+            elif (_bord(buffer[offset + 4]) & 0xC0) == 0x40:
                 self.type = 'MPEG-2 Video'
                 self.get_time = self.ReadSCRMpeg2
-                return offset + (ord(buffer[offset + 13]) & 0x07) + 14
+                return offset + (_bord(buffer[offset + 13]) & 0x07) + 14
             else:
                 # I have no idea what just happened, but for some DVB
                 # recordings done with mencoder this points to a
@@ -410,10 +418,10 @@ class MPEG(core.AVContainer):
 
         if id in [PRIVATE_STREAM1, PRIVATE_STREAM2]:
             # private stream. we don't know, but maybe we can guess later
-            add = ord(buffer[offset + 8])
-            # if (ord(buffer[offset+6]) & 4) or 1:
-            # id = ord(buffer[offset+10+add])
-            if buffer[offset + 11 + add:offset + 15 + add].find('\x0b\x77') != -1:
+            add = _bord(buffer[offset + 8])
+            # if (_bord(buffer[offset+6]) & 4) or 1:
+            # id = _bord(buffer[offset+10+add])
+            if buffer[offset + 11 + add:offset + 15 + add].find(b'\x0b\x77') != -1:
                 # AC3 stream
                 for a in self.audio:
                     if a.id == id:
@@ -445,12 +453,12 @@ class MPEG(core.AVContainer):
         offset = 0
 
         # seek until the 0 byte stop
-        while offset < len(buffer) - 100 and buffer[offset] == '\0':
+        while offset < len(buffer) - 100 and _bord(buffer[offset]) == 0:
             offset += 1
         offset -= 2
 
         # test for mpeg header 0x00 0x00 0x01
-        header = '\x00\x00\x01%s' % chr(PACK_PKT)
+        header = b'\x00\x00\x01' + bytes([PACK_PKT])
         if offset < 0 or not buffer[offset:offset + 4] == header:
             if not force:
                 return 0
@@ -470,7 +478,7 @@ class MPEG(core.AVContainer):
         # store first timestamp
         self.start = self.get_time(buffer[offset + 4:])
         while len(buffer) > offset + 1000 and \
-                  buffer[offset:offset + 3] == '\x00\x00\x01':
+                  buffer[offset:offset + 3] == b'\x00\x00\x01':
             # read the mpeg header
             new_offset = self.ReadHeader(buffer, offset)
 
@@ -484,12 +492,12 @@ class MPEG(core.AVContainer):
 
                 # skip padding 0 before a new header
                 while len(buffer) > offset + 10 and \
-                          not ord(buffer[offset + 2]):
+                          not _bord(buffer[offset + 2]):
                     offset += 1
 
             else:
                 # seek to new header by brute force
-                offset += buffer[offset + 4:].find('\x00\x00\x01') + 4
+                offset += buffer[offset + 4:].find(b'\x00\x00\x01') + 4
 
         # fill in values for support functions:
         self.__seek_size__ = 1000000
@@ -507,7 +515,7 @@ class MPEG(core.AVContainer):
         Return position of timer in buffer or None if not found.
         This function is valid for 'normal' mpeg files
         """
-        pos = buffer.find('\x00\x00\x01%s' % chr(PACK_PKT))
+        pos = buffer.find(b'\x00\x00\x01' + bytes([PACK_PKT]))
         if pos == -1:
             return None
         return pos + 4
@@ -526,16 +534,16 @@ class MPEG(core.AVContainer):
 
         http://dvd.sourceforge.net/dvdinfo/pes-hdr.html
         """
-        if not buffer[0:3] == '\x00\x00\x01':
+        if not buffer[0:3] == b'\x00\x00\x01':
             return 0, None
 
-        packet_length = (ord(buffer[4]) << 8) + ord(buffer[5]) + 6
-        align = ord(buffer[6]) & 4
-        header_length = ord(buffer[8])
+        packet_length = (_bord(buffer[4]) << 8) + _bord(buffer[5]) + 6
+        align = _bord(buffer[6]) & 4
+        header_length = _bord(buffer[8])
 
         # PES ID (starting with 001)
-        if ord(buffer[3]) & 0xE0 == 0xC0:
-            id = id or ord(buffer[3]) & 0x1F
+        if _bord(buffer[3]) & 0xE0 == 0xC0:
+            id = id or _bord(buffer[3]) & 0x1F
             for a in self.audio:
                 if a.id == id:
                     break
@@ -543,8 +551,8 @@ class MPEG(core.AVContainer):
                 self.audio.append(core.AudioStream())
                 self.audio[-1]._set('id', id)
 
-        elif ord(buffer[3]) & 0xF0 == 0xE0:
-            id = id or ord(buffer[3]) & 0xF
+        elif _bord(buffer[3]) & 0xF0 == 0xE0:
+            id = id or _bord(buffer[3]) & 0xF
             for v in self.video:
                 if v.id == id:
                     break
@@ -554,14 +562,14 @@ class MPEG(core.AVContainer):
 
             # new mpeg starting
             if buffer[header_length + 9:header_length + 13] == \
-                   '\x00\x00\x01\xB3' and not self.sequence_header_offset:
+                   b'\x00\x00\x01\xB3' and not self.sequence_header_offset:
                 # yes, remember offset for later use
                 self.sequence_header_offset = offset + header_length + 9
-        elif ord(buffer[3]) == 189 or ord(buffer[3]) == 191:
+        elif _bord(buffer[3]) == 189 or _bord(buffer[3]) == 191:
             # private stream. we don't know, but maybe we can guess later
-            id = id or ord(buffer[3]) & 0xF
+            id = id or _bord(buffer[3]) & 0xF
             if align and \
-                   buffer[header_length + 9:header_length + 11] == '\x0b\x77':
+                   buffer[header_length + 9:header_length + 11] == b'\x0b\x77':
                 # AC3 stream
                 for a in self.audio:
                     if a.id == id:
@@ -575,17 +583,17 @@ class MPEG(core.AVContainer):
             # unknown content
             pass
 
-        ptsdts = ord(buffer[7]) >> 6
+        ptsdts = _bord(buffer[7]) >> 6
 
-        if ptsdts and ptsdts == ord(buffer[9]) >> 4:
-            if ord(buffer[9]) >> 4 != ptsdts:
+        if ptsdts and ptsdts == _bord(buffer[9]) >> 4:
+            if _bord(buffer[9]) >> 4 != ptsdts:
                 log.warning(u'WARNING: bad PTS/DTS, please contact us')
                 return packet_length, None
 
             # timestamp = self.ReadPTS(buffer[9:14])
-            high = ((ord(buffer[9]) & 0xF) >> 1)
-            med = (ord(buffer[10]) << 7) + (ord(buffer[11]) >> 1)
-            low = (ord(buffer[12]) << 7) + (ord(buffer[13]) >> 1)
+            high = ((_bord(buffer[9]) & 0xF) >> 1)
+            med = (_bord(buffer[10]) << 7) + (_bord(buffer[11]) >> 1)
+            low = (_bord(buffer[12]) << 7) + (_bord(buffer[13]) >> 1)
             return packet_length, 9
 
         return packet_length, None
@@ -598,7 +606,7 @@ class MPEG(core.AVContainer):
         buffer = file.read(3)
 
         # header (also valid for all mpegs)
-        if not buffer == '\x00\x00\x01':
+        if not buffer == b'\x00\x00\x01':
             return 0
 
         self.sequence_header_offset = 0
@@ -644,7 +652,7 @@ class MPEG(core.AVContainer):
         Return position of timer in buffer or -1 if not found.
         This function is valid for PES files
         """
-        pos = buffer.find('\x00\x00\x01')
+        pos = buffer.find(b'\x00\x00\x01')
         offset = 0
         if pos == -1 or offset + 1000 >= len(buffer):
             return None
@@ -657,7 +665,7 @@ class MPEG(core.AVContainer):
                 retpos = offset + timestamp
             if pos == 0:
                 # Oops, that was a mpeg header, no PES header
-                offset += buffer[offset:].find('\x00\x00\x01')
+                offset += buffer[offset:].find(b'\x00\x00\x01')
                 retpos = -1
                 ackcount = 0
             else:
@@ -706,7 +714,7 @@ class MPEG(core.AVContainer):
         c = 0
 
         while c + TS_PACKET_LENGTH < len(buffer):
-            if ord(buffer[c]) == ord(buffer[c + TS_PACKET_LENGTH]) == TS_SYNC:
+            if _bord(buffer[c]) == _bord(buffer[c + TS_PACKET_LENGTH]) == TS_SYNC:
                 break
             c += 1
         else:
@@ -716,7 +724,7 @@ class MPEG(core.AVContainer):
         self.type = 'MPEG-TS'
 
         while c + TS_PACKET_LENGTH < len(buffer):
-            start = ord(buffer[c + 1]) & 0x40
+            start = _bord(buffer[c + 1]) & 0x40
             # maybe load more into the buffer
             if c + 2 * TS_PACKET_LENGTH > len(buffer) and c < 500000:
                 buffer += file.read(10000)
@@ -726,16 +734,16 @@ class MPEG(core.AVContainer):
                 c += TS_PACKET_LENGTH
                 continue
 
-            tsid = ((ord(buffer[c + 1]) & 0x3F) << 8) + ord(buffer[c + 2])
-            adapt = (ord(buffer[c + 3]) & 0x30) >> 4
+            tsid = ((_bord(buffer[c + 1]) & 0x3F) << 8) + _bord(buffer[c + 2])
+            adapt = (_bord(buffer[c + 3]) & 0x30) >> 4
 
             offset = 4
             if adapt & 0x02:
                 # meta info present, skip it for now
-                adapt_len = ord(buffer[c + offset])
+                adapt_len = _bord(buffer[c + offset])
                 offset += adapt_len + 1
 
-            if not ord(buffer[c + 1]) & 0x40:
+            if not _bord(buffer[c + 1]) & 0x40:
                 # no new pes or psi in stream payload starting
                 pass
             elif adapt & 0x01:
@@ -784,25 +792,25 @@ class MPEG(core.AVContainer):
         c = 0
 
         while c + TS_PACKET_LENGTH < len(buffer):
-            if ord(buffer[c]) == ord(buffer[c + TS_PACKET_LENGTH]) == TS_SYNC:
+            if _bord(buffer[c]) == _bord(buffer[c + TS_PACKET_LENGTH]) == TS_SYNC:
                 break
             c += 1
         else:
             return None
 
         while c + TS_PACKET_LENGTH < len(buffer):
-            start = ord(buffer[c + 1]) & 0x40
+            start = _bord(buffer[c + 1]) & 0x40
             if not start:
                 c += TS_PACKET_LENGTH
                 continue
 
-            tsid = ((ord(buffer[c + 1]) & 0x3F) << 8) + ord(buffer[c + 2])
-            adapt = (ord(buffer[c + 3]) & 0x30) >> 4
+            tsid = ((_bord(buffer[c + 1]) & 0x3F) << 8) + _bord(buffer[c + 2])
+            adapt = (_bord(buffer[c + 3]) & 0x30) >> 4
 
             offset = 4
             if adapt & 0x02:
                 # meta info present, skip it for now
-                offset += ord(buffer[c + offset]) + 1
+                offset += _bord(buffer[c + offset]) + 1
 
             if adapt & 0x01:
                 timestamp = self.ReadPESHeader(c + offset, buffer[c + offset:], tsid)[1]
@@ -829,7 +837,7 @@ class MPEG(core.AVContainer):
         if length < self.__sample_size__:
             return
 
-        file = open(self.filename)
+        file = open(self.filename, 'rb')
         file.seek(length - self.__sample_size__)
         buffer = file.read(self.__sample_size__)
 
@@ -865,7 +873,7 @@ class MPEG(core.AVContainer):
         if not hasattr(self, 'filename') or not hasattr(self, 'start'):
             return 0
 
-        file = open(self.filename)
+        file = open(self.filename, 'rb')
         seek_to = 0
 
         while 1:
@@ -894,7 +902,7 @@ class MPEG(core.AVContainer):
         if not hasattr(self, 'filename') or not hasattr(self, 'start'):
             return 0
 
-        file = open(self.filename)
+        file = open(self.filename, 'rb')
         log.debug(u'scanning file...')
         while 1:
             file.seek(self.__seek_size__ * 10, 1)

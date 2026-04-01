@@ -17,10 +17,8 @@
 # LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-import urlparse
+import urllib.parse
 import os
-
-from rtorrent.compat import is_py3
 
 
 def bool_to_int(value):
@@ -76,15 +74,8 @@ def convert_version_tuple_to_str(t):
 
 
 def safe_repr(fmt, *args, **kwargs):
-    """ Formatter that handles unicode arguments """
-
-    if not is_py3():
-        # unicode fmt can take str args, str fmt cannot take unicode args
-        fmt = fmt.decode("utf-8")
-        out = fmt.format(*args, **kwargs)
-        return out.encode("utf-8")
-    else:
-        return fmt.format(*args, **kwargs)
+    """ Formatter that handles arguments """
+    return fmt.format(*args, **kwargs)
 
 
 def split_path(path):
@@ -112,30 +103,30 @@ def join_path(base, path):
 
 
 def join_uri(base, uri, construct=True):
-    p_uri = urlparse.urlparse(uri)
+    p_uri = urllib.parse.urlparse(uri)
 
     # Return if there is nothing to join
     if not p_uri.path:
         return base
 
-    scheme, netloc, path, params, query, fragment = urlparse.urlparse(base)
+    scheme, netloc, path, params, query, fragment = urllib.parse.urlparse(base)
 
     # Switch to 'uri' parts
     _, _, _, params, query, fragment = p_uri
 
     path = join_path(path, p_uri.path)
 
-    result = urlparse.ParseResult(scheme, netloc, path, params, query, fragment)
+    result = urllib.parse.ParseResult(scheme, netloc, path, params, query, fragment)
 
     if not construct:
         return result
 
     # Construct from parts
-    return urlparse.urlunparse(result)
+    return urllib.parse.urlunparse(result)
 
 
 def update_uri(uri, construct=True, **kwargs):
-    if isinstance(uri, urlparse.ParseResult):
+    if isinstance(uri, urllib.parse.ParseResult):
         uri = dict(uri._asdict())
 
     if type(uri) is not dict:
@@ -143,9 +134,9 @@ def update_uri(uri, construct=True, **kwargs):
 
     uri.update(kwargs)
 
-    result = urlparse.ParseResult(**uri)
+    result = urllib.parse.ParseResult(**uri)
 
     if not construct:
         return result
 
-    return urlparse.urlunparse(result)
+    return urllib.parse.urlunparse(result)

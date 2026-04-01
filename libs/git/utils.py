@@ -42,11 +42,11 @@ class CommandString(object):
 
 def quote_for_shell(s):
     """
-    >>> print quote_for_shell('this is a " string')
+    >>> print(quote_for_shell('this is a " string'))
     "this is a \\" string"
-    >>> print quote_for_shell('this is a $shell variable')
+    >>> print(quote_for_shell('this is a $shell variable'))
     "this is a \\$shell variable"
-    >>> print quote_for_shell(r'an escaped \\$')
+    >>> print(quote_for_shell(r'an escaped \\$'))
     "an escaped \\\\\\$"
     """
     returned = s.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")

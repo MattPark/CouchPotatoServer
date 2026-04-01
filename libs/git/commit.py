@@ -44,7 +44,7 @@ class Commit(Ref):
             other = other.hash
         if other is None:
             return False
-        if not isinstance(other, basestring):
+        if not isinstance(other, str):
             raise TypeError("Comparing %s and %s" % (type(self), type(other)))
         return (self.hash == other.lower())
     def getParents(self):

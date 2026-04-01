@@ -22,13 +22,17 @@ __all__ = ['Parser']
 
 import zlib
 import logging
-import StringIO
+import io
 import struct
-from exceptions import ParseError
-import core
+from .exceptions import ParseError
+from . import core
 
 # get logging object
 log = logging.getLogger(__name__)
+
+def _bord(x):
+    """Return byte value as int, compatible with both Python 2 and 3."""
+    return x if isinstance(x, int) else ord(x)
 
 
 # http://developer.apple.com/documentation/QuickTime/QTFF/index.html
@@ -172,11 +176,11 @@ class MPEG4(core.AVContainer):
             # EOF.
             raise ParseError()
 
-        if type == 'ftyp':
+        if type == b'ftyp':
             # file type information
             if size >= 12:
                 # this should always happen
-                if file.read(4) != 'qt  ':
+                if file.read(4) != b'qt  ':
                     # not a quicktime movie, it is a mpeg4 container
                     self.mime = 'video/mp4'
                     self.type = 'MPEG-4 Video'
@@ -185,13 +189,13 @@ class MPEG4(core.AVContainer):
             h = file.read(8)
             (size, type) = struct.unpack('>I4s', h)
 
-        while type in ['mdat', 'skip']:
+        while type in [b'mdat', b'skip']:
             # movie data at the beginning, skip
             file.seek(size - 8, 1)
             h = file.read(8)
             (size, type) = struct.unpack('>I4s', h)
 
-        if not type in ['moov', 'wide', 'free']:
+        if not type in [b'moov', b'wide', b'free']:
             log.debug(u'invalid header: %r' % type)
             raise ParseError()
 
@@ -215,13 +219,13 @@ class MPEG4(core.AVContainer):
             return 0
 
         atomsize, atomtype = struct.unpack('>I4s', s)
-        if not str(atomtype).decode('latin1').isalnum():
+        if not atomtype.decode('latin-1').isalnum():
             # stop at nonsense data
             return 0
 
         log.debug(u'%r [%X]' % (atomtype, atomsize))
 
-        if atomtype == 'udta':
+        if atomtype == b'udta':
             # Userdata (Metadata)
             pos = 0
             tabl = {}
@@ -229,7 +233,7 @@ class MPEG4(core.AVContainer):
             atomdata = file.read(atomsize - 8)
             while pos < atomsize - 12:
                 (datasize, datatype) = struct.unpack('>I4s', atomdata[pos:pos + 8])
-                if ord(datatype[0]) == 169:
+                if _bord(datatype[0]) == 169:
                     # i18n Metadata...
                     mypos = 8 + pos
                     while mypos + 4 < datasize + pos:
@@ -237,25 +241,25 @@ class MPEG4(core.AVContainer):
                         (tlen, lang) = struct.unpack('>HH', atomdata[mypos:mypos + 4])
                         i18ntabl[lang] = i18ntabl.get(lang, {})
                         l = atomdata[mypos + 4:mypos + tlen + 4]
-                        i18ntabl[lang][datatype[1:]] = l
+                        i18ntabl[lang][datatype[1:].decode('latin-1')] = l
                         mypos += tlen + 4
-                elif datatype == 'WLOC':
+                elif datatype == b'WLOC':
                     # Drop Window Location
                     pass
                 else:
-                    if ord(atomdata[pos + 8:pos + datasize][0]) > 1:
-                        tabl[datatype] = atomdata[pos + 8:pos + datasize]
+                    if _bord(atomdata[pos + 8:pos + datasize][0]) > 1:
+                        tabl[datatype.decode('latin-1')] = atomdata[pos + 8:pos + datasize]
                 pos += datasize
             if len(i18ntabl.keys()) > 0:
                 for k in i18ntabl.keys():
-                    if QTLANGUAGES.has_key(k) and QTLANGUAGES[k] == 'en':
+                    if k in QTLANGUAGES and QTLANGUAGES[k] == 'en':
                         self._appendtable('QTUDTA', i18ntabl[k])
                         self._appendtable('QTUDTA', tabl)
             else:
                 log.debug(u'NO i18')
                 self._appendtable('QTUDTA', tabl)
 
-        elif atomtype == 'trak':
+        elif atomtype == b'trak':
             atomdata = file.read(atomsize - 8)
             pos = 0
             trackinfo = {}
@@ -263,7 +267,7 @@ class MPEG4(core.AVContainer):
             while pos < atomsize - 8:
                 (datasize, datatype) = struct.unpack('>I4s', atomdata[pos:pos + 8])
 
-                if datatype == 'tkhd':
+                if datatype == b'tkhd':
                     tkhd = struct.unpack('>6I8x4H36xII', atomdata[pos + 8:pos + datasize])
                     trackinfo['width'] = tkhd[10] >> 16
                     trackinfo['height'] = tkhd[11] >> 16
@@ -274,10 +278,10 @@ class MPEG4(core.AVContainer):
                         # XXX 2082844800 is the difference between Unix and
                         # XXX Apple time. FIXME to work on Apple, too
                         self.timestamp = int(tkhd[1]) - 2082844800
-                    except Exception, e:
+                    except Exception as e:
                         log.exception(u'There was trouble extracting timestamp')
 
-                elif datatype == 'mdia':
+                elif datatype == b'mdia':
                     pos += 8
                     datasize -= 8
                     log.debug(u'--> mdia information')
@@ -288,10 +292,10 @@ class MPEG4(core.AVContainer):
                         if mdia[0] == 0:
                             break
 
-                        if mdia[1] == 'mdhd':
+                        if mdia[1] == b'mdhd':
                             # Parse based on version of mdhd header.  See
                             # http://wiki.multimedia.cx/index.php?title=QuickTime_container#mdhd
-                            ver = ord(atomdata[pos + 8])
+                            ver = _bord(atomdata[pos + 8])
                             if ver == 0:
                                 mdhd = struct.unpack('>IIIIIhh', atomdata[pos + 8:pos + 8 + 24])
                             elif ver == 1:
@@ -306,33 +310,33 @@ class MPEG4(core.AVContainer):
                                     trackinfo['language'] = QTLANGUAGES[mdhd[5]]
                                 # mdhd[6] == quality
                                 self.length = max(self.length, mdhd[4] / mdhd[3])
-                        elif mdia[1] == 'minf':
+                        elif mdia[1] == b'minf':
                             # minf has only atoms inside
                             pos -= (mdia[0] - 8)
                             datasize += (mdia[0] - 8)
-                        elif mdia[1] == 'stbl':
+                        elif mdia[1] == b'stbl':
                             # stbl has only atoms inside
                             pos -= (mdia[0] - 8)
                             datasize += (mdia[0] - 8)
-                        elif mdia[1] == 'hdlr':
+                        elif mdia[1] == b'hdlr':
                             hdlr = struct.unpack('>I4s4s', atomdata[pos + 8:pos + 8 + 12])
-                            if hdlr[1] == 'mhlr':
-                                if hdlr[2] == 'vide':
+                            if hdlr[1] == b'mhlr':
+                                if hdlr[2] == b'vide':
                                     tracktype = 'video'
-                                if hdlr[2] == 'soun':
+                                if hdlr[2] == b'soun':
                                     tracktype = 'audio'
-                        elif mdia[1] == 'stsd':
+                        elif mdia[1] == b'stsd':
                             stsd = struct.unpack('>2I', atomdata[pos + 8:pos + 8 + 8])
                             if stsd[1] > 0:
                                 codec = atomdata[pos + 16:pos + 16 + 8]
                                 codec = struct.unpack('>I4s', codec)
-                                trackinfo['codec'] = codec[1]
-                                if codec[1] == 'jpeg':
+                                trackinfo['codec'] = codec[1].decode('latin-1') if isinstance(codec[1], bytes) else codec[1]
+                                if codec[1] == b'jpeg':
                                     tracktype = 'image'
-                        elif mdia[1] == 'dinf':
+                        elif mdia[1] == b'dinf':
                             dref = struct.unpack('>I4s', atomdata[pos + 8:pos + 8 + 8])
                             log.debug(u'  --> %r, %r (useless)' % mdia)
-                            if dref[1] == 'dref':
+                            if dref[1] == b'dref':
                                 num = struct.unpack('>I', atomdata[pos + 20:pos + 20 + 4])[0]
                                 rpos = pos + 20 + 4
                                 for ref in range(num):
@@ -341,12 +345,12 @@ class MPEG4(core.AVContainer):
                                     data = atomdata[rpos + 7:rpos + ref[0]]
                                     rpos += ref[0]
                         else:
-                            if mdia[1].startswith('st'):
+                            if mdia[1].startswith(b'st'):
                                 log.debug(u'  --> %r, %r (sample)' % mdia)
-                            elif mdia[1] == 'vmhd' and not tracktype:
+                            elif mdia[1] == b'vmhd' and not tracktype:
                                 # indicates that this track is video
                                 tracktype = 'video'
-                            elif mdia[1] in ['vmhd', 'smhd'] and not tracktype:
+                            elif mdia[1] in [b'vmhd', b'smhd'] and not tracktype:
                                 # indicates that this track is audio
                                 tracktype = 'audio'
                             else:
@@ -355,10 +359,10 @@ class MPEG4(core.AVContainer):
                         pos += mdia[0]
                         datasize -= mdia[0]
 
-                elif datatype == 'udta':
+                elif datatype == b'udta':
                     log.debug(u'udta: %r' % struct.unpack('>I4s', atomdata[:8]))
                 else:
-                    if datatype == 'edts':
+                    if datatype == b'edts':
                         log.debug(u'--> %r [%d] (edit list)' % \
                                   (datatype, datasize))
                     else:
@@ -377,7 +381,7 @@ class MPEG4(core.AVContainer):
                 for key, value in trackinfo.items():
                     setattr(info, key, value)
 
-        elif atomtype == 'mvhd':
+        elif atomtype == b'mvhd':
             # movie header
             mvhd = struct.unpack('>6I2h', file.read(28))
             self.length = max(self.length, mvhd[4] / mvhd[3])
@@ -385,30 +389,30 @@ class MPEG4(core.AVContainer):
             file.seek(atomsize - 8 - 28, 1)
 
 
-        elif atomtype == 'cmov':
+        elif atomtype == b'cmov':
             # compressed movie
             datasize, atomtype = struct.unpack('>I4s', file.read(8))
-            if not atomtype == 'dcom':
+            if not atomtype == b'dcom':
                 return atomsize
 
             method = struct.unpack('>4s', file.read(datasize - 8))[0]
 
             datasize, atomtype = struct.unpack('>I4s', file.read(8))
-            if not atomtype == 'cmvd':
+            if not atomtype == b'cmvd':
                 return atomsize
 
-            if method == 'zlib':
+            if method == b'zlib':
                 data = file.read(datasize - 8)
                 try:
                     decompressed = zlib.decompress(data)
-                except Exception, e:
+                except Exception as e:
                     try:
                         decompressed = zlib.decompress(data[4:])
-                    except Exception, e:
+                    except Exception as e:
                         log.exception(u'There was a proble decompressiong atom')
                         return atomsize
 
-                decompressedIO = StringIO.StringIO(decompressed)
+                decompressedIO = io.BytesIO(decompressed)
                 while self._readatom(decompressedIO):
                     pass
 
@@ -417,12 +421,12 @@ class MPEG4(core.AVContainer):
                 # unknown compression method
                 file.seek(datasize - 8, 1)
 
-        elif atomtype == 'moov':
+        elif atomtype == b'moov':
             # decompressed movie info
             while self._readatom(file):
                 pass
 
-        elif atomtype == 'mdat':
+        elif atomtype == b'mdat':
             pos = file.tell() + atomsize - 8
             # maybe there is data inside the mdat
             log.info(u'parsing mdat')
@@ -432,30 +436,30 @@ class MPEG4(core.AVContainer):
             file.seek(pos, 0)
 
 
-        elif atomtype == 'rmra':
+        elif atomtype == b'rmra':
             # reference list
             while self._readatom(file):
                 pass
 
-        elif atomtype == 'rmda':
+        elif atomtype == b'rmda':
             # reference
             atomdata = file.read(atomsize - 8)
             pos = 0
-            url = ''
+            url = b''
             quality = 0
             datarate = 0
             while pos < atomsize - 8:
                 (datasize, datatype) = struct.unpack('>I4s', atomdata[pos:pos + 8])
-                if datatype == 'rdrf':
+                if datatype == b'rdrf':
                     rflags, rtype, rlen = struct.unpack('>I4sI', atomdata[pos + 8:pos + 20])
-                    if rtype == 'url ':
+                    if rtype == b'url ':
                         url = atomdata[pos + 20:pos + 20 + rlen]
-                        if url.find('\0') > 0:
-                            url = url[:url.find('\0')]
-                elif datatype == 'rmqu':
+                        if url.find(b'\0') > 0:
+                            url = url[:url.find(b'\0')]
+                elif datatype == b'rmqu':
                     quality = struct.unpack('>I', atomdata[pos + 8:pos + 12])[0]
 
-                elif datatype == 'rmdr':
+                elif datatype == b'rmdr':
                     datarate = struct.unpack('>I', atomdata[pos + 12:pos + 16])[0]
 
                 pos += datasize
@@ -463,7 +467,7 @@ class MPEG4(core.AVContainer):
                 self._references.append((url, quality, datarate))
 
         else:
-            if not atomtype in ['wide', 'free']:
+            if not atomtype in [b'wide', b'free']:
                 log.info(u'unhandled base atom %r' % atomtype)
 
             # Skip unknown atoms

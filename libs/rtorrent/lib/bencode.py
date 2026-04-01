@@ -36,14 +36,7 @@
 #
 # 2011-04-03  - Original release
 
-import sys
-
-_py3 = sys.version_info[0] == 3
-
-if _py3:
-    _VALID_STRING_TYPES = (str,)
-else:
-    _VALID_STRING_TYPES = (str, unicode)  # @UndefinedVariable
+_VALID_STRING_TYPES = (str,)
 
 _TYPE_INT = 1
 _TYPE_STRING = 2
@@ -86,14 +79,9 @@ def _gettype(char):
 
 def _decode_string(data):
     end = 1
-    # if py3, data[end] is going to be an int
-    # if py2, data[end] will be a string
-    if _py3:
-        char = 0x3A
-    else:
-        char = chr(0x3A)
+    char = 0x3A  # ':'
 
-    while data[end] != char:  # ':'
+    while data[end] != char:
         end = end + 1
     strlen = int(data[:end])
     return (data[end + 1:strlen + end + 1], data[strlen + end + 1:])
@@ -109,12 +97,7 @@ def _decode_string(data):
 
 def _decode_int(data):
     end = 1
-    # if py3, data[end] is going to be an int
-    # if py2, data[end] will be a string
-    if _py3:
-        char = 0x65
-    else:
-        char = chr(0x65)
+    char = 0x65  # 'e'
 
     while data[end] != char:	 # 'e'
         end = end + 1
@@ -137,7 +120,7 @@ def _decode_list(data):
             return (x, overflow[1:])  # and return the list and overflow
 
         value, overflow = _decode(overflow)			 #
-        if isinstance(value, bool) or overflow == '':   # - if we have a parse error
+        if isinstance(value, bool) or overflow == b'':  # - if we have a parse error
             return (False, False)  # Die with error
         else:										   # - Otherwise
             x.append(value)  # add the value to the list
@@ -157,10 +140,10 @@ def _decode_dict(data):
         if _gettype(overflow[0]) != _TYPE_STRING:	   # - If the key is not a string
             return (False, False)  # Die with error
         key, overflow = _decode(overflow)			   #
-        if key == False or overflow == '':			  # - If parse error
+        if key == False or overflow == b'':			 # - If parse error
             return (False, False)  # Die with error
         value, overflow = _decode(overflow)			 #
-        if isinstance(value, bool) or overflow == '':   # - If parse error
+        if isinstance(value, bool) or overflow == b'':  # - If parse error
             print("Error parsing value")
             print(value)
             print(overflow)
@@ -267,7 +250,7 @@ def _encode_dict(data):
 def encode(data):
     if isinstance(data, bool):
         return False
-    elif isinstance(data, (int, long)):
+    elif isinstance(data, int):
         return _encode_int(data)
     elif isinstance(data, bytes):
         return _encode_string(data)

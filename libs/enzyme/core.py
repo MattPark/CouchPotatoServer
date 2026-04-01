@@ -19,10 +19,15 @@
 # You should have received a copy of the GNU General Public License
 # along with enzyme.  If not, see <http://www.gnu.org/licenses/>.
 import re
+import sys
 import logging
-import fourcc
-import language
-from strutils import str_to_unicode, unicode_to_str
+from . import fourcc
+from . import language
+from .strutils import str_to_unicode, unicode_to_str
+
+if sys.version_info[0] >= 3:
+    unicode = str
+    basestring = str
 
 UNPRINTABLE_KEYS = ['thumbnail', 'url', 'codec_private']
 MEDIACORE = ['title', 'caption', 'comment', 'size', 'type', 'subtype', 'timestamp',
@@ -149,6 +154,8 @@ class Media(object):
         return result
 
     def __str__(self):
+        if sys.version_info[0] >= 3:
+            return self.__unicode__()
         return unicode(self).encode()
 
     def __repr__(self):

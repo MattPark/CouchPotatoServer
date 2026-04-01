@@ -26,11 +26,11 @@ def XMLescape(txt):
 
 ENCODING='utf-8'
 def ustr(what):
-    """Converts object "what" to unicode string using it's own __str__ method if accessible or unicode method otherwise."""
-    if isinstance(what, unicode): return what
+    """Converts object "what" to string using it's own __str__ method if accessible or str method otherwise."""
+    if isinstance(what, str): return what
     try: r=what.__str__()
     except AttributeError: r=str(what)
-    if not isinstance(r, unicode): return unicode(r,ENCODING)
+    if not isinstance(r, str): return str(r,ENCODING)
     return r
 
 class Node(object):
@@ -90,7 +90,7 @@ class Node(object):
                     self.namespace,self.name = tag.split()
                 else:
                     self.name = tag
-        if isinstance(payload, basestring): payload=[payload]
+        if isinstance(payload, str): payload=[payload]
         for i in payload:
             if isinstance(i, Node): self.addChild(node=i)
             else: self.data.append(ustr(i))
@@ -271,7 +271,7 @@ class Node(object):
     def setPayload(self,payload,add=0):
         """ Sets node payload according to the list specified. WARNING: completely replaces all node's
             previous content. If you wish just to add child or CDATA - use addData or addChild methods. """
-        if isinstance(payload, basestring): payload=[payload]
+        if isinstance(payload, str): payload=[payload]
         if add: self.kids+=payload
         else: self.kids=payload
     def setTag(self, name, attrs={}, namespace=None):
@@ -383,7 +383,7 @@ class NodeBuilder:
         """XML Parser callback. Used internally"""
         self.check_data_buffer()
         self._inc_depth()
-        self.DEBUG(DBG_NODEBUILDER, "DEPTH -> %i , tag -> %s, attrs -> %s" % (self.__depth, tag, `attrs`), 'down')
+        self.DEBUG(DBG_NODEBUILDER, "DEPTH -> %i , tag -> %s, attrs -> %s" % (self.__depth, tag, repr(attrs)), 'down')
         if self.__depth == self._dispatch_depth:
             if not self._mini_dom :
                 self._mini_dom = Node(tag=tag, attrs=attrs, nsp = self._document_nsp, node_built=True)
@@ -407,7 +407,7 @@ class NodeBuilder:
             ns = self._document_nsp.get(nsp, 'http://www.gajim.org/xmlns/undeclared-root')
             try:
                 self.stream_header_received(ns, name, attrs)
-            except ValueError, e:
+            except ValueError as e:
                 self._document_attrs = None
                 raise ValueError(str(e))
         if not self.last_is_data and self._ptr.parent:

@@ -18,11 +18,14 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with enzyme.  If not, see <http://www.gnu.org/licenses/>.
-from exceptions import ParseError
-import core
+from .exceptions import ParseError
+from . import core
 import logging
-import string
 import struct
+import sys
+
+if sys.version_info[0] >= 3:
+    unicode = str
 
 
 __all__ = ['Parser']
@@ -33,12 +36,10 @@ log = logging.getLogger(__name__)
 
 def _guid(input):
     # Remove any '-'
-    s = string.join(string.split(input, '-'), '')
-    r = ''
+    s = ''.join(input.split('-'))
     if len(s) != 32:
-        return ''
-    for i in range(0, 16):
-        r += chr(int(s[2 * i:2 * i + 2], 16))
+        return b''
+    r = bytes(int(s[2 * i:2 * i + 2], 16) for i in range(16))
     guid = struct.unpack('>IHHBB6s', r)
     return guid
 
@@ -243,7 +244,7 @@ class Asf(core.AVContainer):
             if streamtype == GUIDS['ASF_Video_Media']:
                 vi = core.VideoStream()
                 vi.width, vi.height, depth, codec, = struct.unpack('<4xII2xH4s', s[89:89 + 20])
-                vi.codec = codec
+                vi.codec = codec.decode('latin-1') if isinstance(codec, bytes) else codec
                 vi.id = strno
                 self.video.append(vi)
             elif streamtype == GUIDS['ASF_Audio_Media']:
@@ -291,7 +292,9 @@ class Asf(core.AVContainer):
             pos = 34
             strings = []
             for i in val:
-                ss = s[pos:pos + i].replace('\0', '').lstrip().rstrip()
+                ss = s[pos:pos + i].replace(b'\0', b'').lstrip().rstrip()
+                if isinstance(ss, bytes):
+                    ss = ss.decode('utf-8', 'replace')
                 strings.append(ss)
                 pos += i
 
@@ -334,7 +337,8 @@ class Asf(core.AVContainer):
             for i in range(0, count):
                 idlen = struct.unpack('<B', s[pos:pos + 1])[0]
                 idstring = s[pos + 1:pos + 1 + idlen]
-                idstring = unicode(idstring, 'utf-16').replace('\0', '')
+                idstring = idstring.decode('utf-16') if isinstance(idstring, bytes) else idstring
+                idstring = idstring.replace('\0', '')
                 log.debug(u'Language: %d/%d: %r' % (i + 1, count, idstring))
                 self._languages.append(idstring)
                 pos += 1 + idlen

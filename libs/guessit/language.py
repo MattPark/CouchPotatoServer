@@ -172,8 +172,8 @@ class Language(UnicodeMixin):
     'pob'
     """
 
-    _with_country_regexp = re.compile('(.*)\((.*)\)')
-    _with_country_regexp2 = re.compile('(.*)-(.*)')
+    _with_country_regexp = re.compile(r'(.*)\((.*)\)')
+    _with_country_regexp2 = re.compile(r'(.*)-(.*)')
 
     def __init__(self, language, country=None, strict=False, scheme=None):
         language = u(language.strip().lower())

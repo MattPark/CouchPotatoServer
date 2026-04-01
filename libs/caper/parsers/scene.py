@@ -22,14 +22,14 @@ PATTERN_GROUPS = [
     ('identifier', [
         (1.0, [
             # S01E01-E02
-            ('^S(?P<season>\d+)E(?P<episode_from>\d+)$', '^E(?P<episode_to>\d+)$'),
+            (r'^S(?P<season>\d+)E(?P<episode_from>\d+)$', r'^E(?P<episode_to>\d+)$'),
             # 'S03 E01 to E08' or 'S03 E01 - E09'
-            ('^S(?P<season>\d+)$', '^E(?P<episode_from>\d+)$', '^(to|-)$', '^E(?P<episode_to>\d+)$'),
+            (r'^S(?P<season>\d+)$', r'^E(?P<episode_from>\d+)$', '^(to|-)$', r'^E(?P<episode_to>\d+)$'),
             # 'E01 to E08' or 'E01 - E09'
-            ('^E(?P<episode_from>\d+)$', '^(to|-)$', '^E(?P<episode_to>\d+)$'),
+            (r'^E(?P<episode_from>\d+)$', '^(to|-)$', r'^E(?P<episode_to>\d+)$'),
 
             # S01-S03
-            ('^S(?P<season_from>\d+)$', '^S(?P<season_to>\d+)$'),
+            (r'^S(?P<season_from>\d+)$', r'^S(?P<season_to>\d+)$'),
 
             # S02E13
             r'^S(?P<season>\d+)E(?P<episode>\d+)$',
@@ -60,7 +60,7 @@ PATTERN_GROUPS = [
 
             # Part.3
             # Part.1.and.Part.3
-            ('^Part$', '(?P<part>\d+)'),
+            ('^Part$', r'(?P<part>\d+)'),
 
             r'(?P<extra>Special)',
             r'(?P<country>NZ|AU|US|UK)'

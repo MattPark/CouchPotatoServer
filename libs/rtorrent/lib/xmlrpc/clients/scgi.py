@@ -81,8 +81,8 @@
 # ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
 # OF THIS SOFTWARE.
 
-import urllib
-import xmlrpclib
+import xmlrpc.client as xmlrpclib
+from urllib.parse import urlsplit
 
 from rtorrent.lib.xmlrpc.transports.scgi import SCGITransport
 
@@ -90,12 +90,14 @@ from rtorrent.lib.xmlrpc.transports.scgi import SCGITransport
 class SCGIServerProxy(xmlrpclib.ServerProxy):
     def __init__(self, uri, transport=None, encoding=None, verbose=False,
                  allow_none=False, use_datetime=False):
-        type, uri = urllib.splittype(uri)
-        if type not in ('scgi'):
+        parsed = urlsplit(uri)
+        type = parsed.scheme
+        if type not in ('scgi',):
             raise IOError('unsupported XML-RPC protocol')
-        self.__host, self.__handler = urllib.splithost(uri)
-        if not self.__handler:
-            self.__handler = '/'
+        self.__host = parsed.hostname
+        if parsed.port:
+            self.__host = '%s:%s' % (parsed.hostname, parsed.port)
+        self.__handler = parsed.path or '/'
 
         if transport is None:
             transport = SCGITransport(use_datetime=use_datetime)

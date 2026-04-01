@@ -20,11 +20,19 @@
 # You should have received a copy of the GNU General Public License
 # along with enzyme.  If not, see <http://www.gnu.org/licenses/>.
 from datetime import datetime
-from exceptions import ParseError
+from .exceptions import ParseError
 from struct import unpack
-import core
+from . import core
 import logging
 import re
+import sys
+
+if sys.version_info[0] >= 3:
+    unicode = str
+
+def _bord(x):
+    """Return byte value as int, compatible with both Python 2 and 3."""
+    return x if isinstance(x, int) else ord(x)
 
 __all__ = ['Parser']
 
@@ -163,7 +171,7 @@ def matroska_bps_to_bitrate(bps):
     """
     Tries to convert a free-form bps string into a bitrate (bits per second).
     """
-    m = re.search('([\d.]+)\s*(\D.*)', bps)
+    m = re.search(r'([\d.]+)\s*(\D.*)', bps)
     if m:
         bps, suffix = m.groups()
         if 'kbit' in suffix:
@@ -248,7 +256,7 @@ class EbmlEntity:
         self.value = 0
         if self.entity_len <= 8:
             for pos, shift in zip(range(self.entity_len), range((self.entity_len - 1) * 8, -1, -8)):
-                self.value |= ord(self.entity_data[pos]) << shift
+                self.value |= _bord(self.entity_data[pos]) << shift
 
 
     def add_data(self, data):
@@ -263,7 +271,7 @@ class EbmlEntity:
         self.id_len = 0
         if len(inbuf) < 1:
             return 0
-        first = ord(inbuf[0])
+        first = _bord(inbuf[0])
         if first & 0x80:
             self.id_len = 1
             self.entity_id = first
@@ -271,19 +279,19 @@ class EbmlEntity:
             if len(inbuf) < 2:
                 return 0
             self.id_len = 2
-            self.entity_id = ord(inbuf[0]) << 8 | ord(inbuf[1])
+            self.entity_id = _bord(inbuf[0]) << 8 | _bord(inbuf[1])
         elif first & 0x20:
             if len(inbuf) < 3:
                 return 0
             self.id_len = 3
-            self.entity_id = (ord(inbuf[0]) << 16) | (ord(inbuf[1]) << 8) | \
-                             (ord(inbuf[2]))
+            self.entity_id = (_bord(inbuf[0]) << 16) | (_bord(inbuf[1]) << 8) | \
+                             (_bord(inbuf[2]))
         elif first & 0x10:
             if len(inbuf) < 4:
                 return 0
             self.id_len = 4
-            self.entity_id = (ord(inbuf[0]) << 24) | (ord(inbuf[1]) << 16) | \
-                             (ord(inbuf[2]) << 8) | (ord(inbuf[3]))
+            self.entity_id = (_bord(inbuf[0]) << 24) | (_bord(inbuf[1]) << 16) | \
+                             (_bord(inbuf[2]) << 8) | (_bord(inbuf[3]))
         self.entity_str = inbuf[0:self.id_len]
 
 
@@ -292,7 +300,7 @@ class EbmlEntity:
             return 0, 0
         i = num_ffs = 0
         len_mask = 0x80
-        len = ord(inbuf[0])
+        len = _bord(inbuf[0])
         while not len & len_mask:
             i += 1
             len_mask >>= 1
@@ -303,7 +311,7 @@ class EbmlEntity:
         if len == len_mask - 1:
             num_ffs += 1
         for p in range(i):
-            len = (len << 8) | ord(inbuf[p + 1])
+            len = (len << 8) | _bord(inbuf[p + 1])
             if len & 0xff == 0xff:
                 num_ffs += 1
         if num_ffs == i + 1:
@@ -332,11 +340,15 @@ class EbmlEntity:
 
 
     def get_utf8(self):
-        return unicode(self.entity_data, 'utf-8', 'replace')
+        if isinstance(self.entity_data, bytes):
+            return self.entity_data.decode('utf-8', 'replace')
+        return self.entity_data
 
 
     def get_str(self):
-        return unicode(self.entity_data, 'ascii', 'replace')
+        if isinstance(self.entity_data, bytes):
+            return self.entity_data.decode('ascii', 'replace')
+        return self.entity_data
 
 
     def get_id(self):
@@ -704,6 +716,8 @@ class Matroska(core.AVContainer):
 
         # Right now we only support attachments that could be cover images.
         # Make a guess to see if this attachment is a cover image.
+        if isinstance(mimetype, bytes):
+            mimetype = mimetype.decode('ascii', 'replace')
         if mimetype.startswith("image/") and u"cover" in (name + desc).lower() and data:
             self.thumbnail = data
 
@@ -815,7 +829,7 @@ class Matroska(core.AVContainer):
             if filter:
                 try:
                     value = [filter(item) for item in value] if isinstance(value, list) else filter(value)
-                except Exception, e:
+                except Exception as e:
                     log.warning(u'Failed to convert tag to core attribute: %r', e)
             # Special handling for tv series recordings. The 'title' tag
             # can be used for both the series and the episode name. The

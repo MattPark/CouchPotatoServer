@@ -20,8 +20,8 @@ Note that this is just a transport for data. You have to negotiate data transfer
 (via StreamInitiation most probably). Unfortunately SI is not implemented yet.
 """
 
-from protocol import *
-from dispatcher import PlugIn
+from .protocol import *
+from .dispatcher import PlugIn
 import base64
 
 class IBB(PlugIn):
@@ -105,7 +105,7 @@ class IBB(PlugIn):
             elif stream['direction'][0]=='>':
                 chunk=stream['fp'].read(stream['block-size'])
                 if chunk:
-                    datanode=Node(NS_IBB+' data',{'sid':sid,'seq':stream['seq']},base64.encodestring(chunk))
+                    datanode=Node(NS_IBB+' data',{'sid':sid,'seq':stream['seq']},base64.b64encode(chunk).decode('utf-8'))
                     stream['seq']+=1
                     if stream['seq']==65536: stream['seq']=0
                     conn.send(Protocol('message',stream['direction'][1:],payload=[datanode,self._ampnode]))
@@ -140,14 +140,14 @@ class IBB(PlugIn):
         """
         sid,seq,data=stanza.getTagAttr('data','sid'),stanza.getTagAttr('data','seq'),stanza.getTagData('data')
         self.DEBUG('ReceiveHandler called sid->%s seq->%s'%(sid,seq),'info')
-        try: seq=int(seq); data=base64.decodestring(data)
+        try: seq=int(seq); data=base64.b64decode(data)
         except: seq=''; data=''
         err=None
         if not sid in self._streams.keys(): err=ERR_ITEM_NOT_FOUND
         else:
             stream=self._streams[sid]
             if not data: err=ERR_BAD_REQUEST
-            elif seq<>stream['seq']: err=ERR_UNEXPECTED_REQUEST
+            elif seq!=stream['seq']: err=ERR_UNEXPECTED_REQUEST
             else:
                 self.DEBUG('Successfull receive sid->%s %s+%s bytes'%(sid,stream['fp'].tell(),len(data)),'ok')
                 stream['seq']+=1

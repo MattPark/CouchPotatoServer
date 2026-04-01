@@ -18,16 +18,11 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-from rtorrent.compat import is_py3
+from urllib.request import urlopen
 import os.path
 import re
 import rtorrent.lib.bencode as bencode
 import hashlib
-
-if is_py3():
-    from urllib.request import urlopen  # @UnresolvedImport @UnusedImport
-else:
-    from urllib2 import urlopen  # @UnresolvedImport @Reimport
 
 
 class TorrentParser():
@@ -77,7 +72,7 @@ class TorrentParser():
             self.file_type = "file"
             self._raw_torrent = open(self.torrent, "rb").read()
         # url?
-        elif re.search("^(http|ftp):\/\/", self.torrent, re.I):
+        elif re.search(r"^(http|ftp):\/\/", self.torrent, re.I):
             self.file_type = "url"
             self._raw_torrent = urlopen(self.torrent).read()
 

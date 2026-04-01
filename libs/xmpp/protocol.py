@@ -19,7 +19,7 @@ Protocol module contains tools that is needed for processing of
 xmpp-related data structures.
 """
 
-from simplexml import Node,ustr
+from .simplexml import Node,ustr
 import time
 NS_ACTIVITY         ='http://jabber.org/protocol/activity'                  # XEP-0108
 NS_ADDRESS          ='http://jabber.org/protocol/address'                   # XEP-0033
@@ -340,7 +340,7 @@ class Protocol(Node):
         if not node and xmlns: self.setNamespace(xmlns)
         if self['to']: self.setTo(self['to'])
         if self['from']: self.setFrom(self['from'])
-        if node and type(self)==type(node) and self.__class__==node.__class__ and self.attrs.has_key('id'): del self.attrs['id']
+        if node and type(self)==type(node) and self.__class__==node.__class__ and 'id' in self.attrs: del self.attrs['id']
         self.timestamp=None
         for x in self.getTags('x',namespace=NS_DELAY):
             try:
@@ -381,7 +381,7 @@ class Protocol(Node):
         errtag=self.getTag('error')
         if errtag:
             for tag in errtag.getChildren():
-                if tag.getName()<>'text': return tag.getName()
+                if tag.getName()!='text': return tag.getName()
             return errtag.getData()
     def getErrorCode(self):
         """ Return the error code. Obsolette. """
@@ -391,7 +391,7 @@ class Protocol(Node):
         if code:
             if str(code) in _errorcodes.keys(): error=ErrorNode(_errorcodes[str(code)],text=error)
             else: error=ErrorNode(ERR_UNDEFINED_CONDITION,code=code,typ='cancel',text=error)
-        elif type(error) in [type(''),type(u'')]: error=ErrorNode(error)
+        elif type(error) in [type(''),str]: error=ErrorNode(error)
         self.setType('error')
         self.addChild(node=error)
     def setTimestamp(self,val=None):
@@ -555,7 +555,7 @@ class ErrorNode(Node):
         """ Create new error node object.
             Mandatory parameter: name - name of error condition.
             Optional parameters: code, typ, text. Used for backwards compartibility with older jabber protocol."""
-        if ERRORS.has_key(name):
+        if name in ERRORS:
             cod,type,txt=ERRORS[name]
             ns=name.split()[0]
         else: cod,ns,type,txt='500',NS_STANZAS,'cancel',''
@@ -653,7 +653,7 @@ class DataField(Node):
         for opt in lst: self.addOption(opt)
     def addOption(self,opt):
         """ Add one more label-option pair to this field."""
-        if type(opt) in [str,unicode]: self.addChild('option').setTagData('value',opt)
+        if type(opt) in [str]: self.addChild('option').setTagData('value',opt)
         else: self.addChild('option',{'label':opt[0]}).setTagData('value',opt[1])
     def getType(self):
         """ Get type of this field. """
@@ -704,7 +704,7 @@ class DataReported(Node):
         for field in self.getTags('field'):
             name=field.getAttr('var')
             typ=field.getType()
-            if isinstance(typ,(str,unicode)) and typ[-6:]=='-multi':
+            if isinstance(typ,str) and typ[-6:]=='-multi':
                 val=[]
                 for i in field.getTags('value'): val.append(i.getData())
             else: val=field.getTagData('value')
@@ -751,7 +751,7 @@ class DataItem(Node):
         for field in self.getTags('field'):
             name=field.getAttr('var')
             typ=field.getType()
-            if isinstance(typ,(str,unicode)) and typ[-6:]=='-multi':
+            if isinstance(typ,str) and typ[-6:]=='-multi':
                 val=[]
                 for i in field.getTags('value'): val.append(i.getData())
             else: val=field.getTagData('value')
@@ -803,7 +803,7 @@ class DataForm(Node):
             for name in data.keys(): newdata.append(DataField(name,data[name]))
             data=newdata
         for child in data:
-            if type(child) in [type(''),type(u'')]: self.addInstructions(child)
+            if type(child) in [type(''),str]: self.addInstructions(child)
             elif child.__class__.__name__=='DataField': self.kids.append(child)
             elif child.__class__.__name__=='DataItem': self.kids.append(child)
             elif child.__class__.__name__=='DataReported': self.kids.append(child)
@@ -843,7 +843,7 @@ class DataForm(Node):
         for field in self.getTags('field'):
             name=field.getAttr('var')
             typ=field.getType()
-            if isinstance(typ,(str,unicode)) and typ[-6:]=='-multi':
+            if isinstance(typ,str) and typ[-6:]=='-multi':
                 val=[]
                 for i in field.getTags('value'): val.append(i.getData())
             else: val=field.getTagData('value')

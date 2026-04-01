@@ -20,6 +20,12 @@
 import string
 import re
 import struct
+import sys
+
+if sys.version_info[0] >= 3:
+    unicode = str
+    basestring = str
+    long = int
 
 __all__ = ['resolve']
 
@@ -43,7 +49,8 @@ def resolve(code):
             # Twocc in decimal form
             return hex(int(code)), TWOCC.get(int(code), codec)
         elif len(code) == 2:
-            code = struct.unpack('H', code)[0]
+            code_bytes = code.encode('latin-1') if isinstance(code, str) else code
+            code = struct.unpack('H', code_bytes)[0]
             return hex(code), TWOCC.get(code, codec)
         elif len(code) != 4 and len([x for x in code if x not in string.printable]) == 0:
             # Code is a printable string.
@@ -845,7 +852,7 @@ FOURCC = {
 }
 
 # make it fool prove
-for code, value in FOURCC.items():
+for code, value in list(FOURCC.items()):
     if not code.upper() in FOURCC:
         FOURCC[code.upper()] = value
     if code.endswith(' '):

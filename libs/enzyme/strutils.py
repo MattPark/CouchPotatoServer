@@ -21,6 +21,10 @@
 __all__ = ['ENCODING', 'str_to_unicode', 'unicode_to_str']
 
 import locale
+import sys
+
+if sys.version_info[0] >= 3:
+    unicode = str
 
 # find the correct encoding
 try:
@@ -39,31 +43,29 @@ def str_to_unicode(s, encoding=None):
     charset, replacing unknown characters. If the given object is no
     string, this function will return the given object.
     """
-    if not type(s) == str:
-        return s
+    if isinstance(s, bytes):
+        if not encoding:
+            encoding = ENCODING
+        for c in [encoding, "utf-8", "latin-1"]:
+            try:
+                return s.decode(c)
+            except (UnicodeDecodeError, LookupError):
+                pass
+        return s.decode(encoding, "replace")
 
-    if not encoding:
-        encoding = ENCODING
-
-    for c in [encoding, "utf-8", "latin-1"]:
-        try:
-            return s.decode(c)
-        except UnicodeDecodeError:
-            pass
-
-    return s.decode(encoding, "replace")
+    return s
 
 
 def unicode_to_str(s, encoding=None):
     """
     Attempts to convert a unicode string of unknown character set to a
-    string.  First it tries to encode the string based on the locale's
+    byte string.  First it tries to encode the string based on the locale's
     preferred encoding, and if that fails, fall back to UTF-8 and then
     latin-1.  If all fails, it will force encoding to the preferred
     charset, replacing unknown characters. If the given object is no
     unicode string, this function will return the given object.
     """
-    if not type(s) == unicode:
+    if not isinstance(s, str):
         return s
 
     if not encoding:
@@ -72,7 +74,7 @@ def unicode_to_str(s, encoding=None):
     for c in [encoding, "utf-8", "latin-1"]:
         try:
             return s.encode(c)
-        except UnicodeDecodeError:
+        except (UnicodeDecodeError, UnicodeEncodeError, LookupError):
             pass
 
     return s.encode(encoding, "replace")

@@ -22,8 +22,8 @@ __all__ = ['Parser']
 
 import struct
 import logging
-from exceptions import ParseError
-import core
+from .exceptions import ParseError
+from . import core
 
 # http://www.pcisys.net/~melanson/codecs/rmff.htm
 # http://www.pcisys.net/~melanson/codecs/
@@ -43,7 +43,7 @@ class RealVideo(core.AVContainer):
             # EOF.
             raise ParseError()
 
-        if not object_id == '.RMF':
+        if not object_id == b'.RMF':
             raise ParseError()
 
         file_version, num_headers = struct.unpack('>II', file.read(8))
@@ -57,12 +57,12 @@ class RealVideo(core.AVContainer):
                 # only partially complete.
                 break
 
-            if object_id == 'DATA' and oi[0] != 'INDX':
+            if object_id == b'DATA' and oi[0] != b'INDX':
                 log.debug(u'INDX chunk expected after DATA but not found -- file corrupt')
                 break
 
             (object_id, object_size, object_version) = oi
-            if object_id == 'DATA':
+            if object_id == b'DATA':
                 # Seek over the data chunk rather than reading it in.
                 file.seek(object_size - 10, 1)
             else:
@@ -72,10 +72,10 @@ class RealVideo(core.AVContainer):
 
 
     def _read_header(self, object_id, s):
-        if object_id == 'PROP':
+        if object_id == b'PROP':
             prop = struct.unpack('>9IHH', s)
             log.debug(u'PROP: %r' % prop)
-        if object_id == 'MDPR':
+        if object_id == b'MDPR':
             mdpr = struct.unpack('>H7I', s[:30])
             log.debug(u'MDPR: %r' % mdpr)
             self.length = mdpr[7] / 1000.0
@@ -88,31 +88,31 @@ class RealVideo(core.AVContainer):
             (type_specific_len,) = struct.unpack('>I', s[pos:pos + 4])
             type_specific = s[pos + 4:pos + 4 + type_specific_len]
             pos += 4 + type_specific_len
-            if mime[:5] == 'audio':
+            if mime[:5] == b'audio':
                 ai = core.AudioStream()
                 ai.id = mdpr[0]
                 ai.bitrate = mdpr[2]
                 self.audio.append(ai)
-            elif mime[:5] == 'video':
+            elif mime[:5] == b'video':
                 vi = core.VideoStream()
                 vi.id = mdpr[0]
                 vi.bitrate = mdpr[2]
                 self.video.append(vi)
             else:
                 log.debug(u'Unknown: %r' % mime)
-        if object_id == 'CONT':
+        if object_id == b'CONT':
             pos = 0
             (title_len,) = struct.unpack('>H', s[pos:pos + 2])
-            self.title = s[2:title_len + 2]
+            self.title = s[2:title_len + 2].decode('latin-1', 'replace')
             pos += title_len + 2
             (author_len,) = struct.unpack('>H', s[pos:pos + 2])
-            self.artist = s[pos + 2:pos + author_len + 2]
+            self.artist = s[pos + 2:pos + author_len + 2].decode('latin-1', 'replace')
             pos += author_len + 2
             (copyright_len,) = struct.unpack('>H', s[pos:pos + 2])
-            self.copyright = s[pos + 2:pos + copyright_len + 2]
+            self.copyright = s[pos + 2:pos + copyright_len + 2].decode('latin-1', 'replace')
             pos += copyright_len + 2
             (comment_len,) = struct.unpack('>H', s[pos:pos + 2])
-            self.comment = s[pos + 2:pos + comment_len + 2]
+            self.comment = s[pos + 2:pos + comment_len + 2].decode('latin-1', 'replace')
 
 
 Parser = RealVideo

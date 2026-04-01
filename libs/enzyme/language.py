@@ -18,6 +18,10 @@
 # You should have received a copy of the GNU General Public License
 # along with enzyme.  If not, see <http://www.gnu.org/licenses/>.
 import re
+import sys
+
+if sys.version_info[0] >= 3:
+    basestring = str
 
 __all__ = ['resolve']
 

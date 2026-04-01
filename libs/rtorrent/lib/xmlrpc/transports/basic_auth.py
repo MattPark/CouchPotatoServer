@@ -21,8 +21,8 @@
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 from base64 import b64encode
-import httplib
-import xmlrpclib
+import http.client as httplib
+import xmlrpc.client as xmlrpclib
 
 
 class BasicAuthTransport(xmlrpclib.Transport):
@@ -38,7 +38,7 @@ class BasicAuthTransport(xmlrpclib.Transport):
         if not self.username or not self.password:
             return
 
-        auth = b64encode("%s:%s" % (self.username, self.password))
+        auth = b64encode(("%s:%s" % (self.username, self.password)).encode()).decode()
 
         h.putheader('Authorization', "Basic %s" % auth)
 
@@ -75,7 +75,7 @@ class BasicAuthTransport(xmlrpclib.Transport):
             self.send_auth(h)
             self.send_content(h, request_body)
 
-            response = h.getresponse(buffering=True)
+            response = h.getresponse()
             if response.status == 200:
                 self.verbose = verbose
                 return self.parse_response(response)

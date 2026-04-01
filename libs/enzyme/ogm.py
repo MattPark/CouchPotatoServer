@@ -25,8 +25,22 @@ import re
 import stat
 import os
 import logging
-from exceptions import ParseError
-import core
+import sys
+from .exceptions import ParseError
+from . import core
+
+if sys.version_info[0] >= 3:
+    unicode = str
+
+def _bord(x):
+    """Return byte value as int, compatible with both Python 2 and 3."""
+    return x if isinstance(x, int) else ord(x)
+
+def _to_str(x):
+    """Convert bytes to str for text comparisons."""
+    if isinstance(x, bytes):
+        return x.decode('latin-1')
+    return x
 
 # get logging object
 log = logging.getLogger(__name__)
@@ -87,7 +101,7 @@ class Ogm(core.AVContainer):
 
         # find last OggS to get length info
         if len(h) > 200:
-            idx = h.find('OggS')
+            idx = h.find(b'OggS')
             pos = -49000 + idx
             if idx:
                 file.seek(os.stat(file.name)[stat.ST_SIZE] + pos)
@@ -102,21 +116,21 @@ class Ogm(core.AVContainer):
 
                 # get meta info
                 for key in self.all_streams[i].keys():
-                    if self.all_header[i].has_key(key):
+                    if key in self.all_header[i]:
                         self.all_streams[i][key] = self.all_header[i][key]
                         del self.all_header[i][key]
-                    if self.all_header[i].has_key(key.upper()):
+                    if key.upper() in self.all_header[i]:
                         asi = self.all_header[i][key.upper()]
                         self.all_streams[i][key] = asi
                         del self.all_header[i][key.upper()]
 
                 # Chapter parser
-                if self.all_header[i].has_key('CHAPTER01') and \
+                if 'CHAPTER01' in self.all_header[i] and \
                        not self.chapters:
                     while 1:
                         s = 'CHAPTER%02d' % (len(self.chapters) + 1)
-                        if self.all_header[i].has_key(s) and \
-                               self.all_header[i].has_key(s + 'NAME'):
+                        if s in self.all_header[i] and \
+                               (s + 'NAME') in self.all_header[i]:
                             pos = self.all_header[i][s]
                             try:
                                 pos = int(pos)
@@ -153,11 +167,11 @@ class Ogm(core.AVContainer):
         elif len(h) < 27:
             log.debug(u'%d Bytes of Garbage found after End.' % len(h))
             return None, None
-        if h[:4] != "OggS":
+        if h[:4] != b"OggS":
             log.debug(u'Invalid Ogg')
             raise ParseError()
 
-        version = ord(h[4])
+        version = _bord(h[4])
         if version != 0:
             log.debug(u'Unsupported OGG/OGM Version %d' % version)
             return None, None
@@ -171,10 +185,10 @@ class Ogm(core.AVContainer):
         tab = file.read(pageSegCount)
         nextlen = 0
         for i in range(len(tab)):
-            nextlen += ord(tab[i])
+            nextlen += _bord(tab[i])
         else:
             h = file.read(1)
-            packettype = ord(h[0]) & PACKET_TYPE_BITS
+            packettype = _bord(h[0]) & PACKET_TYPE_BITS
             if packettype == PACKET_TYPE_HEADER:
                 h += file.read(nextlen - 1)
                 self._parseHeader(h, granulepos)
@@ -196,9 +210,9 @@ class Ogm(core.AVContainer):
 
 
     def _parseMeta(self, h):
-        flags = ord(h[0])
+        flags = _bord(h[0])
         headerlen = len(h)
-        if headerlen >= 7 and h[1:7] == 'vorbis':
+        if headerlen >= 7 and h[1:7] == b'vorbis':
             header = {}
             nextlen, self.encoder = self._extractHeaderString(h[7:])
             numItems = struct.unpack('<I', h[7 + nextlen:7 + nextlen + 4])[0]
@@ -217,9 +231,9 @@ class Ogm(core.AVContainer):
 
     def _parseHeader(self, header, granule):
         headerlen = len(header)
-        flags = ord(header[0])
+        flags = _bord(header[0])
 
-        if headerlen >= 30 and header[1:7] == 'vorbis':
+        if headerlen >= 30 and header[1:7] == b'vorbis':
             ai = core.AudioStream()
             ai.version, ai.channels, ai.samplerate, bitrate_max, ai.bitrate, \
                         bitrate_min, blocksize, framing = \
@@ -230,7 +244,7 @@ class Ogm(core.AVContainer):
             self.audio.append(ai)
             self.all_streams.append(ai)
 
-        elif headerlen >= 7 and header[1:7] == 'theora':
+        elif headerlen >= 7 and header[1:7] == b'theora':
             # Theora Header
             # XXX Finish Me
             vi = core.VideoStream()
@@ -239,7 +253,7 @@ class Ogm(core.AVContainer):
             self.all_streams.append(vi)
 
         elif headerlen >= 142 and \
-                 header[1:36] == 'Direct Show Samples embedded in Ogg':
+                 header[1:36] == b'Direct Show Samples embedded in Ogg':
             # Old Directshow format
             # XXX Finish Me
             vi = core.VideoStream()
@@ -252,7 +266,7 @@ class Ogm(core.AVContainer):
             # New Directshow Format
             htype = header[1:9]
 
-            if htype[:5] == 'video':
+            if htype[:5] == b'video':
                 sh = header[9:struct.calcsize(STREAM_HEADER_VIDEO) + 9]
                 streamheader = struct.unpack(STREAM_HEADER_VIDEO, sh)
                 vi = core.VideoStream()
@@ -262,12 +276,12 @@ class Ogm(core.AVContainer):
                 vi.width /= 65536
                 vi.height /= 65536
                 # XXX length, bitrate are very wrong
-                vi.codec = type
+                vi.codec = type.decode('latin-1') if isinstance(type, bytes) else type
                 vi.fps = 10000000 / timeunit
                 self.video.append(vi)
                 self.all_streams.append(vi)
 
-            elif htype[:5] == 'audio':
+            elif htype[:5] == b'audio':
                 sha = header[9:struct.calcsize(STREAM_HEADER_AUDIO) + 9]
                 streamheader = struct.unpack(STREAM_HEADER_AUDIO, sha)
                 ai = core.AudioStream()
@@ -278,7 +292,7 @@ class Ogm(core.AVContainer):
                 self.audio.append(ai)
                 self.all_streams.append(ai)
 
-            elif htype[:4] == 'text':
+            elif htype[:4] == b'text':
                 subtitle = core.Subtitle()
                 # FIXME: add more info
                 self.subtitles.append(subtitle)
@@ -291,7 +305,10 @@ class Ogm(core.AVContainer):
     def _extractHeaderString(self, header):
         len = struct.unpack('<I', header[:4])[0]
         try:
-            return (len + 4, unicode(header[4:4 + len], 'utf-8'))
+            data = header[4:4 + len]
+            if isinstance(data, bytes):
+                data = data.decode('utf-8')
+            return (len + 4, data)
         except (KeyError, IndexError, UnicodeDecodeError):
             return (len + 4, None)
 

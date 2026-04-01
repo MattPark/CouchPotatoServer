@@ -83,11 +83,10 @@
 
 
 import errno
-import httplib
+import http.client as httplib
 import re
 import socket
-import urllib
-import xmlrpclib
+import xmlrpc.client as xmlrpclib
 
 
 class SCGITransport(xmlrpclib.Transport):
@@ -97,7 +96,7 @@ class SCGITransport(xmlrpclib.Transport):
         for i in (0, 1):
             try:
                 return self.single_request(host, handler, request_body, verbose)
-            except socket.error, e:
+            except socket.error as e:
                 if i or e.errno not in (errno.ECONNRESET, errno.ECONNABORTED, errno.EPIPE):
                     raise
             except httplib.BadStatusLine: #close after we sent request
@@ -106,16 +105,21 @@ class SCGITransport(xmlrpclib.Transport):
 
     def single_request(self, host, handler, request_body, verbose=0):
         # Add SCGI headers to the request.
-        headers = {'CONTENT_LENGTH': str(len(request_body)), 'SCGI': '1'}
-        header = '\x00'.join(('%s\x00%s' % item for item in headers.iteritems())) + '\x00'
-        header = '%d:%s' % (len(header), header)
-        request_body = '%s,%s' % (header, request_body)
+        headers = {b'CONTENT_LENGTH': str(len(request_body)).encode(), b'SCGI': b'1'}
+        header = b'\x00'.join((b'%s\x00%s' % (k, v) for k, v in headers.items())) + b'\x00'
+        header = ('%d:' % len(header)).encode() + header
+        if isinstance(request_body, str):
+            request_body = request_body.encode()
+        request_body = header + b',' + request_body
 
         sock = None
 
         try:
             if host:
-                host, port = urllib.splitport(host)
+                if ':' in host:
+                    host, port = host.rsplit(':', 1)
+                else:
+                    port = host
                 addrinfo = socket.getaddrinfo(host, int(port), socket.AF_INET,
                                               socket.SOCK_STREAM)
                 sock = socket.socket(*addrinfo[0][:3])
@@ -135,7 +139,7 @@ class SCGITransport(xmlrpclib.Transport):
     def parse_response(self, response):
         p, u = self.getparser()
 
-        response_body = ''
+        response_body = b''
         while True:
             data = response.read(1024)
             if not data:
@@ -143,11 +147,12 @@ class SCGITransport(xmlrpclib.Transport):
             response_body += data
 
         # Remove SCGI headers from the response.
+        response_body = response_body.decode('utf-8', errors='replace')
         response_header, response_body = re.split(r'\n\s*?\n', response_body,
                                                   maxsplit=1)
 
         if self.verbose:
-            print 'body:', repr(response_body)
+            print('body:', repr(response_body))
 
         p.feed(response_body)
         p.close()

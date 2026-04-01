@@ -36,7 +36,7 @@ def get_varname(rpc_call):
     """
     # extract variable name from xmlrpc func name
     r = re.search(
-        "([ptdf]\.|system\.|get\_|is\_|set\_)+([^=]*)", rpc_call, re.I)
+        r"([ptdf]\.|system\.|get\_|is\_|set\_)+([^=]*)", rpc_call, re.I)
     if r:
         return(r.groups()[-1].replace(".","_"))
     else:

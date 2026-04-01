@@ -831,7 +831,7 @@ class Language(object):
         False
 
     """
-    with_country_regexps = [re.compile('(.*)\((.*)\)'), re.compile('(.*)[-_](.*)')]
+    with_country_regexps = [re.compile(r'(.*)\((.*)\)'), re.compile('(.*)[-_](.*)')]
 
     def __init__(self, language, country=None, languages=None, countries=None, strict=True):
         languages = languages or LANGUAGES

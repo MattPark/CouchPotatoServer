@@ -17,10 +17,10 @@
 # LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-import urllib
+import urllib.parse
 import os.path
 import time
-import xmlrpclib
+import xmlrpc.client as xmlrpclib
 
 from rtorrent.connection import Connection
 from rtorrent.common import find_torrent, join_uri, \
