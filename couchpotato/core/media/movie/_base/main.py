@@ -1,7 +1,7 @@
 import traceback
 import time
 
-from CodernityDB.database import RecordNotFound
+from couchpotato.core.db import RecordNotFound
 from couchpotato import get_db
 from couchpotato.api import addApiView
 from couchpotato.core.event import fireEvent, fireEventAsync, addEvent

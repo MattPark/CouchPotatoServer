@@ -3,7 +3,7 @@ import os
 import time
 import traceback
 
-from CodernityDB.database import RecordDeleted, RecordNotFound
+from couchpotato.core.db import RecordDeleted, RecordNotFound
 from couchpotato import md5, get_db
 from couchpotato.api import addApiView
 from couchpotato.core.event import fireEvent, addEvent

@@ -2,7 +2,7 @@ from math import fabs, ceil
 import traceback
 import re
 
-from CodernityDB.database import RecordNotFound
+from couchpotato.core.db import RecordNotFound
 from couchpotato import get_db
 from couchpotato.api import addApiView
 from couchpotato.core.event import addEvent, fireEvent

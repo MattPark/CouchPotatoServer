@@ -3,7 +3,7 @@ import time
 import traceback
 from string import ascii_lowercase
 
-from CodernityDB.database import RecordNotFound, RecordDeleted
+from couchpotato.core.db import RecordNotFound, RecordDeleted
 from couchpotato import tryInt, get_db
 from couchpotato.api import addApiView
 from couchpotato.core.event import fireEvent, fireEventAsync, addEvent

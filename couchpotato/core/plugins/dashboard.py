@@ -1,6 +1,6 @@
 import random as rndm
 import time
-from CodernityDB.database import RecordDeleted, RecordNotFound
+from couchpotato.core.db import RecordDeleted, RecordNotFound
 
 from couchpotato import get_db
 from couchpotato.api import addApiView

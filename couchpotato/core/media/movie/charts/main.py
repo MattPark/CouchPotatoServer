@@ -1,4 +1,4 @@
-from CodernityDB.database import RecordNotFound
+from couchpotato.core.db import RecordNotFound
 from couchpotato import Env, get_db
 from couchpotato.core.helpers.variable import getTitle, splitString
 
