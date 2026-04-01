@@ -1,8 +1,6 @@
 #!/usr/bin/with-contenv bash
 # shellcheck shell=bash
 
+# Create data directories (matches original linuxserver.io layout)
 mkdir -p /config/data/database
 chown -R abc:abc /config
-
-# Set environment variable so the app knows its data dir
-echo "/config" > /run/s6/container_environment/COUCHPOTATO_DATA

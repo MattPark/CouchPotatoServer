@@ -1,9 +1,13 @@
 #!/usr/bin/with-contenv bash
 # shellcheck shell=bash
 
+# Match the original linuxserver.io layout:
+#   config file at /config/config.ini
+#   runtime data at /config/data/ (database, logs, cache, etc.)
 exec \
   s6-setuidgid abc \
   python3 /app/couchpotato/CouchPotato.py \
-    --data_dir=/config \
-    --console_log \
-    
+    --config_file=/config/config.ini \
+    --data_dir=/config/data \
+    --console_log
+

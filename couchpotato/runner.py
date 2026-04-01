@@ -52,13 +52,6 @@ def getOptions(args):
 
     if not options.config_file:
         options.config_file = os.path.join(data_dir, 'settings.conf')
-        # Migrate from linuxserver.io layout: config.ini -> settings.conf
-        if not os.path.isfile(options.config_file):
-            alt_config = os.path.join(data_dir, 'config.ini')
-            if os.path.isfile(alt_config):
-                import shutil
-                shutil.copy2(alt_config, options.config_file)
-                logging.info('Copied %s -> %s (linuxserver.io migration)', alt_config, options.config_file)
 
     if not options.pid_file:
         options.pid_file = os.path.join(data_dir, 'couchpotato.pid')
@@ -100,7 +93,9 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
     db_path = sp(os.path.join(data_dir, 'database'))
 
     # Migrate CodernityDB -> TinyDB if old database detected
-    # Check both standard layout (data_dir/database/) and linuxserver.io layout (data_dir/data/database/)
+    # Check standard layout (data_dir/database/) first, then fall back to
+    # linuxserver.io nested layout (data_dir/data/database/) for non-Docker users
+    # who point --data_dir at the top-level /config instead of /config/data
     old_db_path = None
     if os.path.isfile(os.path.join(db_path, 'id_buck')):
         old_db_path = db_path
