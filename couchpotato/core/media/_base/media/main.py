@@ -11,7 +11,6 @@ from couchpotato.core.helpers.encoding import toUnicode
 from couchpotato.core.helpers.variable import splitString, getImdb, getTitle
 from couchpotato.core.logger import CPLog
 from couchpotato.core.media import MediaBase
-from .index import MediaIndex, MediaStatusIndex, MediaTypeIndex, TitleSearchIndex, TitleIndex, StartsWithIndex, MediaChildrenIndex, MediaTagIndex
 
 
 log = CPLog(__name__)
@@ -19,16 +18,7 @@ log = CPLog(__name__)
 
 class MediaPlugin(MediaBase):
 
-    _database = {
-        'media': MediaIndex,
-        'media_search_title': TitleSearchIndex,
-        'media_status': MediaStatusIndex,
-        'media_tag': MediaTagIndex,
-        'media_by_type': MediaTypeIndex,
-        'media_title': TitleIndex,
-        'media_startswith': StartsWithIndex,
-        'media_children': MediaChildrenIndex,
-    }
+    _database = {}
 
     def __init__(self):
 

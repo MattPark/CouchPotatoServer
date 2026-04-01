@@ -6,7 +6,6 @@ from couchpotato.core.event import addEvent, fireEvent
 from couchpotato.core.helpers.encoding import toUnicode
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
-from .index import ProfileIndex
 
 
 log = CPLog(__name__)
@@ -14,9 +13,7 @@ log = CPLog(__name__)
 
 class ProfilePlugin(Plugin):
 
-    _database = {
-        'profile': ProfileIndex
-    }
+    _database = {}
 
     def __init__(self):
         addEvent('profile.all', self.all)

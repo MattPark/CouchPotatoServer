@@ -3,7 +3,6 @@ import configparser
 import traceback
 from hashlib import md5
 
-from CodernityDB.hash_index import HashIndex
 from couchpotato.api import addApiView
 from couchpotato.core.event import addEvent, fireEvent
 from couchpotato.core.helpers.encoding import toUnicode
@@ -72,7 +71,7 @@ class Settings(object):
         self.connectEvents()
 
     def databaseSetup(self):
-        fireEvent('database.setup_index', 'property', PropertyIndex)
+        pass
 
     def parser(self):
         return self.p
@@ -446,16 +445,3 @@ class Settings(object):
             })
 
 
-class PropertyIndex(HashIndex):
-    _version = 1
-
-    def __init__(self, *args, **kwargs):
-        kwargs['key_format'] = '32s'
-        super(PropertyIndex, self).__init__(*args, **kwargs)
-
-    def make_key(self, key):
-        return md5(key).hexdigest()
-
-    def make_key_value(self, data):
-        if data.get('_t') == 'property':
-            return md5(data['identifier']).hexdigest(), None

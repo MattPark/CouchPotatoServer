@@ -6,7 +6,6 @@ from couchpotato.core.event import addEvent
 from couchpotato.core.helpers.encoding import toUnicode
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
-from .index import CategoryIndex, CategoryMediaIndex
 
 
 log = CPLog(__name__)
@@ -14,10 +13,7 @@ log = CPLog(__name__)
 
 class CategoryPlugin(Plugin):
 
-    _database = {
-        'category': CategoryIndex,
-        'category_media': CategoryMediaIndex,
-    }
+    _database = {}
 
     def __init__(self):
         addApiView('category.save', self.save)

@@ -10,7 +10,6 @@ from couchpotato.core.helpers.encoding import toUnicode, ss
 from couchpotato.core.helpers.variable import mergeDicts, getExt, tryInt, splitString, tryFloat
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
-from couchpotato.core.plugins.quality.index import QualityIndex
 
 
 log = CPLog(__name__)
@@ -18,9 +17,7 @@ log = CPLog(__name__)
 
 class QualityPlugin(Plugin):
 
-    _database = {
-        'quality': QualityIndex
-    }
+    _database = {}
 
     qualities = [
 		{'identifier': '2160p', 'hd': True, 'allow_3d': True, 'size': (10000, 650000), 'median_size': 20000, 'label': '2160p', 'width': 3840, 'height': 2160, 'alternative': [], 'allow': [], 'ext':['mkv'], 'tags': ['x264', 'h264', '2160']},

@@ -20,8 +20,8 @@ def toSafeString(original):
 
 def simplifyString(original):
     string = stripAccents(original.lower())
-    string = toSafeString(' '.join(re.split('\W+', string)))
-    split = re.split('\W+|_', string.lower())
+    string = toSafeString(' '.join(re.split(r'\W+', string)))
+    split = re.split(r'\W+|_', string.lower())
     return toUnicode(' '.join(split))
 
 

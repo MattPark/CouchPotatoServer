@@ -11,7 +11,6 @@ from couchpotato.core.helpers.encoding import toUnicode, sp
 from couchpotato.core.helpers.variable import getTitle, tryInt
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
-from .index import ReleaseIndex, ReleaseStatusIndex, ReleaseIDIndex, ReleaseDownloadIndex
 from couchpotato.environment import Env
 
 
@@ -20,12 +19,7 @@ log = CPLog(__name__)
 
 class Release(Plugin):
 
-    _database = {
-        'release': ReleaseIndex,
-        'release_status': ReleaseStatusIndex,
-        'release_identifier': ReleaseIDIndex,
-        'release_download': ReleaseDownloadIndex
-    }
+    _database = {}
 
     def __init__(self):
         addApiView('release.manual_download', self.manualDownload, docs = {

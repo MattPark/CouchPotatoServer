@@ -3,7 +3,6 @@ import threading
 import time
 import traceback
 import uuid
-from CodernityDB.database import RecordDeleted
 
 from couchpotato import get_db
 from couchpotato.api import addApiView, addNonBlockApiView
@@ -12,7 +11,6 @@ from couchpotato.core.helpers.encoding import toUnicode
 from couchpotato.core.helpers.variable import tryInt, splitString
 from couchpotato.core.logger import CPLog
 from couchpotato.core.notifications.base import Notification
-from .index import NotificationIndex, NotificationUnreadIndex
 from couchpotato.environment import Env
 from tornado.ioloop import IOLoop
 
@@ -22,9 +20,7 @@ log = CPLog(__name__)
 
 class CoreNotifier(Notification):
 
-    _database = {
-        'notification': NotificationIndex,
-        'notification_unread': NotificationUnreadIndex
+    _database = {}
     }
 
     m_lock = None
