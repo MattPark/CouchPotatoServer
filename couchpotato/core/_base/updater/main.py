@@ -170,7 +170,7 @@ class Updater(Plugin):
 
 class BaseUpdater(Plugin):
 
-    repo_user = 'CouchPotato'
+    repo_user = 'MattPark'
     repo_name = 'CouchPotatoServer'
     branch = version.BRANCH
 
@@ -186,6 +186,15 @@ class BaseUpdater(Plugin):
 
         current_version = self.getVersion()
 
+        if not current_version:
+            current_version = {
+                'repr': 'unknown',
+                'hash': 'unknown',
+                'date': 0,
+                'type': 'unknown',
+                'branch': self.branch,
+            }
+
         return {
             'last_check': self.last_check,
             'update_version': self.update_version,
@@ -195,7 +204,40 @@ class BaseUpdater(Plugin):
         }
 
     def getVersion(self):
-        pass
+
+        if not self.version:
+            # Try to read baked-in version_info (created during Docker build)
+            version_file = os.path.join(Env.get('app_dir'), 'version_info')
+            if os.path.isfile(version_file):
+                try:
+                    with open(version_file, 'r') as f:
+                        data = json.loads(f.read().strip())
+                    hash_val = data.get('hash', 'unknown')
+                    date_val = tryInt(data.get('date', 0))
+                    branch_val = data.get('branch', self.branch)
+                    self.version = {
+                        'repr': 'docker:(%s:%s %s) %s (%s)' % (
+                            self.repo_user, self.repo_name, branch_val,
+                            hash_val[:8] if len(hash_val) > 8 else hash_val,
+                            datetime.fromtimestamp(date_val) if date_val else 'unknown_date'),
+                        'hash': hash_val[:8] if len(hash_val) > 8 else hash_val,
+                        'date': date_val,
+                        'type': 'docker',
+                        'branch': branch_val,
+                    }
+                except:
+                    log.error('Failed reading version_info: %s', traceback.format_exc())
+
+            if not self.version:
+                self.version = {
+                    'repr': 'docker (version unknown)',
+                    'hash': 'unknown',
+                    'date': 0,
+                    'type': 'docker',
+                    'branch': self.branch,
+                }
+
+        return self.version
 
     def check(self):
         pass

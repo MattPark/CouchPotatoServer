@@ -47,6 +47,10 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha
 
+      - name: Get commit timestamp
+        id: commit_ts
+        run: echo "epoch=$(git log -1 --format=%ct)" >> $GITHUB_OUTPUT
+
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
@@ -55,5 +59,9 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION_HASH=${{ github.sha }}
+            VERSION_DATE=${{ steps.commit_ts.outputs.epoch }}
+            VERSION_BRANCH=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

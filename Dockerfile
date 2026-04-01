@@ -8,6 +8,11 @@ LABEL org.opencontainers.image.description="CouchPotato - Automatic movie downlo
 # environment
 ENV COUCHPOTATO_DOCKER=1
 
+# build args for baking version info (set by CI)
+ARG VERSION_HASH=unknown
+ARG VERSION_DATE=0
+ARG VERSION_BRANCH=master
+
 RUN \
   echo "**** install packages ****" && \
   apk add --no-cache \
@@ -24,13 +29,18 @@ RUN \
     beautifulsoup4 \
     python-dateutil \
     "apscheduler>=3.10,<4" \
-    html5lib && \
+    html5lib \
+    pyopenssl && \
   echo "**** cleanup ****" && \
   rm -rf /tmp/*
 
 # copy local files
 COPY root/ /
 COPY . /app/couchpotato
+
+# bake version info into image
+RUN echo "{\"hash\":\"${VERSION_HASH}\",\"date\":${VERSION_DATE},\"branch\":\"${VERSION_BRANCH}\"}" \
+    > /app/couchpotato/version_info
 
 # ports and volumes
 EXPOSE 5050
