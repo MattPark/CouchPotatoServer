@@ -1,5 +1,6 @@
 import json
 import re
+import time
 import traceback
 
 from couchpotato import Env
@@ -14,6 +15,13 @@ log = CPLog(__name__)
 
 autoload = 'OMDBAPI'
 
+# Cache durations
+CACHE_SUCCESS = 30 * 24 * 3600   # 30 days for successful lookups
+CACHE_FAILURE = 1 * 3600         # 1 hour for errors / empty results
+
+# Daily API budget (free tier = 1000/day, keep 100 headroom)
+DAILY_BUDGET = 900
+
 
 class OMDBAPI(MovieProvider):
 
@@ -24,10 +32,41 @@ class OMDBAPI(MovieProvider):
 
     http_time_between_calls = 0
 
+    # In-memory daily call counter: {'YYYYMMDD': count}
+    _daily_calls = {}
+
     def __init__(self):
         addEvent('info.search', self.search)
         addEvent('movie.search', self.search)
         addEvent('movie.info', self.getInfo)
+
+    # --- daily call budget ---------------------------------------------------
+
+    def _todayKey(self):
+        return time.strftime('%Y%m%d')
+
+    def _getDailyCount(self):
+        return self._daily_calls.get(self._todayKey(), 0)
+
+    def _incrementDaily(self):
+        key = self._todayKey()
+        count = self._daily_calls.get(key, 0) + 1
+        self._daily_calls[key] = count
+        # Prune old days (keep only today)
+        for k in list(self._daily_calls):
+            if k != key:
+                del self._daily_calls[k]
+        if count == DAILY_BUDGET:
+            log.warning('OMDB daily budget of %d reached — skipping further calls today' % DAILY_BUDGET)
+        return count
+
+    def _overBudget(self):
+        count = self._getDailyCount()
+        if count >= DAILY_BUDGET:
+            return True
+        return False
+
+    # --- API methods ---------------------------------------------------------
 
     def search(self, q, limit = 12):
         if self.isDisabled():
@@ -41,17 +80,40 @@ class OMDBAPI(MovieProvider):
             }
 
         cache_key = 'omdbapi.cache.%s' % q
-        url = self.urls['search'] % (self.getApiKey(), tryUrlencode({'t': name_year.get('name'), 'y': name_year.get('year', '')}))
-        cached = self.getCache(cache_key, url, timeout = 3, headers = {'User-Agent': Env.getIdentifier()})
 
+        # Check cache first (before budget check)
+        cached = self.getCache(cache_key)
         if cached:
             result = self.parseMovie(cached)
             if result.get('titles') and len(result.get('titles')) > 0:
                 log.info('Found: %s', result['titles'][0] + ' (' + str(result.get('year')) + ')')
                 return [result]
-
             return []
 
+        # Budget gate — only checked when cache misses
+        if self._overBudget():
+            return []
+
+        url = self.urls['search'] % (self.getApiKey(), tryUrlencode({'t': name_year.get('name'), 'y': name_year.get('year', '')}))
+        data = None
+        try:
+            data = self.urlopen(url, timeout = 3, headers = {'User-Agent': Env.getIdentifier()})
+            self._incrementDaily()
+        except:
+            log.info('OMDB search request failed for: %s', q)
+            self._incrementDaily()
+            self.setCache(cache_key, '', timeout = CACHE_FAILURE)
+            return []
+
+        if data:
+            result = self.parseMovie(data)
+            if result.get('titles') and len(result.get('titles')) > 0:
+                self.setCache(cache_key, data, timeout = CACHE_SUCCESS)
+                log.info('Found: %s', result['titles'][0] + ' (' + str(result.get('year')) + ')')
+                return [result]
+
+        # Empty / error result — cache briefly to avoid re-hitting
+        self.setCache(cache_key, data or '', timeout = CACHE_FAILURE)
         return []
 
     def getInfo(self, identifier = None, **kwargs):
@@ -59,15 +121,40 @@ class OMDBAPI(MovieProvider):
             return {}
 
         cache_key = 'omdbapi.cache.%s' % identifier
-        url = self.urls['info'] % (self.getApiKey(), identifier)
-        cached = self.getCache(cache_key, url, timeout = 3, headers = {'User-Agent': Env.getIdentifier()})
 
+        # Check cache first (before budget check)
+        cached = self.getCache(cache_key)
         if cached:
             result = self.parseMovie(cached)
             if result.get('titles') and len(result.get('titles')) > 0:
                 log.info('Found: %s', result['titles'][0] + ' (' + str(result['year']) + ')')
                 return result
+            return {}
 
+        # Budget gate
+        if self._overBudget():
+            return {}
+
+        url = self.urls['info'] % (self.getApiKey(), identifier)
+        data = None
+        try:
+            data = self.urlopen(url, timeout = 3, headers = {'User-Agent': Env.getIdentifier()})
+            self._incrementDaily()
+        except:
+            log.info('OMDB info request failed for: %s', identifier)
+            self._incrementDaily()
+            self.setCache(cache_key, '', timeout = CACHE_FAILURE)
+            return {}
+
+        if data:
+            result = self.parseMovie(data)
+            if result.get('titles') and len(result.get('titles')) > 0:
+                self.setCache(cache_key, data, timeout = CACHE_SUCCESS)
+                log.info('Found: %s', result['titles'][0] + ' (' + str(result['year']) + ')')
+                return result
+
+        # Empty / error result
+        self.setCache(cache_key, data or '', timeout = CACHE_FAILURE)
         return {}
 
     def parseMovie(self, movie):

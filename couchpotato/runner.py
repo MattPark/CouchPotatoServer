@@ -177,7 +177,7 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
     Env.set('db', db)
     Env.set('http_opener', session)
     Env.set('cache_dir', cache_dir)
-    Env.set('cache', FileSystemCache(python_cache))
+    Env.set('cache', FileSystemCache(python_cache, threshold = 50000))
     Env.set('console_log', options.console_log)
     Env.set('quiet', options.quiet)
     Env.set('desktop', desktop)
