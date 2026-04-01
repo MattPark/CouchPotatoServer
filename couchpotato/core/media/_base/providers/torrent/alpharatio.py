@@ -4,7 +4,6 @@ from bs4 import BeautifulSoup
 from couchpotato.core.helpers.variable import tryInt
 from couchpotato.core.logger import CPLog
 from couchpotato.core.media._base.providers.torrent.base import TorrentProvider
-import six
 
 
 log = CPLog(__name__)

@@ -14,7 +14,6 @@ from couchpotato.core.plugins.base import Plugin
 from guessit import guess_movie_info
 from subliminal.videos import Video
 import enzyme
-from six.moves import filter, map, zip
 
 
 log = CPLog(__name__)
@@ -509,7 +508,7 @@ class Scanner(Plugin):
             tags = self.threed_types.get(key, [])
 
             for tag in tags:
-                if (isinstance(tag, tuple) and '.'.join(tag) in '.'.join(words)) or (isinstance(tag, (str, unicode)) and ss(tag.lower()) in words):
+                if (isinstance(tag, tuple) and '.'.join(tag) in '.'.join(words)) or (isinstance(tag, str) and ss(tag.lower()) in words):
                     log.debug('Found %s in %s', (tag, filename))
                     return key
 

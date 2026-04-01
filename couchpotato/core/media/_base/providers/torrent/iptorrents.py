@@ -5,7 +5,6 @@ from couchpotato.core.helpers.encoding import tryUrlencode
 from couchpotato.core.helpers.variable import tryInt
 from couchpotato.core.logger import CPLog
 from couchpotato.core.media._base.providers.torrent.base import TorrentProvider
-import six
 
 
 log = CPLog(__name__)
@@ -78,7 +77,7 @@ class Base(TorrentProvider):
                         torrent = torrent[1].find('a')
 
                         torrent_id = torrent['href'].replace('/details.php?id=', '')
-                        torrent_name = six.text_type(torrent.string)
+                        torrent_name = str(torrent.string)
                         torrent_download_url = self.urls['base_url'] + (result.find_all('td')[3].find('a'))['href'].replace(' ', '.')
                         torrent_details_url = self.urls['base_url'] + torrent['href']
                         torrent_size = self.parseSize(result.find_all('td')[5].string)

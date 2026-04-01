@@ -41,8 +41,8 @@ class Env(object):
         return Env._debug
 
     @staticmethod
-    def get(attr, unicode = False):
-        if unicode:
+    def get(attr, as_unicode = False):
+        if as_unicode:
             return toUnicode(getattr(Env, '_' + attr))
         else:
             return getattr(Env, '_' + attr)

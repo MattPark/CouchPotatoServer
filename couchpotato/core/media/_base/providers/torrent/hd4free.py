@@ -36,7 +36,7 @@ class Base(TorrentProvider):
 
             try:
                 #for result in data[]:
-                for key, result in data.iteritems():
+                for key, result in data.items():
                     if tryInt(result['total_results']) == 0:
                         return
                     torrentscore = self.conf('extra_score')

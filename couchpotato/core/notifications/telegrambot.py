@@ -2,7 +2,6 @@ from couchpotato.core.helpers.variable import getIdentifier
 from couchpotato.core.logger import CPLog
 from couchpotato.core.notifications.base import Notification
 import requests
-import six
 
 log = CPLog(__name__)
 

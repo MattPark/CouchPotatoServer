@@ -11,8 +11,6 @@ import traceback
 
 from couchpotato.core.helpers.encoding import simplifyString, toSafeString, ss, sp, toUnicode
 from couchpotato.core.logger import CPLog
-import six
-from six.moves import map, zip, filter
 
 
 log = CPLog(__name__)
@@ -364,10 +362,7 @@ def getFreeSpace(directories):
             if os.name == 'nt':
                 _, total, free = ctypes.c_ulonglong(), ctypes.c_ulonglong(), \
                                    ctypes.c_ulonglong()
-                if sys.version_info >= (3,) or isinstance(folder, unicode):
-                    fun = ctypes.windll.kernel32.GetDiskFreeSpaceExW #@UndefinedVariable
-                else:
-                    fun = ctypes.windll.kernel32.GetDiskFreeSpaceExA #@UndefinedVariable
+                fun = ctypes.windll.kernel32.GetDiskFreeSpaceExW
                 ret = fun(folder, ctypes.byref(_), ctypes.byref(total), ctypes.byref(free))
                 if ret == 0:
                     raise ctypes.WinError()

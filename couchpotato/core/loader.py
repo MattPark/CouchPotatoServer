@@ -5,7 +5,6 @@ import traceback
 from couchpotato.core.event import fireEvent
 from couchpotato.core.logger import CPLog
 from importhelper import import_module
-import six
 
 
 log = CPLog(__name__)
@@ -82,7 +81,7 @@ class Loader(object):
         for filename in os.listdir(root_path):
             path = os.path.join(root_path, filename)
             if os.path.isdir(path) and filename[:2] != '__':
-                if six.u('__init__.py') in os.listdir(path):
+                if '__init__.py' in os.listdir(path):
                     new_base_path = ''.join(s + '.' for s in base_path) + filename
                     self.paths[new_base_path.replace('.', '_')] = (priority, new_base_path, path)
 
@@ -136,7 +135,7 @@ class Loader(object):
             return False
         try:
             # Load single file plugin
-            if isinstance(module.autoload, (str, unicode)):
+            if isinstance(module.autoload, str):
                 getattr(module, module.autoload)()
             # Load folder plugin
             else:

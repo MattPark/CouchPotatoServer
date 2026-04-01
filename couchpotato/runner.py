@@ -222,7 +222,7 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
     try:
         # Load Soft-Chroot
         soft_chroot = Env.get('softchroot')
-        soft_chroot_dir = Env.setting('soft_chroot', section = 'core', default = None, type='unicode' )
+        soft_chroot_dir = Env.setting('soft_chroot', section = 'core', default = None, type='str' )
         soft_chroot.initialize(soft_chroot_dir)
     except SoftChrootInitError as exc:
         log.error(exc)

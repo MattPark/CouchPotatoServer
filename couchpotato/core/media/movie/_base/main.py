@@ -9,7 +9,6 @@ from couchpotato.core.helpers.encoding import toUnicode
 from couchpotato.core.helpers.variable import splitString, getTitle, getImdb, getIdentifier
 from couchpotato.core.logger import CPLog
 from couchpotato.core.media.movie import MovieTypeBase
-import six
 
 
 log = CPLog(__name__)
@@ -244,7 +243,7 @@ class MovieBase(MovieTypeBase):
                     fireEventAsync('movie.searcher.single', movie_dict, on_complete = self.createNotifyFront(media_id))
 
                 except:
-                    print traceback.format_exc()
+                    print(traceback.format_exc())
                     log.error('Can\'t edit non-existing media')
 
             return {

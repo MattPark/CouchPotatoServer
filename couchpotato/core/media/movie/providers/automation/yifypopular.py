@@ -1,6 +1,6 @@
 import traceback
 
-import HTMLParser
+from html.parser import HTMLParser
 from bs4 import BeautifulSoup
 from couchpotato import fireEvent
 from couchpotato.core.logger import CPLog

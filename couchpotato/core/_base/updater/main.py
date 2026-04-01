@@ -19,7 +19,6 @@ from couchpotato.environment import Env
 from dateutil.parser import parse
 from git.repository import LocalRepository
 import version
-from six.moves import filter
 
 
 log = CPLog(__name__)

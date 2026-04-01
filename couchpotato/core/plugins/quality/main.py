@@ -305,7 +305,7 @@ class QualityPlugin(Plugin):
         # Check alt and tags
         for tag_type in ['identifier', 'alternative', 'tags', 'label']:
             qualities = quality.get(tag_type, [])
-            qualities = [qualities] if isinstance(qualities, (str, unicode)) else qualities
+            qualities = [qualities] if isinstance(qualities, str) else qualities
 
             for alt in qualities:
                 if isinstance(alt, tuple):
@@ -313,7 +313,7 @@ class QualityPlugin(Plugin):
                         log.debug('Found %s via %s %s in %s', (quality['identifier'], tag_type, quality.get(tag_type), cur_file))
                         score += points.get(tag_type)
 
-                if isinstance(alt, (str, unicode)) and ss(alt.lower()) in words and ss(alt.lower()) not in scored_on:
+                if isinstance(alt, str) and ss(alt.lower()) in words and ss(alt.lower()) not in scored_on:
                     log.debug('Found %s via %s %s in %s', (quality['identifier'], tag_type, quality.get(tag_type), cur_file))
                     score += points.get(tag_type)
 

@@ -60,7 +60,7 @@ class PlexServer(object):
 
                 try:
                     response = urlopen(req)
-                except URLError, e:
+                except URLError as e:
                     log.info('Error fetching token from plex.tv: %s', traceback.format_exc())
 
                 try:

@@ -280,7 +280,7 @@ class MediaPlugin(MediaBase):
         offset = 0
         limit = -1
         if limit_offset:
-            splt = splitString(limit_offset) if isinstance(limit_offset, (str, unicode)) else limit_offset
+            splt = splitString(limit_offset) if isinstance(limit_offset, str) else limit_offset
             limit = tryInt(splt[0])
             offset = tryInt(0 if len(splt) is 1 else splt[1])
 

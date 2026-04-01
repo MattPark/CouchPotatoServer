@@ -1,5 +1,5 @@
 from __future__ import with_statement
-import ConfigParser
+import configparser
 import traceback
 from hashlib import md5
 
@@ -63,7 +63,7 @@ class Settings(object):
     def setFile(self, config_file):
         self.file = config_file
 
-        self.p = ConfigParser.RawConfigParser()
+        self.p = configparser.RawConfigParser()
         self.p.read(config_file)
 
         from couchpotato.core.logger import CPLog
@@ -260,7 +260,7 @@ class Settings(object):
     def getType(self, section, option):
         tp = None
         try: tp = self.types[section][option]
-        except: tp = 'unicode' if not tp else tp
+        except: tp = 'str' if not tp else tp
         return tp
 
     def addOptions(self, section_name, options):

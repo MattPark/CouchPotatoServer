@@ -1,13 +1,11 @@
 from string import ascii_letters, digits
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlencode
 import os
 import re
 import traceback
 import unicodedata
 
-from chardet import detect
 from couchpotato.core.logger import CPLog
-import six
 
 
 log = CPLog(__name__)
@@ -15,7 +13,7 @@ log = CPLog(__name__)
 
 def toSafeString(original):
     valid_chars = "-_.() %s%s" % (ascii_letters, digits)
-    cleaned_filename = unicodedata.normalize('NFKD', toUnicode(original)).encode('ASCII', 'ignore')
+    cleaned_filename = unicodedata.normalize('NFKD', toUnicode(original)).encode('ASCII', 'ignore').decode('ASCII')
     valid_string = ''.join(c for c in cleaned_filename if c in valid_chars)
     return ' '.join(valid_string.split())
 
@@ -29,57 +27,50 @@ def simplifyString(original):
 
 def toUnicode(original, *args):
     try:
-        if isinstance(original, unicode):
+        if isinstance(original, str):
             return original
-        else:
+        elif isinstance(original, bytes):
             try:
-                return six.text_type(original, *args)
-            except:
+                return original.decode('utf-8')
+            except UnicodeDecodeError:
                 try:
                     from couchpotato.environment import Env
                     return original.decode(Env.get("encoding"))
                 except:
                     try:
+                        from chardet import detect
                         detected = detect(original)
-                        try:
-                            if detected.get('confidence') > 0.8:
-                                return original.decode(detected.get('encoding'))
-                        except:
-                            pass
-
-                        return ek(original, *args)
+                        if detected.get('confidence', 0) > 0.8:
+                            return original.decode(detected.get('encoding'))
                     except:
-                        raise
+                        pass
+                    return original.decode('utf-8', 'replace')
+        else:
+            return str(original)
     except:
         log.error('Unable to decode value "%s..." : %s ', (repr(original)[:20], traceback.format_exc()))
         return 'ERROR DECODING STRING'
 
 
 def ss(original, *args):
-
-    u_original = toUnicode(original, *args)
-    try:
-        from couchpotato.environment import Env
-        return u_original.encode(Env.get('encoding'))
-    except Exception as e:
-        log.debug('Failed ss encoding char, force UTF8: %s', e)
-        try:
-            return u_original.encode(Env.get('encoding'), 'replace')
-        except:
-            return u_original.encode('utf-8', 'replace')
+    """Convert to native string. In Python 3, native strings are unicode,
+    so this is equivalent to toUnicode."""
+    return toUnicode(original, *args)
 
 
 def sp(path, *args):
-
-    # Standardise encoding, normalise case, path and strip trailing '/' or '\'
+    """Standardise path encoding, normalise case, and strip trailing separators."""
     if not path or len(path) == 0:
         return path
+
+    # Ensure path is a string
+    path = toUnicode(path)
 
     # convert windows path (from remote box) to *nix path
     if os.path.sep == '/' and '\\' in path:
         path = '/' + path.replace(':', '').replace('\\', '/')
 
-    path = os.path.normpath(ss(path, *args))
+    path = os.path.normpath(path)
 
     # Remove any trailing path separators
     if path != os.path.sep:
@@ -96,21 +87,21 @@ def sp(path, *args):
 
 
 def ek(original, *args):
-    if isinstance(original, (str, unicode)):
+    """Encoding kludge — in Python 3 this just ensures we have a str."""
+    if isinstance(original, bytes):
         try:
             from couchpotato.environment import Env
             return original.decode(Env.get('encoding'), 'ignore')
-        except UnicodeDecodeError:
-            raise
-
-    return original
+        except:
+            return original.decode('utf-8', 'ignore')
+    return str(original) if not isinstance(original, str) else original
 
 
 def isInt(value):
     try:
         int(value)
         return True
-    except ValueError:
+    except (ValueError, TypeError):
         return False
 
 
@@ -119,17 +110,7 @@ def stripAccents(s):
 
 
 def tryUrlencode(s):
-    new = six.u('')
     if isinstance(s, dict):
-        for key, value in s.items():
-            new += six.u('&%s=%s') % (key, tryUrlencode(value))
-
-        return new[1:]
+        return urlencode({k: tryUrlencode(v) for k, v in s.items()})
     else:
-        for letter in ss(s):
-            try:
-                new += quote_plus(letter)
-            except:
-                new += letter
-
-    return new
+        return quote_plus(toUnicode(s))
