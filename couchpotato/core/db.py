@@ -3,6 +3,16 @@ TinyDB-based database wrapper for CouchPotato.
 
 Provides a CodernityDB-compatible API over TinyDB, using a single JSON file
 with CachingMiddleware for write batching.
+
+Performance strategy: on open(), build three in-memory caches from a single
+full scan of the TinyDB file:
+
+  _id_cache   — {_id: tinydb_doc_id}         fast ID lookups
+  _type_docs  — {type_str: {_id: doc_dict}}   all docs grouped by _t
+  _key_cache  — {spec_name: {key: [_id,...]}} keyed index for specs with keyfn
+
+All subsequent reads hit these caches instead of scanning TinyDB.  Write ops
+(insert / update / delete) maintain all three caches incrementally.
 """
 
 import os
@@ -58,27 +68,35 @@ def _release_dl_match(doc, key):
 
 
 _SPECS = {
-    'property':           {'type': 'property',     'match': lambda d, k: d.get('identifier') == k},
+    'property':           {'type': 'property',     'match': lambda d, k: d.get('identifier') == k,
+                                                    'keyfn': lambda d: d.get('identifier')},
     'media':              {'type': 'media',        'match': _media_id_match},
-    'media_status':       {'type': 'media',        'match': lambda d, k: d.get('status') == k},
-    'media_by_type':      {'type': 'media',        'match': lambda d, k: d.get('type') == k},
+    'media_status':       {'type': 'media',        'match': lambda d, k: d.get('status') == k,
+                                                    'keyfn': lambda d: d.get('status')},
+    'media_by_type':      {'type': 'media',        'match': lambda d, k: d.get('type') == k,
+                                                    'keyfn': lambda d: d.get('type')},
     'media_search_title': {'type': 'media',        'match': lambda d, k: k.lower() in (d.get('title') or '').lower()},
     'media_title':        {'type': 'media',        'sort': lambda d: _simplify_title(d.get('title', ''))},
     'media_startswith':   {'type': 'media',        'match': lambda d, k: _starts_with_char(d.get('title', '')) == k,
                                                     'keyfn': lambda d: _starts_with_char(d.get('title', '')), 'uniq': True},
-    'media_children':     {'type': 'media',        'match': lambda d, k: d.get('parent_id') == k},
+    'media_children':     {'type': 'media',        'match': lambda d, k: d.get('parent_id') == k,
+                                                    'keyfn': lambda d: d.get('parent_id')},
     'media_tag':          {'type': 'media',        'match': lambda d, k: k in (d.get('tags') or [])},
     'release':            {'type': 'release',      'match': lambda d, k: d.get('media_id') == k,
                                                     'keyfn': lambda d: d.get('media_id')},
     'release_status':     {'type': 'release',      'match': lambda d, k: d.get('status') == k,
+                                                    'keyfn': lambda d: d.get('status'),
                                                     'stored': lambda d: {'media_id': d.get('media_id')}},
     'release_identifier': {'type': 'release',      'match': lambda d, k: d.get('identifier') == k,
+                                                    'keyfn': lambda d: d.get('identifier'),
                                                     'stored': lambda d: {'media_id': d.get('media_id')}},
     'release_download':   {'type': 'release',      'match': _release_dl_match},
     'profile':            {'type': 'profile',      'sort': lambda d: d.get('order', 99)},
-    'quality':            {'type': 'quality',      'match': lambda d, k: d.get('identifier') == k},
+    'quality':            {'type': 'quality',      'match': lambda d, k: d.get('identifier') == k,
+                                                    'keyfn': lambda d: d.get('identifier')},
     'category':           {'type': 'category',     'sort': lambda d: d.get('order', -99)},
-    'category_media':     {'type': 'media',        'match': lambda d, k: str(d.get('category_id', '')) == str(k)},
+    'category_media':     {'type': 'media',        'match': lambda d, k: str(d.get('category_id', '')) == str(k),
+                                                    'keyfn': lambda d: str(d.get('category_id', ''))},
     'notification':       {'type': 'notification', 'sort': lambda d: d.get('time', 0)},
     'notification_unread':{'type': 'notification', 'filt': lambda d: not d.get('read'),
                                                     'sort': lambda d: d.get('time', 0)},
@@ -92,7 +110,9 @@ class CouchDB:
         self.path = path
         self._db = None
         self._lock = threading.RLock()
-        self._id_cache = {}
+        self._id_cache = {}          # _id -> tinydb doc_id
+        self._type_docs = {}         # _t   -> {_id -> dict}
+        self._key_cache = {}         # spec_name -> {key -> set(_id)}
         self._registered_indexes = {}
 
     @property
@@ -115,7 +135,7 @@ class CouchDB:
 
     def _do_open(self):
         self._db = TinyDB(self._db_file, storage=CachingMiddleware(JSONStorage))
-        self._rebuild_id_cache()
+        self._rebuild_caches()
 
     def close(self):
         with self._lock:
@@ -123,14 +143,103 @@ class CouchDB:
                 self._db.close()
                 self._db = None
                 self._id_cache.clear()
+                self._type_docs.clear()
+                self._key_cache.clear()
 
     def destroy(self):
         self.close()
         if os.path.isfile(self._db_file):
             os.unlink(self._db_file)
 
-    def _rebuild_id_cache(self):
-        self._id_cache = {d.get('_id'): d.doc_id for d in self._db.all() if d.get('_id')}
+    # ---- cache management ------------------------------------------------
+
+    def _rebuild_caches(self):
+        """Single full scan to populate all three caches."""
+        id_cache = {}
+        type_docs = {}
+        key_cache = {name: {} for name, spec in _SPECS.items() if spec.get('keyfn')}
+
+        for raw in self._db.all():
+            d = dict(raw)
+            cid = d.get('_id')
+            if not cid:
+                continue
+            id_cache[cid] = raw.doc_id
+
+            t = d.get('_t')
+            if t:
+                bucket = type_docs.get(t)
+                if bucket is None:
+                    bucket = {}
+                    type_docs[t] = bucket
+                bucket[cid] = d
+
+            # Populate key caches
+            for spec_name, kc in key_cache.items():
+                spec = _SPECS[spec_name]
+                st = spec.get('type')
+                if st and t != st:
+                    continue
+                kfn = spec['keyfn']
+                k = kfn(d)
+                if k is not None:
+                    ids = kc.get(k)
+                    if ids is None:
+                        ids = set()
+                        kc[k] = ids
+                    ids.add(cid)
+
+        self._id_cache = id_cache
+        self._type_docs = type_docs
+        self._key_cache = key_cache
+
+    def _cache_add(self, doc):
+        """Incrementally add a doc to the caches."""
+        cid = doc.get('_id')
+        t = doc.get('_t')
+        if not cid:
+            return
+        if t:
+            bucket = self._type_docs.get(t)
+            if bucket is None:
+                bucket = {}
+                self._type_docs[t] = bucket
+            bucket[cid] = dict(doc)
+
+        for spec_name, kc in self._key_cache.items():
+            spec = _SPECS[spec_name]
+            st = spec.get('type')
+            if st and t != st:
+                continue
+            k = spec['keyfn'](doc)
+            if k is not None:
+                ids = kc.get(k)
+                if ids is None:
+                    ids = set()
+                    kc[k] = ids
+                ids.add(cid)
+
+    def _cache_remove(self, doc):
+        """Incrementally remove a doc from the caches."""
+        cid = doc.get('_id')
+        t = doc.get('_t')
+        if not cid:
+            return
+        if t:
+            bucket = self._type_docs.get(t)
+            if bucket:
+                bucket.pop(cid, None)
+
+        for spec_name, kc in self._key_cache.items():
+            spec = _SPECS[spec_name]
+            st = spec.get('type')
+            if st and t != st:
+                continue
+            k = spec['keyfn'](doc)
+            if k is not None:
+                ids = kc.get(k)
+                if ids:
+                    ids.discard(cid)
 
     @staticmethod
     def _next_rev(current=None):
@@ -141,6 +250,19 @@ class CouchDB:
             except (ValueError, IndexError):
                 pass
         return '%04x%s' % (ctr, uuid4().hex[:4])
+
+    # ---- internal helpers ------------------------------------------------
+
+    def _docs_for_type(self, type_str):
+        """Return {_id: doc} dict for a given _t value."""
+        return self._type_docs.get(type_str) or {}
+
+    def _ids_for_key(self, spec_name, key):
+        """Return set of _ids matching key in a keyed spec, or None if no cache."""
+        kc = self._key_cache.get(spec_name)
+        if kc is None:
+            return None
+        return kc.get(key) or set()
 
     # ---- get (single doc) ------------------------------------------------
 
@@ -154,13 +276,13 @@ class CouchDB:
         tid = self._id_cache.get(key)
         if tid is None:
             raise RecordNotFound('Document not found: %s' % key)
+        # Try type_docs first (avoids TinyDB access entirely)
+        for bucket in self._type_docs.values():
+            d = bucket.get(key)
+            if d is not None:
+                return dict(d)
+        # Fallback to TinyDB
         doc = self._db.get(doc_id=tid)
-        if doc is None:
-            self._rebuild_id_cache()
-            tid = self._id_cache.get(key)
-            if tid is None:
-                raise RecordNotFound('Document not found: %s' % key)
-            doc = self._db.get(doc_id=tid)
         if doc is None:
             raise RecordNotFound('Document not found: %s' % key)
         return dict(doc)
@@ -173,10 +295,16 @@ class CouchDB:
         mf = spec.get('match')
         ef = spec.get('filt')
         sf = spec.get('stored')
-        for raw in self._db.all():
-            d = dict(raw)
-            if tf and d.get('_t') != tf:
-                continue
+
+        # Use type_docs cache instead of scanning TinyDB
+        if tf:
+            docs = self._docs_for_type(tf).values()
+        else:
+            docs = []
+            for bucket in self._type_docs.values():
+                docs = list(docs) + list(bucket.values())
+
+        for d in docs:
             if ef and not ef(d):
                 continue
             if mf and not mf(d, key):
@@ -185,7 +313,7 @@ class CouchDB:
             if sf:
                 r.update(sf(d))
             if with_doc:
-                r['doc'] = d
+                r['doc'] = dict(d)
             return r
         raise RecordNotFound('No match: index=%s key=%s' % (index_name, key))
 
@@ -200,11 +328,43 @@ class CouchDB:
             mf = spec.get('match')
             ef = spec.get('filt')
             sf = spec.get('stored')
+            kfn = spec.get('keyfn')
+
+            # Fast path: if spec has keyfn, use the key cache
+            if kfn:
+                cached_ids = self._ids_for_key(index_name, key)
+                if cached_ids is not None:
+                    type_bucket = self._docs_for_type(tf) if tf else None
+                    results, skipped = [], 0
+                    for cid in cached_ids:
+                        d = type_bucket.get(cid) if type_bucket else None
+                        if d is None:
+                            continue
+                        if ef and not ef(d):
+                            continue
+                        if skipped < offset:
+                            skipped += 1
+                            continue
+                        entry = {'_id': cid}
+                        if sf:
+                            entry.update(sf(d))
+                        if with_doc:
+                            entry['doc'] = dict(d)
+                        results.append(entry)
+                        if 0 < limit <= len(results):
+                            break
+                    return results
+
+            # Slow path: scan type_docs
+            if tf:
+                docs = self._docs_for_type(tf).values()
+            else:
+                docs = []
+                for bucket in self._type_docs.values():
+                    docs = list(docs) + list(bucket.values())
+
             results, skipped = [], 0
-            for raw in self._db.all():
-                d = dict(raw)
-                if tf and d.get('_t') != tf:
-                    continue
+            for d in docs:
                 if ef and not ef(d):
                     continue
                 if mf and not mf(d, key):
@@ -216,7 +376,7 @@ class CouchDB:
                 if sf:
                     entry.update(sf(d))
                 if with_doc:
-                    entry['doc'] = d
+                    entry['doc'] = dict(d)
                 results.append(entry)
                 if 0 < limit <= len(results):
                     break
@@ -227,7 +387,9 @@ class CouchDB:
     def all(self, index_name, limit=-1, offset=0, with_doc=False, with_storage=True):
         with self._lock:
             if index_name == 'id':
-                docs = [dict(d) for d in self._db.all()]
+                docs = []
+                for bucket in self._type_docs.values():
+                    docs.extend(dict(d) for d in bucket.values())
                 if offset > 0:
                     docs = docs[offset:]
                 if limit > 0:
@@ -245,15 +407,16 @@ class CouchDB:
         kfn = spec.get('keyfn')
         uniq = spec.get('uniq', False)
 
-        matches = []
-        for raw in self._db.all():
-            d = dict(raw)
-            if tf and d.get('_t') != tf:
-                continue
-            if ef and not ef(d):
-                continue
-            matches.append(d)
+        # Use type_docs cache
+        if tf:
+            matches = list(self._docs_for_type(tf).values())
+        else:
+            matches = []
+            for bucket in self._type_docs.values():
+                matches.extend(bucket.values())
 
+        if ef:
+            matches = [d for d in matches if ef(d)]
         if sfn:
             matches.sort(key=sfn)
         if uniq and kfn:
@@ -277,7 +440,7 @@ class CouchDB:
             elif sfn:
                 entry['key'] = sfn(d)
             if with_doc:
-                entry['doc'] = d
+                entry['doc'] = dict(d)
             results.append(entry)
         return results
 
@@ -290,6 +453,7 @@ class CouchDB:
             doc['_rev'] = self._next_rev()
             tid = self._db.insert(doc)
             self._id_cache[doc['_id']] = tid
+            self._cache_add(doc)
             return doc
 
     def update(self, doc):
@@ -300,10 +464,19 @@ class CouchDB:
             tid = self._id_cache.get(cid)
             if tid is None:
                 raise RecordNotFound('Document %s not found' % cid)
+            # Remove old version from caches
+            old_doc = None
+            for bucket in self._type_docs.values():
+                old_doc = bucket.get(cid)
+                if old_doc:
+                    break
+            if old_doc:
+                self._cache_remove(old_doc)
             doc['_rev'] = self._next_rev(doc.get('_rev'))
             self._db.remove(doc_ids=[tid])
             new_tid = self._db.insert(dict(doc))
             self._id_cache[cid] = new_tid
+            self._cache_add(doc)
             return doc
 
     def delete(self, doc):
@@ -314,6 +487,14 @@ class CouchDB:
             tid = self._id_cache.get(cid)
             if tid is None:
                 raise RecordNotFound('Document %s not found' % cid)
+            # Remove from caches
+            old_doc = None
+            for bucket in self._type_docs.values():
+                old_doc = bucket.get(cid)
+                if old_doc:
+                    break
+            if old_doc:
+                self._cache_remove(old_doc)
             self._db.remove(doc_ids=[tid])
             del self._id_cache[cid]
 
@@ -327,6 +508,7 @@ class CouchDB:
             tids = self._db.insert_multiple(docs)
             for d, tid in zip(docs, tids):
                 self._id_cache[d['_id']] = tid
+                self._cache_add(d)
 
     # ---- counting --------------------------------------------------------
 

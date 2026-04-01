@@ -104,7 +104,6 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
 
     if old_db_path:
         # Set up basic logging so migration progress is visible (full logging is configured later)
-        import logging
         logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)-5s %(message)s', datefmt='%m-%d %H:%M:%S')
         from couchpotato.core.migration.migrate import migrate_codernity_to_tinydb
         migrate_codernity_to_tinydb(old_db_path, db_path)
