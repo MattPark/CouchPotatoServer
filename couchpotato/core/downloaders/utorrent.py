@@ -1,15 +1,15 @@
 ﻿from base64 import b16encode, b32decode
 from datetime import timedelta
 from hashlib import sha1
-import cookielib
-import httplib
+import http.cookiejar as cookielib
+import http.client as httplib
 import json
 import os
 import re
 import stat
 import time
-import urllib
-import urllib2
+from urllib.parse import quote as _urllib_quote
+from urllib import request as urllib2
 
 from bencode import bencode as benc, bdecode
 from couchpotato.core._base.downloader.main import DownloaderBase, ReleaseDownloadList
@@ -270,15 +270,15 @@ class uTorrentAPI(object):
         return token
 
     def add_torrent_uri(self, filename, torrent, add_folder = False):
-        action = 'action=add-url&s=%s' % urllib.quote(torrent)
+        action = 'action=add-url&s=%s' % _urllib_quote(torrent)
         if add_folder:
-            action += '&path=%s' % urllib.quote(filename)
+            action += '&path=%s' % _urllib_quote(filename)
         return self._request(action)
 
     def add_torrent_file(self, filename, filedata, add_folder = False):
         action = 'action=add-file'
         if add_folder:
-            action += '&path=%s' % urllib.quote(filename)
+            action += '&path=%s' % _urllib_quote(filename)
         return self._request(action, {'torrent_file': (ss(filename), filedata)})
 
     def set_torrent(self, hash, params):

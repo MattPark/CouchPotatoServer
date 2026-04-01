@@ -2,7 +2,7 @@ import base64
 import json
 import socket
 import traceback
-import urllib
+from urllib.parse import quote as _urllib_quote
 
 from couchpotato.core.helpers.variable import splitString, getTitle
 from couchpotato.core.logger import CPLog
@@ -135,7 +135,7 @@ class XBMC(Notification):
         server = 'http://%s/xbmcCmds/' % host
 
         # Notification(title, message [, timeout , image])
-        cmd = "xbmcHttp?command=ExecBuiltIn(Notification(%s,%s,'',%s))" % (urllib.quote(getTitle(data)), urllib.quote(data['message']), urllib.quote(self.getNotificationImage('medium')))
+        cmd = "xbmcHttp?command=ExecBuiltIn(Notification(%s,%s,'',%s))" % (_urllib_quote(getTitle(data)), _urllib_quote(data['message']), _urllib_quote(self.getNotificationImage('medium')))
         server += cmd
 
         # I have no idea what to set to, just tried text/plain and seems to be working :)

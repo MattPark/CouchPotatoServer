@@ -1,5 +1,5 @@
 from string import ascii_letters, digits
-from urllib import quote_plus
+from urllib.parse import quote_plus
 import os
 import re
 import traceback

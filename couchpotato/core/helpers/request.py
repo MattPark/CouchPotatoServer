@@ -1,4 +1,4 @@
-from urllib import unquote
+from urllib.parse import unquote
 import re
 
 from couchpotato.core.helpers.encoding import toUnicode

@@ -1,5 +1,7 @@
 import json
-import urllib, urllib2
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from urllib.error import URLError
 
 from couchpotato.core.helpers.variable import cleanHost
 from couchpotato.core.logger import CPLog
@@ -20,18 +22,18 @@ class Emby(Notification):
         host = cleanHost(host)
         url = '%semby/Library/Movies/Updated' % (host)
         values = {}
-        data = urllib.urlencode(values)
+        data = urlencode(values)
 
         try:
-            req = urllib2.Request(url, data)
+            req = Request(url, data)
             req.add_header('X-MediaBrowser-Token', apikey)
 
-            response = urllib2.urlopen(req)
+            response = urlopen(req)
             result = response.read()
             response.close()
             return True
 
-        except (urllib2.URLError, IOError), e:
+        except (URLError, IOError), e:
             return False
 
     def test(self, **kwargs):
@@ -45,18 +47,18 @@ class Emby(Notification):
         data = json.dumps(values)
 
         try:
-            req = urllib2.Request(url, data)
+            req = Request(url, data)
             req.add_header('X-MediaBrowser-Token', apikey)
             req.add_header('Content-Type', 'application/json')
 
-            response = urllib2.urlopen(req)
+            response = urlopen(req)
             result = response.read()
             response.close()
             return {
                 'success': True
             }
 
-        except (urllib2.URLError, IOError), e:
+        except (URLError, IOError), e:
             return False
 
 

@@ -1,5 +1,5 @@
 from datetime import timedelta
-from urllib2 import URLError
+from urllib.error import URLError
 import json
 import os
 import traceback

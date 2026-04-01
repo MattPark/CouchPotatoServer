@@ -1,11 +1,12 @@
 from base64 import b16encode, b32decode, b64encode
 from distutils.version import LooseVersion
 from hashlib import sha1
-import httplib
+import http.client as httplib
 import json
 import os
 import re
-import urllib2
+from urllib import request as urllib2
+from urllib.error import HTTPError, URLError
 
 from couchpotato.core._base.downloader.main import DownloaderBase, ReleaseDownloadList
 from couchpotato.core.helpers.encoding import isInt, sp
