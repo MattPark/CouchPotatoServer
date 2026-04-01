@@ -139,6 +139,10 @@ class Release(Plugin):
                     'profile_id': None,
                 }, search_after = False, update_after = update_info, notify_after = False, status = 'done', single = True)
 
+            if not media or not isinstance(media, dict):
+                log.error('Failed adding release: could not find or create media for %s', group.get('identifier'))
+                return False
+
             release = None
             if update_id:
                 try:
