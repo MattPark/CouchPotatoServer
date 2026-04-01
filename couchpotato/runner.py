@@ -93,9 +93,23 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
     db_path = sp(os.path.join(data_dir, 'database'))
 
     # Migrate CodernityDB -> TinyDB if old database detected
+    # Check both standard layout (data_dir/database/) and linuxserver.io layout (data_dir/data/database/)
+    old_db_path = None
     if os.path.isfile(os.path.join(db_path, 'id_buck')):
+        old_db_path = db_path
+    else:
+        alt_db_path = sp(os.path.join(data_dir, 'data', 'database'))
+        if os.path.isfile(os.path.join(alt_db_path, 'id_buck')):
+            old_db_path = alt_db_path
+
+    if old_db_path:
+        # Set up basic logging so migration progress is visible (full logging is configured later)
+        import logging
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)-5s %(message)s', datefmt='%m-%d %H:%M:%S')
         from couchpotato.core.migration.migrate import migrate_codernity_to_tinydb
-        migrate_codernity_to_tinydb(db_path, data_dir)
+        migrate_codernity_to_tinydb(old_db_path, db_path)
+        # Remove basicConfig handler so it doesn't duplicate with the real logging setup later
+        logging.root.handlers.clear()
 
     # Open or create TinyDB database
     db = CouchDB(db_path)
@@ -112,7 +126,7 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
             # Only consider files being a direct child of the backup_path
             if root == backup_path:
                 for backup_file in sorted(files):
-                    ints = re.findall('\d+', backup_file)
+                    ints = re.findall(r'\d+', backup_file)
 
                     # Delete non zip files
                     if len(ints) != 1:
@@ -355,7 +369,6 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
                     except: log.info2('Tried to bind to IPV6 but failed')
 
             loop.start()
-            server.close_all_connections()
             server.stop()
             loop.close(all_fds = True)
         except Exception as e:

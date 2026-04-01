@@ -1,4 +1,4 @@
-from apscheduler.scheduler import Scheduler as Sched
+from apscheduler.schedulers.background import BackgroundScheduler
 from couchpotato.core.event import addEvent
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
@@ -21,14 +21,14 @@ class Scheduler(Plugin):
         addEvent('schedule.remove', self.remove)
         addEvent('schedule.queue', self.queue)
 
-        self.sched = Sched(misfire_grace_time = 60)
+        self.sched = BackgroundScheduler(job_defaults={'misfire_grace_time': 60})
         self.sched.start()
         self.started = True
 
     def remove(self, identifier):
         for cron_type in ['intervals', 'crons']:
             try:
-                self.sched.unschedule_job(getattr(self, cron_type)[identifier]['job'])
+                self.sched.remove_job(identifier)
                 log.debug('%s unscheduled %s', (cron_type.capitalize(), identifier))
             except:
                 pass
@@ -48,24 +48,24 @@ class Scheduler(Plugin):
         log.info('Scheduling "%s", cron: day = %s, hour = %s, minute = %s', (identifier, day, hour, minute))
 
         self.remove(identifier)
+        self.sched.add_job(handle, 'cron', day=day, hour=hour, minute=minute, id=identifier, replace_existing=True)
         self.crons[identifier] = {
             'handle': handle,
             'day': day,
             'hour': hour,
             'minute': minute,
-            'job': self.sched.add_cron_job(handle, day = day, hour = hour, minute = minute)
         }
 
     def interval(self, identifier = '', handle = None, hours = 0, minutes = 0, seconds = 0):
         log.info('Scheduling %s, interval: hours = %s, minutes = %s, seconds = %s', (identifier, hours, minutes, seconds))
 
         self.remove(identifier)
+        self.sched.add_job(handle, 'interval', hours=hours, minutes=minutes, seconds=seconds, id=identifier, replace_existing=True)
         self.intervals[identifier] = {
             'handle': handle,
             'hours': hours,
             'minutes': minutes,
             'seconds': seconds,
-            'job': self.sched.add_interval_job(handle, hours = hours, minutes = minutes, seconds = seconds)
         }
 
         return True

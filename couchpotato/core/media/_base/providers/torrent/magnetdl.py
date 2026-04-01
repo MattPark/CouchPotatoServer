@@ -75,7 +75,7 @@ class Base(TorrentMagnetProvider):
         age = 0
         age_str = age_str.replace('&nbsp;', ' ')
 
-        regex = '(\d*.?\d+).(sec|hour|day|week|month|year)+'
+        regex = r'(\d*.?\d+).(sec|hour|day|week|month|year)+'
         matches = re.findall(regex, age_str)
         for match in matches:
             nr, size = match

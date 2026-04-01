@@ -316,7 +316,7 @@ class MovieSearcher(SearcherBase, MovieTypeBase):
 
         for raw_title in media['info']['titles']:
             for movie_title in possibleTitles(raw_title):
-                movie_words = re.split('\W+', simplifyString(movie_title))
+                movie_words = re.split(r'\W+', simplifyString(movie_title))
 
                 if fireEvent('searcher.correct_name', nzb['name'], movie_title, single = True):
                     # if no IMDB link, at least check year range 1

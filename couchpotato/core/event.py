@@ -19,8 +19,8 @@ def runHandler(name, handler, *args, **kwargs):
     except Exception:
         from couchpotato.environment import Env
         log.error('Error in event "%s", that wasn\'t caught: %s%s',
-                  name, traceback.format_exc(),
-                  Env.all() if not Env.get('dev') else '')
+                  (name, traceback.format_exc(),
+                   Env.all() if not Env.get('dev') else ''))
 
 
 def addEvent(name, handler, priority=100):
@@ -44,7 +44,7 @@ def addEvent(name, handler, priority=100):
                         parent.afterCall(handler)
         except Exception:
             log.error('Failed creating handler %s %s: %s',
-                      name, handler, traceback.format_exc())
+                      (name, handler, traceback.format_exc()))
         return h
 
     events[name].append({
@@ -124,7 +124,7 @@ def fireEvent(name, *args, **kwargs):
 
         return final
     except Exception:
-        log.error('%s: %s', name, traceback.format_exc())
+        log.error('%s: %s', (name, traceback.format_exc()))
 
 
 def _run_serial(name, handlers, return_on_first, *args, **kwargs):
@@ -138,7 +138,7 @@ def _run_serial(name, handlers, return_on_first, *args, **kwargs):
                 break
         except Exception:
             log.error('Failed running event handler for %s: %s',
-                      name, traceback.format_exc())
+                      (name, traceback.format_exc()))
             results.append((False, sys.exc_info()))
     return results
 
@@ -158,7 +158,7 @@ def _run_concurrent(name, handlers, *args, **kwargs):
             results[idx] = (True, r)
         except Exception:
             log.error('Failed running event handler for %s: %s',
-                      name, traceback.format_exc())
+                      (name, traceback.format_exc()))
             results[idx] = (False, sys.exc_info())
 
     return [r for r in results if r is not None]
@@ -171,7 +171,7 @@ def fireEventAsync(*args, **kwargs):
         t.start()
         return True
     except Exception as e:
-        log.error('%s: %s', args[0], e)
+        log.error('%s: %s', (args[0], e))
 
 
 def errorHandler(error):

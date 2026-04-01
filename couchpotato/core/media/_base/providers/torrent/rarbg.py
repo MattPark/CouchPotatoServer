@@ -83,7 +83,7 @@ class Base(TorrentMagnetProvider):
 
                             results.append({
                                 'id': random.randint(100, 9999),
-                                'name': re.sub('[^A-Za-z0-9\-_ \(\).]+', '', '%s (%s) %s' % (name, year, torrent_desc)),
+                                'name': re.sub(r'[^A-Za-z0-9\-_ \(\).]+', '', '%s (%s) %s' % (name, year, torrent_desc)),
                                 'url': result['download'],
                                 'detail_url': result['info_page'],
                                 'size': tryInt(result['size']/1048576),  # rarbg sends in bytes
@@ -117,7 +117,7 @@ class Base(TorrentMagnetProvider):
     def find_info(filename):
         # CODEC #
         codec = 'x264'
-        v = re.search('(?i)(x265|h265|h\.265)', filename)
+        v = re.search(r'(?i)(x265|h265|h\.265)', filename)
         if v:
             codec = 'x265'
 
@@ -141,7 +141,7 @@ class Base(TorrentMagnetProvider):
 
         # SOURCE #
         source = 'HD-Rip'
-        s = re.search('(?i)(WEB-DL|WEB_DL|WEB\.DL)', filename)
+        s = re.search(r'(?i)(WEB-DL|WEB_DL|WEB\.DL)', filename)
         if s:
             source = 'WEB-DL'
 
@@ -161,7 +161,7 @@ class Base(TorrentMagnetProvider):
         if s:
             source = 'BluRay-Remux'
 
-        s = re.search('(?i)BluRay(.*)\.(AVC|VC-1)\.', filename)
+        s = re.search(r'(?i)BluRay(.*)\.(AVC|VC-1)\.', filename)
         if s:
             source = 'BluRay-Full'
 

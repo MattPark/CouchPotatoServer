@@ -1,5 +1,5 @@
 from base64 import b16encode, b32decode, b64encode
-from distutils.version import LooseVersion
+from couchpotato.core.helpers.variable import version_tuple
 from hashlib import sha1
 import http.client as httplib
 import json
@@ -93,7 +93,7 @@ class Hadouken(DownloaderBase):
         torrent_filename = self.createFileName(data, filedata, media)
 
         if data.get('protocol') == 'torrent_magnet':
-            torrent_hash = re.findall('urn:btih:([\w]{32,40})', data.get('url'))[0].upper()
+            torrent_hash = re.findall(r'urn:btih:([\w]{32,40})', data.get('url'))[0].upper()
             torrent_params['trackers'] = self.torrent_trackers
             torrent_params['name'] = torrent_filename
         else:
@@ -125,7 +125,7 @@ class Hadouken(DownloaderBase):
             return False
 
         # The minimum required version of Hadouken is 4.5.6.
-        if LooseVersion(version) >= LooseVersion('4.5.6'):
+        if version_tuple(version) >= version_tuple('4.5.6'):
             return True
 
         log.error('Hadouken v4.5.6 (or newer) required. Found v%s', version)

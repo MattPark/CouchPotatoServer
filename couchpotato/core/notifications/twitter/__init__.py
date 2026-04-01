@@ -1,7 +1,12 @@
-from .main import Twitter
+try:
+    from .main import Twitter
+except (ImportError, SyntaxError):
+    Twitter = None
 
 
 def autoload():
+    if Twitter is None:
+        return  # pytwitter lib is not Python 3 compatible; Twitter API v1 is defunct
     return Twitter()
 
 config = [{

@@ -77,7 +77,7 @@ class Settings(object):
         return self.p
 
     def sections(self):
-        res = filter( self.isSectionReadable, self.p.sections())
+        res = list(filter( self.isSectionReadable, self.p.sections()))
         return res
 
     def connectEvents(self):
@@ -181,11 +181,11 @@ class Settings(object):
         value = self.p.get(section, option)
 
         if value:
-            return map(str.strip, str.split(value, self.directories_delimiter))
+            return list(map(str.strip, value.split(self.directories_delimiter)))
         return []
 
     def getUnicode(self, section, option):
-        value = self.p.get(section, option).decode('unicode_escape')
+        value = self.p.get(section, option)
         return toUnicode(value).strip()
 
     def getValues(self):
@@ -231,7 +231,7 @@ class Settings(object):
                 if (self.getType(section, option_name) == 'directories'):
                     if (not value):
                         value = []
-                    try : value = map(soft_chroot.abs2chroot, value)
+                    try : value = list(map(soft_chroot.abs2chroot, value))
                     except : value = []
 
                 values[section][option_name] = value
@@ -239,7 +239,7 @@ class Settings(object):
         return values
 
     def save(self):
-        with open(self.file, 'wb') as configfile:
+        with open(self.file, 'w') as configfile:
             self.p.write(configfile)
 
     def addSection(self, section):
@@ -345,13 +345,13 @@ class Settings(object):
             value = json.loads(value)
             if not (value and isinstance(value, list)):
                 value = []
-            value = map(soft_chroot.chroot2abs, value)
+            value = list(map(soft_chroot.chroot2abs, value))
             value = self.directories_delimiter.join(value)
 
         # See if a value handler is attached, use that as value
         new_value = fireEvent('setting.save.%s.%s' % (section, option), value, single = True)
 
-        self.set(section, option, (new_value if new_value else value).encode('unicode_escape'))
+        self.set(section, option, (new_value if new_value else value))
         self.save()
 
         # After save (for re-interval etc)

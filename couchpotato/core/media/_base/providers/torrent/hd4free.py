@@ -59,7 +59,7 @@ class Base(TorrentProvider):
 
                     results.append({
                         'id': tryInt(result['torrentid']),
-                        'name': re.sub('[^A-Za-z0-9\-_ \(\).]+', '', '%s (%s) %s' % (name, year, torrent_desc)),
+                        'name': re.sub(r'[^A-Za-z0-9\-_ \(\).]+', '', '%s (%s) %s' % (name, year, torrent_desc)),
                         'url': self.urls['download'] % (result['torrentid'], result['torrentpass']),
                         'detail_url': self.urls['detail'] % result['torrentid'],
                         'size': tryInt(result['size']),

@@ -50,6 +50,9 @@ class Suggestion(Plugin):
             suggestions = fireEvent('movie.suggest', movies = movies, ignore = ignored, single = True)
             self.setCache('suggestion_cached', suggestions, timeout = 6048000)  # Cache for 10 weeks
 
+        if not suggestions:
+            suggestions = []
+
         medias = []
         for suggestion in suggestions[:int(limit)]:
 

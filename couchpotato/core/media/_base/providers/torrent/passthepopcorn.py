@@ -1,4 +1,4 @@
-import htmlentitydefs
+import html.entities as htmlentitydefs
 import json
 import re
 import time
@@ -146,19 +146,19 @@ class Base(TorrentProvider):
                 # character reference
                 try:
                     if txt[:3] == "&#x":
-                        return unichr(int(txt[3:-1], 16))
+                        return chr(int(txt[3:-1], 16))
                     else:
-                        return unichr(int(txt[2:-1]))
+                        return chr(int(txt[2:-1]))
                 except ValueError:
                     pass
             else:
                 # named entity
                 try:
-                    txt = unichr(htmlentitydefs.name2codepoint[txt[1:-1]])
+                    txt = chr(htmlentitydefs.name2codepoint[txt[1:-1]])
                 except KeyError:
                     pass
             return txt  # leave as is
-        return re.sub("&#?\w+;", fixup, '%s' % text)
+        return re.sub(r"&#?\w+;", fixup, '%s' % text)
 
     def unicodeToASCII(self, text):
         import unicodedata

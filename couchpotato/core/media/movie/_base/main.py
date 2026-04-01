@@ -172,7 +172,7 @@ class MovieBase(MovieTypeBase):
 
             # Remove releases
             for rel in fireEvent('release.for_media', m['_id'], single = True):
-                if rel['status'] is 'available':
+                if rel['status'] == 'available':
                     db.delete(rel)
 
             movie_dict = fireEvent('media.get', m['_id'], single = True)
@@ -226,7 +226,7 @@ class MovieBase(MovieTypeBase):
 
                     # Remove releases
                     for rel in fireEvent('release.for_media', m['_id'], single = True):
-                        if rel['status'] is 'available':
+                        if rel['status'] == 'available':
                             db.delete(rel)
 
                     # Default title

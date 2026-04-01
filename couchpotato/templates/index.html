@@ -83,10 +83,10 @@
 					'dev': dev,
 					'base_url': {{ json_encode(Env.get('web_base')) }},
 					'dereferer': {{ json_encode(Env.setting('dereferer')) }},
-					'args': {{ json_encode(Env.get('args', unicode = True)) }},
+					'args': {{ json_encode(Env.get('args', as_unicode = True)) }},
 					'options': {{ json_encode(('%s' % Env.get('options'))) }},
-					'app_dir': {{ json_encode(Env.get('app_dir', unicode = True)) }},
-					'data_dir': {{ json_encode(Env.get('data_dir', unicode = True)) }},
+				'app_dir': {{ json_encode(Env.get('app_dir', as_unicode = True)) }},
+				'data_dir': {{ json_encode(Env.get('data_dir', as_unicode = True)) }},
 					'pid': {{ json_encode(Env.getPid()) }},
 					'userscript_version': {{ json_encode(fireEvent('userscript.get_version', single = True)) }},
 					'webui_feature': {

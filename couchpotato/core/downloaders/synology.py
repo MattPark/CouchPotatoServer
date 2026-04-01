@@ -61,8 +61,8 @@ class Synology(DownloaderBase):
                     response = srpc.create_task(filename = filename, filedata = filedata)
         except:
             log.error('Exception while adding torrent: %s', traceback.format_exc())
-        finally:
-            return self.downloadReturnId('') if response else False
+
+        return self.downloadReturnId('') if response else False
 
     def test(self):
         """ Check if connection works
@@ -149,8 +149,8 @@ class SynologyRPC(object):
             log.error('SynologyRPC HTTPError: %s', err)
         except Exception as err:
             log.error('Exception: %s', err)
-        finally:
-            return response
+
+        return response
 
     def create_task(self, url = None, filename = None, filedata = None):
         """ Creates new download task in Synology DownloadStation. Either specify

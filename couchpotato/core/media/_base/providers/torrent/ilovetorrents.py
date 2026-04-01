@@ -88,7 +88,7 @@ class Base(TorrentProvider):
 
                                 return confirmed + trusted + vip + moderated
 
-                            id = re.search('id=(?P<id>\d+)&', link).group('id')
+                            id = re.search(r'id=(?P<id>\d+)&', link).group('id')
                             url = self.urls['download'] % download
 
                             fileSize = self.parseSize(result.select('td.rowhead')[8].text)

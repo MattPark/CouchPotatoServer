@@ -7,7 +7,7 @@ autoload = 'YouTheater'
 
 
 class YouTheater(UserscriptBase):
-    id_re = re.compile("view\.php\?id=(\d+)")
+    id_re = re.compile(r"view\.php\?id=(\d+)")
     includes = ['http://www.youtheater.com/view.php?id=*', 'http://youtheater.com/view.php?id=*',
                 'http://www.sratim.co.il/view.php?id=*', 'http://sratim.co.il/view.php?id=*']
 

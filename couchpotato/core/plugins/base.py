@@ -14,7 +14,7 @@ from couchpotato.core.helpers.variable import md5, isLocalIP, scanForPassword, t
 from couchpotato.core.logger import CPLog
 from couchpotato.environment import Env
 import requests
-from requests.packages.urllib3 import Timeout
+from requests.exceptions import Timeout
 from requests.packages.urllib3.exceptions import MaxRetryError
 from tornado import template
 

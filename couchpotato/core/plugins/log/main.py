@@ -73,7 +73,7 @@ class Logging(Plugin):
                 break
 
             # Set current path
-            if x is nr:
+            if x == nr:
                 current_path = path
 
         log_content = ''
@@ -146,7 +146,7 @@ class Logging(Plugin):
                     log_type = 'UNKNOWN'
 
                 message = ''.join(split[1]) if len(split) > 1 else split[0]
-                message = re.sub('\[\d+m\[', '[', message)
+                message = re.sub(r'\[\d+m\[', '[', message)
 
                 logs.append({
                     'time': timestamp,
@@ -167,7 +167,7 @@ class Logging(Plugin):
             try:
 
                 # Create empty file for current logging
-                if x is 0:
+                if x == 0:
                     self.createFile(path, '')
                 else:
                     os.remove(path)

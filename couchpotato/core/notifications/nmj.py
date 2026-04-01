@@ -1,5 +1,9 @@
 import re
-import telnetlib
+
+try:
+    import telnetlib
+except ImportError:
+    telnetlib = None
 
 from couchpotato.api import addApiView
 from couchpotato.core.event import addEvent
@@ -30,6 +34,10 @@ class NMJ(Notification):
     def autoConfig(self, host = 'localhost', **kwargs):
 
         mount = ''
+
+        if telnetlib is None:
+            log.error('NMJ notification requires telnetlib which is not available in Python 3.13+')
+            return self.failed()
 
         try:
             terminal = telnetlib.Telnet(host)

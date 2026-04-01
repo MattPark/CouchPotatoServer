@@ -83,7 +83,7 @@ class uTorrent(DownloaderBase):
             return False
 
         if data.get('protocol') == 'torrent_magnet':
-            torrent_hash = re.findall('urn:btih:([\w]{32,40})', data.get('url'))[0].upper()
+            torrent_hash = re.findall(r'urn:btih:([\w]{32,40})', data.get('url'))[0].upper()
             torrent_params['trackers'] = '%0D%0A%0D%0A'.join(self.torrent_trackers)
         else:
             info = bdecode(filedata)['info']

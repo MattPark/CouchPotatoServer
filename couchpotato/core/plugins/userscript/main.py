@@ -123,13 +123,13 @@ class Userscript(Plugin):
 
         success = 0
         for x in tests:
-            x = b64decode(x)
+            x = b64decode(x).decode('utf-8')
             try:
                 movie = self.getViaUrl(x)
                 movie = movie.get('movie', {}) or {}
                 imdb = movie.get('imdb')
 
-                if imdb and b64encode(imdb) in ['dHQxMjI5MjM4', 'dHQyMzgxMjQ5']:
+                if imdb and b64encode(imdb.encode('utf-8')).decode('utf-8') in ['dHQxMjI5MjM4', 'dHQyMzgxMjQ5']:
                     success += 1
                     continue
             except:

@@ -260,7 +260,7 @@ class TheMovieDb(MovieProvider):
 
     def getApiKey(self):
         key = self.conf('api_key')
-        return bd(random.choice(self.ak)) if key == '' else key
+        return bd(random.choice(self.ak)).decode('utf-8') if key == '' else key
 
     def getLanguages(self):
         languages = splitString(Env.setting('languages', section = 'core'))

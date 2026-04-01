@@ -6,4 +6,4 @@ exec \
   python3 /app/couchpotato/CouchPotato.py \
     --data_dir=/config \
     --console_log \
-    --daemon=0
+    

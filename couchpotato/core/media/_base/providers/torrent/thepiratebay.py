@@ -74,7 +74,7 @@ class Base(TorrentMagnetProvider):
 
                     entries = results_table.find_all('tr')
                     for result in entries[1:]:
-                        link = result.find(href = re.compile('torrent\/\d+\/'))
+                        link = result.find(href = re.compile(r'torrent\/\d+\/'))
                         download = result.find(href = re.compile('magnet:'))
 
                         try:
@@ -100,7 +100,7 @@ class Base(TorrentMagnetProvider):
                                 return confirmed + trusted + vip + moderated
 
                             results.append({
-                                'id': re.search('/(?P<id>\d+)/', link['href']).group('id'),
+                                'id': re.search(r'/(?P<id>\d+)/', link['href']).group('id'),
                                 'name': str(link.string),
                                 'url': download['href'],
                                 'detail_url': self.getDomain(link['href']),

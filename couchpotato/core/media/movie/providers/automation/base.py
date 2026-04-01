@@ -47,9 +47,9 @@ class Automation(AutomationBase):
     def search(self, name, year = None, imdb_only = False):
 
         try:
-            cache_name = name.decode('utf-8').encode('ascii', 'ignore')
-        except UnicodeEncodeError:
-            cache_name = unicodedata.normalize('NFKD', name).encode('ascii','ignore')
+            cache_name = name.encode('ascii', 'ignore').decode('ascii')
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            cache_name = unicodedata.normalize('NFKD', name).encode('ascii','ignore').decode('ascii')
 
         prop_name = 'automation.cached.%s.%s' % (cache_name, year)
         cached_imdb = Env.prop(prop_name, default = False)

@@ -121,10 +121,12 @@ def flattenList(l):
 
 
 def md5(text):
-    return hashlib.md5(ss(text)).hexdigest()
+    return hashlib.md5(ss(text).encode('utf-8')).hexdigest()
 
 
 def sha1(text):
+    if isinstance(text, str):
+        text = text.encode('utf-8')
     return hashlib.sha1(text).hexdigest()
 
 
@@ -224,7 +226,7 @@ def natsortKey(string_):
 
 
 def toIterable(value):
-    if isinstance(value, collections.Iterable):
+    if isinstance(value, collections.abc.Iterable):
         return value
     return [value]
 
@@ -411,4 +413,10 @@ def find(func, iterable):
 def compareVersions(version1, version2):
     def normalize(v):
         return [int(x) for x in re.sub(r'(\.0+)*$','', v).split(".")]
-    return cmp(normalize(version1), normalize(version2))
+    n1, n2 = normalize(version1), normalize(version2)
+    return (n1 > n2) - (n1 < n2)
+
+
+def version_tuple(v):
+    """Convert a version string like '4.5.6' to a tuple of ints for comparison."""
+    return tuple(int(x) for x in re.sub(r'[^0-9.]', '', v).split('.'))

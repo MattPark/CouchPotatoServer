@@ -123,7 +123,7 @@ class Core(Plugin):
         def shutdown():
             self.initShutdown()
 
-        if IOLoop.current()._closing:
+        if getattr(IOLoop.current(), 'closing', False) or getattr(IOLoop.current(), '_closing', False):
             shutdown()
         else:
             IOLoop.current().add_callback(shutdown)
@@ -177,7 +177,7 @@ class Core(Plugin):
         loop = IOLoop.current()
 
         try:
-            if not loop._closing:
+            if not getattr(loop, 'closing', False) and not getattr(loop, '_closing', False):
                 loop.stop()
         except RuntimeError:
             pass
