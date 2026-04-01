@@ -17,7 +17,14 @@ RUN \
     py3-lxml && \
   echo "**** install pip packages ****" && \
   pip3 install --no-cache-dir --break-system-packages \
-    tinydb && \
+    tinydb \
+    requests \
+    tornado \
+    chardet \
+    beautifulsoup4 \
+    python-dateutil \
+    "apscheduler>=3.10,<4" \
+    html5lib && \
   echo "**** cleanup ****" && \
   rm -rf /tmp/*
 
