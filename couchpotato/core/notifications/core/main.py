@@ -21,7 +21,6 @@ log = CPLog(__name__)
 class CoreNotifier(Notification):
 
     _database = {}
-    }
 
     m_lock = None
 
@@ -60,13 +59,9 @@ class CoreNotifier(Notification):
         addNonBlockApiView('notification.listener', (self.addListener, self.removeListener))
         addApiView('notification.listener', self.listener)
 
-        fireEvent('schedule.interval', 'core.check_messages', self.checkMessages, hours = 12, single = True)
         fireEvent('schedule.interval', 'core.clean_messages', self.cleanMessages, seconds = 15, single = True)
 
         addEvent('app.load', self.clean)
-
-        if not Env.get('dev'):
-            addEvent('app.load', self.checkMessages)
 
         self.messages = []
         self.listeners = []
@@ -108,7 +103,7 @@ class CoreNotifier(Notification):
         if limit_offset:
             splt = splitString(limit_offset)
             limit = tryInt(splt[0])
-            offset = tryInt(0 if len(splt) is 1 else splt[1])
+            offset = tryInt(0 if len(splt) == 1 else splt[1])
             results = db.all('notification', limit = limit, offset = offset, with_doc = True)
         else:
             results = db.all('notification', limit = 200, with_doc = True)
@@ -122,25 +117,6 @@ class CoreNotifier(Notification):
             'empty': len(notifications) == 0,
             'notifications': notifications
         }
-
-    def checkMessages(self):
-
-        prop_name = 'messages.last_check'
-        last_check = tryInt(Env.prop(prop_name, default = 0))
-
-        messages = fireEvent('cp.messages', last_check = last_check, single = True) or []
-
-        for message in messages:
-            if message.get('time') > last_check:
-                message['sticky'] = True  # Always sticky core messages
-
-                message_type = 'core.message.important' if message.get('important') else 'core.message'
-                fireEvent(message_type, message = message.get('message'), data = message)
-
-            if last_check < message.get('time'):
-                last_check = message.get('time')
-
-        Env.prop(prop_name, value = last_check)
 
     def notify(self, message = '', data = None, listener = None):
         if not data: data = {}

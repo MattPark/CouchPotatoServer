@@ -1,11 +1,10 @@
 import json
-import traceback
 import time
+import traceback
 
 from couchpotato import Env, fireEvent
 from couchpotato.api import addApiView
 from couchpotato.core.event import addEvent
-from couchpotato.core.helpers.variable import cleanHost
 from couchpotato.core.logger import CPLog
 from couchpotato.core.media._base.providers.base import Provider
 from couchpotato.core.media.movie.providers.automation.base import Automation
@@ -38,8 +37,9 @@ class Trakt(Automation, TraktBase):
 
     urls = {
         'watchlist': 'sync/watchlist/movies?extended=full',
-        'oauth': 'https://api.couchpota.to/authorize/trakt/',
-        'refresh_token': 'https://api.couchpota.to/authorize/trakt_refresh/',
+        # TODO: Implement direct Trakt OAuth flow. The old flow proxied through
+        # api.couchpota.to which is permanently dead. Existing tokens in
+        # config.ini will continue to work until they expire.
     }
 
     def __init__(self):
@@ -61,17 +61,8 @@ class Trakt(Automation, TraktBase):
             last_refresh = int(Env.prop(prop_name, default = 0))
 
             if last_refresh < time.time()-4838400:  # refresh every 8 weeks
-                log.debug('Refreshing trakt token')
-
-                url = self.urls['refresh_token'] + '?token=' + self.conf('automation_oauth_refresh')
-                data = fireEvent('cp.api_call', url, cache_timeout = 0, single = True)
-                if data and 'oauth' in data and 'refresh' in data:
-                    log.debug('Oauth refresh: %s', data)
-                    self.conf('automation_oauth_token', value = data.get('oauth'))
-                    self.conf('automation_oauth_refresh', value = data.get('refresh'))
-                    Env.prop(prop_name, value = int(time.time()))
-                else:
-                    log.error('Failed refreshing Trakt token, please re-register in settings')
+                log.warning('Trakt token refresh is unavailable (api.couchpota.to proxy is dead). '
+                            'If your token expires, you will need to re-configure Trakt manually.')
 
         elif token and not refresh_token:
             log.error('Refresh token is missing, please re-register Trakt for autorefresh of the token in the future')
@@ -93,15 +84,12 @@ class Trakt(Automation, TraktBase):
         return self.call(self.urls['watchlist'])
 
     def getAuthorizationUrl(self, host = None, **kwargs):
-        callback_url = cleanHost(host) + '%sautomation.trakt.credentials/' % (Env.get('api_base').lstrip('/'))
-        log.debug('callback_url is %s', callback_url)
-
-        target_url = self.urls['oauth'] + "?target=" + callback_url
-        log.debug('target_url is %s', target_url)
-
+        # TODO: Implement direct Trakt OAuth flow
+        log.error('Trakt authorization is unavailable (api.couchpota.to proxy is dead)')
         return {
-            'success': True,
-            'url': target_url,
+            'success': False,
+            'error': 'Trakt OAuth proxy (api.couchpota.to) is no longer available. '
+                     'Direct OAuth support is planned for a future update.',
         }
 
     def getCredentials(self, **kwargs):

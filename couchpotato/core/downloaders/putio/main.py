@@ -16,7 +16,8 @@ class PutIO(DownloaderBase):
 
     protocol = ['torrent', 'torrent_magnet']
     downloading_list = []
-    oauth_authenticate = 'https://api.couchpota.to/authorize/putio/'
+    # TODO: Implement direct Put.io OAuth flow. The old flow proxied through
+    # api.couchpota.to which is permanently dead.
 
     def __init__(self):
         addApiView('downloader.putio.getfrom', self.getFromPutio, docs = {
@@ -81,15 +82,14 @@ class PutIO(DownloaderBase):
 
     def getAuthorizationUrl(self, host = None, **kwargs):
 
-        callback_url = cleanHost(host) + '%sdownloader.putio.credentials/' % (Env.get('api_base').lstrip('/'))
-        log.debug('callback_url is %s', callback_url)
-
-        target_url = self.oauth_authenticate + "?target=" + callback_url
-        log.debug('target_url is %s', target_url)
+        # TODO: Implement direct OAuth flow with Put.io
+        # The old proxy at api.couchpota.to is permanently dead.
+        # Users must manually obtain an OAuth token from Put.io and enter it in settings.
+        log.error('Put.io OAuth proxy is no longer available. Please obtain an OAuth token directly from Put.io and enter it in the settings.')
 
         return {
-            'success': True,
-            'url': target_url,
+            'success': False,
+            'error': 'Put.io OAuth proxy (api.couchpota.to) is no longer available. Please obtain an OAuth token directly from https://put.io and enter it in Settings > Downloaders > Put.io > OAuth Token.',
         }
 
     def getCredentials(self, **kwargs):

@@ -299,40 +299,8 @@ class SourceUpdater(BaseUpdater):
 
     def doUpdate(self):
 
-        try:
-            download_data = fireEvent('cp.source_url', repo = self.repo_user, repo_name = self.repo_name, branch = self.branch, single = True)
-            destination = os.path.join(Env.get('cache_dir'), self.update_version.get('hash')) + '.' + download_data.get('type')
-
-            extracted_path = os.path.join(Env.get('cache_dir'), 'temp_updater')
-            destination = fireEvent('file.download', url = download_data.get('url'), dest = destination, single = True)
-
-            # Cleanup leftover from last time
-            if os.path.isdir(extracted_path):
-                self.removeDir(extracted_path)
-            self.makeDir(extracted_path)
-
-            # Extract
-            if download_data.get('type') == 'zip':
-                zip_file = zipfile.ZipFile(destination)
-                zip_file.extractall(extracted_path)
-                zip_file.close()
-            else:
-                tar = tarfile.open(destination)
-                tar.extractall(path = extracted_path)
-                tar.close()
-
-            os.remove(destination)
-
-            if self.replaceWith(os.path.join(extracted_path, os.listdir(extracted_path)[0])):
-                self.removeDir(extracted_path)
-
-                # Write update version to file
-                self.createFile(self.version_file, json.dumps(self.update_version))
-
-                return True
-        except:
-            log.error('Failed updating: %s', traceback.format_exc())
-
+        log.error('Source-based updates are no longer supported (api.couchpota.to is dead). '
+                  'Please use git clone or Docker for auto-updates.')
         self.update_failed = True
         return False
 
