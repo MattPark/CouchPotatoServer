@@ -126,23 +126,25 @@ def _remap_ids(docs):
     return docs, id_map
 
 
-def migrate_codernity_to_tinydb(db_path, data_dir):
+def migrate_codernity_to_tinydb(old_db_path, new_db_path):
     """Run the full CodernityDB -> TinyDB migration.
 
     Args:
-        db_path:  Path to the database directory (contains id_buck, id_stor)
-        data_dir: Parent data directory (database_legacy/ created here)
+        old_db_path: Path to the old CodernityDB directory (contains id_buck, id_stor)
+        new_db_path: Path where the new TinyDB database directory should be created
 
     Returns True on success, False on failure.
     """
     from couchpotato.core.db import CouchDB
 
-    legacy_dir = os.path.join(data_dir, 'database_legacy')
-    db_json = os.path.join(db_path, 'db.json')
+    # Place legacy folder alongside the old database
+    legacy_dir = old_db_path + '_legacy'
+    db_json = os.path.join(new_db_path, 'db.json')
 
     log.info('=' * 50)
     log.info('Starting CodernityDB -> TinyDB migration')
-    log.info('Source: %s', db_path)
+    log.info('Source: %s', old_db_path)
+    log.info('Destination: %s', new_db_path)
 
     # Clean up any partial previous migration
     if os.path.isfile(db_json):
@@ -152,7 +154,7 @@ def migrate_codernity_to_tinydb(db_path, data_dir):
     try:
         # Step 1: Read all documents from CodernityDB
         log.info('Reading documents from CodernityDB...')
-        docs = list(_read_codernity_docs(db_path))
+        docs = list(_read_codernity_docs(old_db_path))
         log.info('Read %d documents total', len(docs))
 
         # Log type breakdown
@@ -168,29 +170,32 @@ def migrate_codernity_to_tinydb(db_path, data_dir):
         docs, id_map = _remap_ids(docs)
         log.info('Remapped %d IDs', len(id_map))
 
-        # Step 3: Move old CodernityDB files out of the way BEFORE
-        # creating db.json (so they don't coexist)
+        # Step 3: Move old CodernityDB files out of the way
         if os.path.isdir(legacy_dir):
             shutil.rmtree(legacy_dir)
         os.makedirs(legacy_dir)
 
-        for fname in os.listdir(db_path):
+        for fname in os.listdir(old_db_path):
             # Move all CodernityDB artifacts (_buck, _stor, _compact, etc.)
             if fname.endswith(('_buck', '_stor', '_compact_buck', '_compact_stor')):
-                src = os.path.join(db_path, fname)
+                src = os.path.join(old_db_path, fname)
                 dst = os.path.join(legacy_dir, fname)
                 shutil.move(src, dst)
 
-        # Also move the _indexes file if present
-        idx_file = os.path.join(db_path, '_indexes')
-        if os.path.exists(idx_file):
-            shutil.move(idx_file, os.path.join(legacy_dir, '_indexes'))
+        # Also move the _indexes dir if present
+        idx_dir = os.path.join(old_db_path, '_indexes')
+        if os.path.exists(idx_dir):
+            shutil.move(idx_dir, os.path.join(legacy_dir, '_indexes'))
 
         log.info('Moved CodernityDB files to %s', legacy_dir)
 
         # Step 4: Create TinyDB and bulk-insert
+        # Ensure destination directory exists
+        if not os.path.isdir(new_db_path):
+            os.makedirs(new_db_path)
+
         log.info('Writing %d documents to TinyDB...', len(docs))
-        db = CouchDB(db_path)
+        db = CouchDB(new_db_path)
         db.create()
 
         # Batch insert for performance
@@ -217,7 +222,7 @@ def migrate_codernity_to_tinydb(db_path, data_dir):
         if os.path.isdir(legacy_dir):
             for fname in os.listdir(legacy_dir):
                 src = os.path.join(legacy_dir, fname)
-                dst = os.path.join(db_path, fname)
+                dst = os.path.join(old_db_path, fname)
                 if not os.path.exists(dst):
                     shutil.move(src, dst)
             shutil.rmtree(legacy_dir)

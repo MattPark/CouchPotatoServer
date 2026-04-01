@@ -93,7 +93,7 @@ def main():
         from couchpotato.core.migration.migrate import migrate_codernity_to_tinydb
 
         t0 = time.time()
-        result = migrate_codernity_to_tinydb(db_dir, data_dir)
+        result = migrate_codernity_to_tinydb(db_dir, db_dir)
         t1 = time.time()
         log.info('Migration returned: %s (took %.2f seconds)', result, t1 - t0)
 
