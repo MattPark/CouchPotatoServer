@@ -52,6 +52,13 @@ def getOptions(args):
 
     if not options.config_file:
         options.config_file = os.path.join(data_dir, 'settings.conf')
+        # Migrate from linuxserver.io layout: config.ini -> settings.conf
+        if not os.path.isfile(options.config_file):
+            alt_config = os.path.join(data_dir, 'config.ini')
+            if os.path.isfile(alt_config):
+                import shutil
+                shutil.copy2(alt_config, options.config_file)
+                logging.info('Copied %s -> %s (linuxserver.io migration)', alt_config, options.config_file)
 
     if not options.pid_file:
         options.pid_file = os.path.join(data_dir, 'couchpotato.pid')
@@ -292,6 +299,15 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
     )
     Env.set('app', application)
 
+    # Static paths (must be registered BEFORE catch-all WebHandler)
+    static_path = '%sstatic/' % web_base
+    static_handlers = []
+    for dir_name in ['fonts', 'images', 'scripts', 'style']:
+        static_handlers.append(
+            ('%s%s/(.*)' % (static_path, dir_name), StaticFileHandler, {'path': sp(os.path.join(base_path, 'couchpotato', 'static', dir_name))})
+        )
+    Env.set('static_path', static_path)
+
     # Request handlers
     application.add_handlers(".*$", [
         (r'%snonblock/(.*)(/?)' % api_base, NonBlockHandler),
@@ -305,18 +321,13 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
         (r'%slogin(/?)' % web_base, LoginHandler),
         (r'%slogout(/?)' % web_base, LogoutHandler),
 
-        # Catch all webhandlers
+        # Static file handlers
+    ] + static_handlers + [
+
+        # Catch all webhandlers (must be AFTER static handlers)
         (r'%s(.*)(/?)' % web_base, WebHandler),
         (r'(.*)', WebHandler),
     ])
-
-    # Static paths
-    static_path = '%sstatic/' % web_base
-    for dir_name in ['fonts', 'images', 'scripts', 'style']:
-        application.add_handlers(".*$", [
-            ('%s%s/(.*)' % (static_path, dir_name), StaticFileHandler, {'path': sp(os.path.join(base_path, 'couchpotato', 'static', dir_name))})
-        ])
-    Env.set('static_path', static_path)
 
     # Load configs & plugins
     loader = Env.get('loader')
