@@ -1,0 +1,15 @@
+services:
+  couchpotato:
+    image: ghcr.io/mattpark/couchpotatoserver:latest
+    container_name: couchpotato
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - /path/to/config:/config
+      - /path/to/downloads:/downloads
+      - /path/to/movies:/movies
+    ports:
+      - "5050:5050"
+    restart: unless-stopped

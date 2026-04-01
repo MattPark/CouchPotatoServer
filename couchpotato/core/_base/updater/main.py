@@ -32,12 +32,14 @@ class Updater(Plugin):
 
     def __init__(self):
 
-        if Env.get('desktop'):
+        if os.environ.get('COUCHPOTATO_DOCKER'):
+            self.updater = BaseUpdater()
+        elif Env.get('desktop'):
             self.updater = DesktopUpdater()
         elif os.path.isdir(os.path.join(Env.get('app_dir'), '.git')):
             git_default = 'git'
             git_command = self.conf('git_command', default = git_default)
-            git_command = git_command if git_command != git_default and (os.path.isfile(git_command) or re.match('^[a-zA-Z0-9_/\.\-]+$', git_command)) else git_default
+            git_command = git_command if git_command != git_default and (os.path.isfile(git_command) or re.match(r'^[a-zA-Z0-9_/.\-]+$', git_command)) else git_default
             self.updater = GitUpdater(git_command)
         else:
             self.updater = SourceUpdater()

@@ -1,0 +1,7 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+test_migration.py
+.github
