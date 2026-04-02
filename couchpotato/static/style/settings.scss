@@ -792,7 +792,11 @@
 
 	// Manage settings tab — scan toolbar
 	.scan_toolbar {
-		padding: $padding/2 0;
+		padding: $padding/2 0 $padding/2 $padding;
+
+		@include media-phablet {
+			padding-left: $padding/2;
+		}
 
 		.scan_buttons {
 			display: flex;
