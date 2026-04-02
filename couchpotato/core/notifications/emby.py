@@ -22,7 +22,7 @@ class Emby(Notification):
         host = cleanHost(host)
         url = '%semby/Library/Movies/Updated' % (host)
         values = {}
-        data = urlencode(values)
+        data = urlencode(values).encode('utf-8')
 
         try:
             req = Request(url, data)
@@ -33,7 +33,7 @@ class Emby(Notification):
             response.close()
             return True
 
-        except (URLError, IOError), e:
+        except (URLError, IOError) as e:
             return False
 
     def test(self, **kwargs):
@@ -44,7 +44,7 @@ class Emby(Notification):
         host = cleanHost(host)
         url = '%semby/Notifications/Admin' % (host)
         values = {'Name': 'CouchPotato', 'Description': message, 'ImageUrl': 'https://raw.githubusercontent.com/CouchPotato/CouchPotatoServer/master/couchpotato/static/images/notify.couch.small.png'}
-        data = json.dumps(values)
+        data = json.dumps(values).encode('utf-8')
 
         try:
             req = Request(url, data)
@@ -58,7 +58,7 @@ class Emby(Notification):
                 'success': True
             }
 
-        except (URLError, IOError), e:
+        except (URLError, IOError) as e:
             return False
 
 
