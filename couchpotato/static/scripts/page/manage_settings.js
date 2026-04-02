@@ -147,27 +147,71 @@ var ManageSettingTab = new Class({
 						self.progress_container.setStyle('display', '');
 						self.progress_container.empty();
 
+						// Calculate elapsed time from scan start
+						var elapsed_str = '';
+						if(json.results && json.results.started){
+							var elapsed_secs = Math.round(Date.now() / 1000 - json.results.started);
+							if(elapsed_secs >= 3600){
+								elapsed_str = Math.floor(elapsed_secs / 3600) + 'h ' + Math.floor((elapsed_secs % 3600) / 60) + 'm';
+							} else if(elapsed_secs >= 60){
+								elapsed_str = Math.floor(elapsed_secs / 60) + 'm ' + (elapsed_secs % 60) + 's';
+							} else {
+								elapsed_str = elapsed_secs + 's';
+							}
+						}
+
 						var status_line = new Element('div.scan_status').adopt(
 							new Element('span.scan_status_icon.icon-refresh.spinning'),
 							new Element('span', { 'text': 'Scanning library...' })
 						).inject(self.progress_container);
 
-						// Show results-so-far if available
+						// Show results-so-far and elapsed time
 						if(json.results && json.results.scanning){
-							new Element('span.scan_live_count', {
-								'text': ' (' + json.results.movies_found + ' found, ' + json.results.movies_added + ' added)'
-							}).inject(status_line);
+							var count_parts = [];
+							if(json.results.movies_found > 0 || json.results.movies_added > 0){
+								count_parts.push(json.results.movies_found + ' found');
+								count_parts.push(json.results.movies_added + ' added');
+							}
+							if(elapsed_str){
+								count_parts.push(elapsed_str + ' elapsed');
+							}
+							if(count_parts.length > 0){
+								new Element('span.scan_live_count', {
+									'text': ' (' + count_parts.join(', ') + ')'
+								}).inject(status_line);
+							}
 						}
 
 						var sorted_table = self.parseProgress(json.progress);
 
 						sorted_table.each(function(folder){
 							var folder_progress = progress[folder];
+
+							// Build folder detail text
+							var folder_text = folder;
+							if(folder_progress.eta > 0){
+								folder_text += ', ' + new Date().increment('second', folder_progress.eta).timeDiffInWords().replace('from now', 'to go');
+							} else if(folder_progress.started && !folder_progress.total){
+								// Still walking the filesystem — show elapsed time for this folder
+								var folder_elapsed = Math.round(Date.now() / 1000 - folder_progress.started);
+								if(folder_elapsed >= 60){
+									folder_text += ', scanning files for ' + Math.floor(folder_elapsed / 60) + 'm ' + (folder_elapsed % 60) + 's';
+								} else if(folder_elapsed > 3){
+									folder_text += ', scanning files for ' + folder_elapsed + 's';
+								}
+							}
+
+							// Progress text
+							var pct_text;
+							if(folder_progress.total){
+								pct_text = Math.round(((folder_progress.total - folder_progress.to_go) / folder_progress.total) * 100) + '%';
+							} else {
+								pct_text = 'scanning\u2026';
+							}
+
 							new Element('div.scan_folder_row').adopt(
-								new Element('span.folder', {'text': folder +
-									(folder_progress.eta > 0 ? ', ' + new Date().increment('second', folder_progress.eta).timeDiffInWords().replace('from now', 'to go') : '')
-								}),
-								new Element('span.percentage', {'text': folder_progress.total ? Math.round(((folder_progress.total-folder_progress.to_go)/folder_progress.total)*100) + '%' : '0%'})
+								new Element('span.folder', {'text': folder_text}),
+								new Element('span.percentage', {'text': pct_text})
 							).inject(self.progress_container);
 						});
 
