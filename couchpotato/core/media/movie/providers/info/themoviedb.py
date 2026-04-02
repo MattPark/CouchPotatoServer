@@ -36,6 +36,8 @@ class TheMovieDb(MovieProvider):
         addEvent('movie.info', self.getInfo, priority = 3)
         addEvent('movie.info_by_tmdb', self.getInfo)
         addEvent('app.load', self.config)
+        addEvent('movie.is_movie', self.isMovie)
+        addEvent('movie.suggest', self.getSuggestions)
 
     def config(self):
 
@@ -61,6 +63,101 @@ class TheMovieDb(MovieProvider):
         configuration = self.request('configuration')
         if configuration:
             self.configuration = configuration
+
+    def getSuggestions(self, movies = None, ignore = None, **kwargs):
+        """Get movie suggestions based on the user's library using TMDB recommendations."""
+
+        if not movies:
+            return []
+        if not ignore:
+            ignore = []
+
+        if self.isDisabled():
+            return []
+
+        # Sample a handful of library movies to get recommendations from
+        sample_size = min(5, len(movies))
+        sampled = random.sample(movies, sample_size)
+
+        seen_tmdb_ids = set()
+        suggestions = []
+
+        for imdb_id in sampled:
+            if self.shuttingDown():
+                break
+
+            # Look up TMDB ID from IMDB ID
+            try:
+                find_data = self.request('find/%s' % imdb_id, {
+                    'external_source': 'imdb_id',
+                })
+                if not find_data or not find_data.get('movie_results'):
+                    continue
+                tmdb_id = find_data['movie_results'][0]['id']
+            except:
+                continue
+
+            # Get recommendations for this movie
+            try:
+                recs = self.request('movie/%s/recommendations' % tmdb_id, {
+                    'language': 'en',
+                }, return_key = 'results')
+                if not recs:
+                    continue
+            except:
+                continue
+
+            for rec in recs[:10]:
+                rec_id = rec.get('id')
+                if rec_id in seen_tmdb_ids:
+                    continue
+                seen_tmdb_ids.add(rec_id)
+
+                # Parse into full movie data (includes IMDB ID lookup)
+                try:
+                    parsed = self.parseMovie({'id': rec_id}, extended = False)
+                    if not parsed:
+                        continue
+                    # Skip if already in library or ignored
+                    rec_imdb = parsed.get('imdb')
+                    if rec_imdb and (rec_imdb in movies or rec_imdb in ignore):
+                        continue
+                    suggestions.append(parsed)
+                except:
+                    continue
+
+                if len(suggestions) >= 20:
+                    break
+
+            if len(suggestions) >= 20:
+                break
+
+        return suggestions
+
+    def isMovie(self, identifier = None, adding = False, **kwargs):
+        """Check if an IMDB identifier is a movie (not a TV show).
+        Uses TMDB's /find endpoint to look up by external ID."""
+
+        if not identifier:
+            return True
+
+        if self.isDisabled():
+            return True
+
+        try:
+            data = self.request('find/%s' % identifier, {
+                'external_source': 'imdb_id',
+            })
+            if data:
+                if data.get('movie_results'):
+                    return True
+                if data.get('tv_results') or data.get('tv_episode_results') or data.get('tv_season_results'):
+                    return False
+            # Default to True (assume movie) if we can't determine
+            return True
+        except:
+            log.error('Failed checking if %s is a movie: %s' % (identifier, traceback.format_exc()))
+            return True
 
     def search(self, q, limit = 3):
         """ Find movie by name """
