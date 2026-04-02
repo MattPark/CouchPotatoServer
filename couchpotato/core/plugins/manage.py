@@ -20,6 +20,7 @@ autoload = 'Manage'
 class Manage(Plugin):
 
     in_progress = False
+    last_scan_results = None
 
     def __init__(self):
 
@@ -48,6 +49,13 @@ class Manage(Plugin):
 }"""},
         })
 
+        addApiView('manage.results', self.getResults, docs = {
+            'desc': 'Get the results of the last completed scan',
+            'return': {'type': 'object', 'example': """{
+    'results': {'movies_found': 10, 'movies_added': 2, 'folders_scanned': 3, 'scan_type': 'full'},
+}"""},
+        })
+
         if not Env.get('dev') and self.conf('startup_scan'):
             addEvent('app.load', self.updateLibraryQuick)
 
@@ -67,7 +75,13 @@ class Manage(Plugin):
 
     def getProgress(self, **kwargs):
         return {
-            'progress': self.in_progress
+            'progress': self.in_progress,
+            'results': self.last_scan_results
+        }
+
+    def getResults(self, **kwargs):
+        return {
+            'results': self.last_scan_results
         }
 
     def updateLibraryView(self, full = 1, **kwargs):
@@ -93,6 +107,14 @@ class Manage(Plugin):
             return
 
         self.in_progress = {}
+        self.last_scan_results = {
+            'scanning': True,
+            'scan_type': 'full' if full else 'quick',
+            'movies_found': 0,
+            'movies_added': 0,
+            'folders_scanned': 0,
+            'started': time.time(),
+        }
         fireEvent('notify.frontend', type = 'manage.updating', data = True)
 
         try:
@@ -124,6 +146,9 @@ class Manage(Plugin):
 
                 onFound = self.createAddToLibrary(folder, added_identifiers)
                 fireEvent('scanner.scan', folder = folder, simple = True, newer_than = last_update if not full else 0, check_file_date = False, on_found = onFound, single = True)
+
+                if self.last_scan_results:
+                    self.last_scan_results['folders_scanned'] += 1
 
                 # Break if CP wants to shut down
                 if self.shuttingDown():
@@ -203,6 +228,13 @@ class Manage(Plugin):
         fireEvent('notify.frontend', type = 'manage.updating', data = False)
         self.in_progress = False
 
+        # Finalize scan results
+        if self.last_scan_results:
+            self.last_scan_results['scanning'] = False
+            self.last_scan_results['finished'] = time.time()
+            elapsed = self.last_scan_results['finished'] - self.last_scan_results.get('started', 0)
+            self.last_scan_results['elapsed_seconds'] = round(elapsed, 1)
+
     # noinspection PyDefaultArgument
     def createAddToLibrary(self, folder, added_identifiers = []):
 
@@ -215,8 +247,15 @@ class Manage(Plugin):
 
             self.updateProgress(folder, to_go)
 
+            # Track scan results
+            if self.last_scan_results:
+                self.last_scan_results['movies_found'] += 1
+
             if group['media'] and group['identifier']:
                 added_identifiers.append(group['identifier'])
+
+                if self.last_scan_results:
+                    self.last_scan_results['movies_added'] += 1
 
                 # Add it to release and update the info
                 fireEvent('release.add', group = group, update_info = False)
