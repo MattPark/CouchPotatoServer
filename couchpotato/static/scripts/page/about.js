@@ -42,32 +42,39 @@ var AboutSettingTab = new Class({
 			'name': 'variables'
 		}).inject(self.content).adopt(
 			(about_block = new Element('dl.info')).adopt(
-				new Element('dt[text=Commit]'),
+				new Element('dt[text=Version]'),
 				self.version_text = new Element('dd.version', {
 					'text': 'Loading...'
 				}),
 
+				(!self.hide_about_update ? [
+					new Element('dt'),
+					self.update_dd = new Element('dd').adopt(
+						self.update_link = new Element('a.check_for_updates', {
+							'text': 'Check for updates',
+							'events': {
+								'click': App.checkForUpdate.bind(App, function(json){
+									self.fillVersion(json.info);
+								})
+							}
+						})
+					)
+				] : null),
+
 				new Element('dt[text=Branch]'),
-				self.branch_text = new Element('dd.branch'),
+				self.branch_text = new Element('dd.branch', {
+					'text': 'Loading...'
+				}),
 
 				new Element('dt[text=Updater]'),
-				self.updater_type = new Element('dd.updater'),
+				self.updater_type = new Element('dd.updater', {
+					'text': 'Loading...'
+				}),
 
 				new Element('dt[text=PID]'),
 				new Element('dd', {'text': App.getOption('pid')})
 			)
 		);
-
-		if (!self.hide_about_update){
-			self.update_link = new Element('a.check_for_updates', {
-				'text': 'Check for updates',
-				'events': {
-					'click': App.checkForUpdate.bind(App, function(json){
-						self.fillVersion(json.info);
-					})
-				}
-			}).inject(self.version_text, 'after');
-		}
 
 		if (!self.hide_about_dirs){
 			about_block.adopt(
@@ -86,7 +93,7 @@ var AboutSettingTab = new Class({
 	},
 
 	fillVersion: function(json){
-		if(!json || !json.version) return;
+		if(!json || !json.version) return false;
 		var self = this;
 		var v = json.version;
 		var hash = v.hash || 'unknown';
@@ -103,6 +110,7 @@ var AboutSettingTab = new Class({
 		}
 		self.branch_text.set('text', json.branch || v.branch || 'unknown');
 		self.updater_type.set('text', v.type || 'unknown');
+		return true;
 	}
 
 });

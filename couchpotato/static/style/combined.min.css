@@ -1,4 +1,6 @@
 .page.movie_details,.thumb_list .movie.hover_start .actions{pointer-events:none}
+@keyframes cp-spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+.spinning{display:inline-block;animation:cp-spin 1s linear infinite}
 .movies>.description a:hover,.page.movie_details .releases .buttons a:hover{text-decoration:underline}
 .update.message{background:#FFF;padding:20px;text-align:center;font-size:1.25em}
 .dark .update.message{background:#2d2d2d}
@@ -120,6 +122,33 @@
 .page.movies_manage .load_more,.page.movies_wanted .load_more{text-align:center;padding:20px;font-size:2em;display:block}
 .page.movies_manage .empty_manage,.page.movies_wanted .empty_manage{padding:20px}
 .page.movies_manage .empty_manage .after_manage,.page.movies_wanted .empty_manage .after_manage{margin-top:20px}
+.page.movies_manage .scan_toolbar,.page.movies_wanted .scan_toolbar{padding:10px 20px}
+.page.movies_manage .scan_toolbar .scan_buttons,.page.movies_wanted .scan_toolbar .scan_buttons{display:flex;gap:10px;margin-bottom:10px}
+@media (max-width:485px){.page.movies_manage .scan_toolbar .scan_buttons,.page.movies_wanted .scan_toolbar .scan_buttons{flex-direction:column}}
+.page.movies_manage .scan_toolbar .scan_btn,.page.movies_wanted .scan_toolbar .scan_btn{flex:1;display:flex;flex-wrap:wrap;align-items:center;padding:10px 20px;border:1px solid rgba(0,0,0,.15);border-radius:3px;cursor:pointer;transition:border-color .2s,opacity .2s}
+.dark .page.movies_manage .scan_toolbar .scan_btn,.dark .page.movies_wanted .scan_toolbar .scan_btn{border-color:rgba(255,255,255,.15)}
+.page.movies_manage .scan_toolbar .scan_btn:hover,.page.movies_wanted .scan_toolbar .scan_btn:hover{border-color:#ac0000}
+.dark .page.movies_manage .scan_toolbar .scan_btn:hover,.dark .page.movies_wanted .scan_toolbar .scan_btn:hover{border-color:#f85c22}
+.page.movies_manage .scan_toolbar .scan_btn.disabled,.page.movies_wanted .scan_toolbar .scan_btn.disabled{opacity:.4;pointer-events:none}
+.page.movies_manage .scan_toolbar .scan_btn .scan_btn_icon,.page.movies_wanted .scan_toolbar .scan_btn .scan_btn_icon{font-size:1.4em;margin-right:10px;color:#ac0000}
+.dark .page.movies_manage .scan_toolbar .scan_btn .scan_btn_icon,.dark .page.movies_wanted .scan_toolbar .scan_btn .scan_btn_icon{color:#f85c22}
+.page.movies_manage .scan_toolbar .scan_btn .scan_btn_label,.page.movies_wanted .scan_toolbar .scan_btn .scan_btn_label{font-weight:700;font-size:1.05em}
+.page.movies_manage .scan_toolbar .scan_btn .scan_btn_desc,.page.movies_wanted .scan_toolbar .scan_btn .scan_btn_desc{width:100%;font-size:.85em;opacity:.6;margin-top:2px;padding-left:calc(1.4em + 10px)}
+.page.movies_manage .scan_toolbar .scan_progress,.page.movies_wanted .scan_toolbar .scan_progress{padding:5px 0}
+.page.movies_manage .scan_toolbar .scan_progress .scan_status,.page.movies_wanted .scan_toolbar .scan_progress .scan_status{padding:5px 0;font-weight:700}
+.page.movies_manage .scan_toolbar .scan_progress .scan_status .scan_status_icon,.page.movies_wanted .scan_toolbar .scan_progress .scan_status .scan_status_icon{margin-right:6px;color:#ac0000}
+.dark .page.movies_manage .scan_toolbar .scan_progress .scan_status .scan_status_icon,.dark .page.movies_wanted .scan_toolbar .scan_progress .scan_status .scan_status_icon{color:#f85c22}
+.page.movies_manage .scan_toolbar .scan_progress .scan_status .scan_live_count,.page.movies_wanted .scan_toolbar .scan_progress .scan_status .scan_live_count{font-weight:400;opacity:.7}
+.page.movies_manage .scan_toolbar .scan_progress .scan_folder_row,.page.movies_wanted .scan_toolbar .scan_progress .scan_folder_row{display:flex;padding:2.5px 0}
+.page.movies_manage .scan_toolbar .scan_progress .scan_folder_row .folder,.page.movies_wanted .scan_toolbar .scan_progress .scan_folder_row .folder{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:10px;opacity:.7}
+.page.movies_manage .scan_toolbar .scan_progress .scan_folder_row .percentage,.page.movies_wanted .scan_toolbar .scan_progress .scan_folder_row .percentage{font-weight:700}
+.page.movies_manage .scan_toolbar .scan_results,.page.movies_wanted .scan_toolbar .scan_results{padding:5px 0}
+.page.movies_manage .scan_toolbar .scan_results .scan_results_inner,.page.movies_wanted .scan_toolbar .scan_results .scan_results_inner{display:flex;align-items:center;padding:10px;border-radius:3px;background:rgba(0,128,0,.08)}
+.dark .page.movies_manage .scan_toolbar .scan_results .scan_results_inner,.dark .page.movies_wanted .scan_toolbar .scan_results .scan_results_inner{background:rgba(0,200,0,.1)}
+.page.movies_manage .scan_toolbar .scan_results .scan_results_icon,.page.movies_wanted .scan_toolbar .scan_results .scan_results_icon{margin-right:10px;color:#2a2;font-size:1.2em}
+.page.movies_manage .scan_toolbar .scan_results .scan_results_text,.page.movies_wanted .scan_toolbar .scan_results .scan_results_text{flex:1}
+.page.movies_manage .scan_toolbar .scan_results .scan_results_dismiss,.page.movies_wanted .scan_toolbar .scan_results .scan_results_dismiss{margin-left:10px;opacity:.5;cursor:pointer;font-size:.85em}
+.page.movies_manage .scan_toolbar .scan_results .scan_results_dismiss:hover,.page.movies_wanted .scan_toolbar .scan_results .scan_results_dismiss:hover{opacity:1}
 .movie .ripple,.movie input[type=checkbox]{display:none}
 .with_navigation .movie input[type=checkbox]{display:inline-block;position:absolute;will-change:opacity;transition:opacity .2s;opacity:0;z-index:2;cursor:pointer}
 @media (max-width:485px){.with_navigation .movie input[type=checkbox]{display:none}
@@ -972,6 +1001,8 @@ input[type=text],textarea{-webkit-appearance:none}
 .page.settings .directory{width:100%}
 }
 .page.settings .tab_about .info dd.version{cursor:pointer}
+.page.settings .tab_about .info a.check_for_updates{display:inline-block;padding:4px 12px;font-size:.85em;font-style:normal;cursor:pointer;opacity:.7}
+.page.settings .tab_about .info a.check_for_updates:hover{opacity:1}
 .page.settings .tab_about .group_actions>div{padding:20px;text-align:center}
 .page.settings .tab_about .group_actions a{margin:0 10px;font-size:20px}
 .page.settings .directory input{width:100%}

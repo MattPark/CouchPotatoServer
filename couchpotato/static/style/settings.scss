@@ -626,8 +626,21 @@
 					margin-bottom: $padding/2;
 				}
 
-				&.version { cursor: pointer; }
+			&.version { cursor: pointer; }
+		}
+
+		a.check_for_updates {
+			display: inline-block;
+			padding: 4px 12px;
+			font-size: .85em;
+			font-style: normal;
+			cursor: pointer;
+			opacity: .7;
+
+			&:hover {
+				opacity: 1;
 			}
+		}
 		}
 
 		.group_actions {
