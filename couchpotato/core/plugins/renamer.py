@@ -302,6 +302,9 @@ class Renamer(Plugin):
             log.warning('No groups found for release, tagging as failed_rename')
             self.tagRelease(release_download = release_download, tag = 'failed_rename',
                             reason = 'Scanner returned 0 groups for this release')
+            # Mark release as failed so nzbToMedia/checkSnatched see the status change
+            if release_download and release_download.get('release_id'):
+                fireEvent('release.update_status', release_download['release_id'], status = 'failed', single = True)
 
         for group_identifier in groups:
 
@@ -318,6 +321,9 @@ class Renamer(Plugin):
                 log.warning('Tagging group "%s" as unknown (no media match)', group_identifier)
                 self.tagRelease(group = group, tag = 'unknown',
                                 reason = 'No matching movie found in library for group "%s"' % group_identifier)
+                # Mark release as failed so nzbToMedia/checkSnatched see the status change
+                if release_download and release_download.get('release_id'):
+                    fireEvent('release.update_status', release_download['release_id'], status = 'failed', single = True)
                 continue
             # Rename the files using the library data
             else:
@@ -591,6 +597,10 @@ class Renamer(Plugin):
                             self.tagRelease(group = group, tag = 'exists',
                                             reason = 'Better quality %s already exists for %s' % (release.get('quality'), media_title))
 
+                            # Mark release as failed so nzbToMedia/checkSnatched see the status change
+                            if release_download and release_download.get('release_id'):
+                                fireEvent('release.update_status', release_download['release_id'], status = 'failed', single = True)
+
                             # Notify on rename fail
                             download_message = 'Renaming of %s (%s) cancelled, exists in %s already.' % (media_title, group['meta_data']['quality']['label'], release.get('quality'))
                             fireEvent('movie.renaming.canceled', message = download_message, data = group)
@@ -707,6 +717,10 @@ class Renamer(Plugin):
                 log.error('Rename failed for "%s", tagging as failed_rename', media_title)
                 self.tagRelease(group = group, tag = 'failed_rename',
                                 reason = rename_error if rename_error else 'Rename failed for "%s"' % media_title)
+                # Mark release as failed so nzbToMedia/checkSnatched see the status change
+                rd = group.get('release_download') or release_download
+                if rd and rd.get('release_id'):
+                    fireEvent('release.update_status', rd['release_id'], status = 'failed', single = True)
                 continue
             # If renaming succeeded, make sure it is not tagged as failed (scanner didn't return a group, but a download_ID was provided in an earlier attempt)
             else:
