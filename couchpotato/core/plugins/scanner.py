@@ -132,7 +132,7 @@ class Scanner(Plugin):
         addEvent('scanner.name_year', self.getReleaseNameYear)
         addEvent('scanner.partnumber', self.getPartNumber)
 
-    def scan(self, folder = None, files = None, release_download = None, simple = False, newer_than = 0, return_ignored = True, check_file_date = True, on_found = None):
+    def scan(self, folder = None, files = None, release_download = None, simple = False, newer_than = 0, return_ignored = True, check_file_date = True, on_found = None, on_walk_progress = None):
 
         folder = sp(folder)
 
@@ -149,12 +149,33 @@ class Scanner(Plugin):
             log.info('No files provided, walking folder: %s', folder)
             try:
                 files = []
+                top_level_dirs = None
+                top_level_current = None
+                dirs_scanned = 0
+
                 for root, dirs, walk_files in os.walk(folder, followlinks=True):
                     files.extend([sp(os.path.join(sp(root), ss(filename))) for filename in walk_files])
+
+                    # Track top-level directory progress
+                    if on_walk_progress:
+                        if top_level_dirs is None:
+                            # First iteration: capture the set of top-level subdirectory paths
+                            top_level_dirs = set(os.path.join(folder, d) for d in dirs)
+                        elif root in top_level_dirs:
+                            # Entered a new top-level subdir — previous one is done
+                            if top_level_current is not None:
+                                dirs_scanned += 1
+                                on_walk_progress(dirs_scanned)
+                            top_level_current = root
 
                     # Break if CP wants to shut down
                     if self.shuttingDown():
                         break
+
+                # Final top-level dir completed
+                if on_walk_progress and top_level_current is not None:
+                    dirs_scanned += 1
+                    on_walk_progress(dirs_scanned)
 
             except:
                 log.error('Failed getting files from %s: %s', (folder, traceback.format_exc()))
