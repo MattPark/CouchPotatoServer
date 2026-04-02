@@ -238,7 +238,7 @@ class Renamer(Plugin):
                 # Get all files from the specified folder
                 try:
                     for root, folders, names in os.walk(media_folder):
-                        files.extend([sp(os.path.join(root, name)) for name in names if not name.endswith('.ignore')])
+                        files.extend([sp(os.path.join(root, name)) for name in names])
                 except:
                     log.error('Failed getting files from %s: %s', (media_folder, traceback.format_exc()))
 
