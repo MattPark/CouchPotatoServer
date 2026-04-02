@@ -66,9 +66,9 @@ class NZBGet(DownloaderBase):
             return False
 
         if re.search(r"^0", rpc.version()):
-            xml_response = rpc.append(nzb_name, self.conf('category'), False, standard_b64encode(filedata.strip()))
+            xml_response = rpc.append(nzb_name, self.conf('category'), False, standard_b64encode(filedata if isinstance(filedata, bytes) else filedata.encode('utf-8')).decode('ascii'))
         else:
-            xml_response = rpc.append(nzb_name, self.conf('category'), tryInt(self.conf('priority')), False, standard_b64encode(filedata.strip()))
+            xml_response = rpc.append(nzb_name, self.conf('category'), tryInt(self.conf('priority')), False, standard_b64encode(filedata if isinstance(filedata, bytes) else filedata.encode('utf-8')).decode('ascii'))
 
         if xml_response:
             log.info('NZB sent successfully to NZBGet')
