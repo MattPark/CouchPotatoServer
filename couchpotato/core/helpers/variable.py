@@ -197,13 +197,27 @@ def getImdb(txt, check_inside = False, multiple = False):
         ids = re.findall(r'(tt\d{4,8})', txt)
 
         if multiple:
-            return removeDuplicate(['tt%s' % str(tryInt(x[2:])).zfill(8) for x in ids]) if len(ids) > 0 else []
+            return removeDuplicate(['tt%s' % str(tryInt(x[2:])).zfill(7) for x in ids]) if len(ids) > 0 else []
 
-        return 'tt%s' % str(tryInt(ids[0][2:])).zfill(8)
+        return 'tt%s' % str(tryInt(ids[0][2:])).zfill(7)
     except IndexError:
         pass
 
     return False
+
+
+def nativeImdbId(imdb_id):
+    """Convert a zero-padded IMDB ID (tt00111161) back to native format (tt0111161).
+
+    The codebase historically stored IMDB IDs with 8-digit zero-padding, but external
+    APIs (TMDB, OMDB) only accept the native IMDB format (7+ digits, no extra leading zeros).
+    """
+    if not imdb_id or not imdb_id.startswith('tt'):
+        return imdb_id
+    m = re.match(r'tt0*(\d+)$', imdb_id)
+    if m:
+        return 'tt%s' % m.group(1).zfill(7)
+    return imdb_id
 
 
 def tryInt(s, default = 0):
@@ -237,20 +251,22 @@ def getIdentifier(media):
 
 def getTitle(media_dict):
     try:
-        try:
+        # Path 1: direct title string
+        if 'title' in media_dict and media_dict['title']:
             return media_dict['title']
-        except:
-            try:
-                return media_dict['titles'][0]
-            except:
-                try:
-                    return media_dict['info']['titles'][0]
-                except:
-                    try:
-                        return media_dict['media']['info']['titles'][0]
-                    except:
-                        log.error('Could not get title for %s', getIdentifier(media_dict))
-                        return None
+        # Path 2: top-level titles list
+        if media_dict.get('titles'):
+            return media_dict['titles'][0]
+        # Path 3: nested info.titles
+        info = media_dict.get('info', {})
+        if info.get('titles'):
+            return info['titles'][0]
+        # Path 4: nested media.info.titles
+        media_info = media_dict.get('media', {}).get('info', {})
+        if media_info.get('titles'):
+            return media_info['titles'][0]
+        log.error('Could not get title for %s', getIdentifier(media_dict))
+        return None
     except:
         log.error('Could not get title for library item: %s', media_dict)
         return None

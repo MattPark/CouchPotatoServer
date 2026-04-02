@@ -6,7 +6,7 @@ from base64 import b64decode as bd
 
 from couchpotato.core.event import addEvent, fireEvent
 from couchpotato.core.helpers.encoding import toUnicode, ss, tryUrlencode
-from couchpotato.core.helpers.variable import tryInt, tryFloat, splitString
+from couchpotato.core.helpers.variable import tryInt, tryFloat, splitString, nativeImdbId
 from couchpotato.core.logger import CPLog
 from couchpotato.core.media.movie.providers.base import MovieProvider
 from couchpotato.environment import Env
@@ -14,18 +14,8 @@ from couchpotato.environment import Env
 log = CPLog(__name__)
 
 
-def _native_imdb_id(imdb_id):
-    """Convert a zero-padded IMDB ID (tt00111161) back to native format (tt0111161).
-
-    The codebase stores IMDB IDs with 8-digit zero-padding for consistency,
-    but TMDB's API only accepts the native IMDB format (7+ digits, no extra leading zeros).
-    """
-    if not imdb_id or not imdb_id.startswith('tt'):
-        return imdb_id
-    m = re.match(r'tt0*(\d+)$', imdb_id)
-    if m:
-        return 'tt%s' % m.group(1).zfill(7)
-    return imdb_id
+# Use the shared nativeImdbId from variable.py
+_native_imdb_id = nativeImdbId
 
 autoload = 'TheMovieDb'
 

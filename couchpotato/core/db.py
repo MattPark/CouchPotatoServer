@@ -49,6 +49,15 @@ def _starts_with_char(title):
     return '#'
 
 
+def _normalize_imdb(val):
+    """Normalize IMDB IDs to native 7-digit format for comparison."""
+    if isinstance(val, str) and val.startswith('tt'):
+        m = re.match(r'tt0*(\d+)$', val)
+        if m:
+            return 'tt%s' % m.group(1).zfill(7)
+    return val
+
+
 def _media_id_match(doc, key):
     ids = doc.get('identifiers')
     if not ids or not isinstance(ids, dict):
@@ -56,7 +65,13 @@ def _media_id_match(doc, key):
     dash = key.find('-')
     if dash < 0:
         return False
-    return str(ids.get(key[:dash], '')) == key[dash + 1:]
+    id_type = key[:dash]
+    search_val = key[dash + 1:]
+    doc_val = str(ids.get(id_type, ''))
+    # Normalize IMDB IDs so old 8-digit records match new 7-digit lookups
+    if id_type == 'imdb':
+        return _normalize_imdb(doc_val) == _normalize_imdb(search_val)
+    return doc_val == search_val
 
 
 def _release_dl_match(doc, key):
