@@ -106,6 +106,8 @@ class Manage(Plugin):
         elif self.isDisabled() or (last_update > time.time() - 20):
             return
 
+        log.info('Starting %s library update, last_update=%s (%s)' % ('full' if full else 'quick', last_update, time.ctime(last_update) if last_update > 0 else 'never'))
+
         self.in_progress = {}
         self.last_scan_results = {
             'scanning': True,
@@ -141,26 +143,25 @@ class Manage(Plugin):
                         log.error('Directory doesn\'t exist: %s', folder)
                     continue
 
-                # Quick directory count for immediate progress feedback
-                try:
-                    subdir_count = sum(1 for entry in os.scandir(folder) if entry.is_dir())
-                    self.in_progress[folder]['total'] = subdir_count
-                    self.in_progress[folder]['to_go'] = subdir_count
-                    log.info('Updating manage library: %s (%d folders)' % (folder, subdir_count))
-                except:
-                    subdir_count = 0
-                    log.info('Updating manage library: %s', folder)
+                log.info('Updating manage library: %s', folder)
 
                 fireEvent('notify.frontend', type = 'manage.update', data = True, message = 'Scanning for movies in "%s"' % folder)
 
-                # Walk progress callback — updates to_go as top-level dirs are walked
-                def onWalkProgress(dirs_scanned, _folder=folder, _total=subdir_count):
-                    remaining = max(0, _total - dirs_scanned)
-                    self.in_progress[_folder]['to_go'] = remaining
-                    self.updateProgress(_folder)
+                # Walk progress callback — scanner calls with (0, total) on first walk iteration,
+                # then (dirs_scanned,) as each top-level subdir's files are processed
+                def onWalkProgress(dirs_scanned, total=None, _folder=folder):
+                    if total is not None:
+                        self.in_progress[_folder]['total'] = total
+                        self.in_progress[_folder]['to_go'] = total
+                        log.info('Scanning %d folders in %s' % (total, _folder))
+                    else:
+                        folder_total = self.in_progress[_folder].get('total') or 0
+                        remaining = max(0, folder_total - dirs_scanned)
+                        self.in_progress[_folder]['to_go'] = remaining
+                        self.updateProgress(_folder)
 
                 onFound = self.createAddToLibrary(folder, added_identifiers)
-                fireEvent('scanner.scan', folder = folder, simple = True, newer_than = last_update if not full else 0, check_file_date = False, on_found = onFound, on_walk_progress = onWalkProgress if subdir_count > 0 else None, single = True)
+                fireEvent('scanner.scan', folder = folder, simple = True, newer_than = last_update if not full else 0, check_file_date = False, on_found = onFound, on_walk_progress = onWalkProgress, single = True)
 
                 if self.last_scan_results:
                     self.last_scan_results['folders_scanned'] += 1

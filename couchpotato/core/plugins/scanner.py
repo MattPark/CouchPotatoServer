@@ -149,33 +149,19 @@ class Scanner(Plugin):
             log.info('No files provided, walking folder: %s', folder)
             try:
                 files = []
-                top_level_dirs = None
-                top_level_current = None
-                dirs_scanned = 0
+                reported_total = False
 
                 for root, dirs, walk_files in os.walk(folder, followlinks=True):
                     files.extend([sp(os.path.join(sp(root), ss(filename))) for filename in walk_files])
 
-                    # Track top-level directory progress
-                    if on_walk_progress:
-                        if top_level_dirs is None:
-                            # First iteration: capture the set of top-level subdirectory paths
-                            top_level_dirs = set(os.path.join(folder, d) for d in dirs)
-                        elif root in top_level_dirs:
-                            # Entered a new top-level subdir — previous one is done
-                            if top_level_current is not None:
-                                dirs_scanned += 1
-                                on_walk_progress(dirs_scanned)
-                            top_level_current = root
+                    # First iteration is the scan root — report total top-level dirs
+                    if on_walk_progress and not reported_total:
+                        on_walk_progress(0, len(dirs))
+                        reported_total = True
 
                     # Break if CP wants to shut down
                     if self.shuttingDown():
                         break
-
-                # Final top-level dir completed
-                if on_walk_progress and top_level_current is not None:
-                    dirs_scanned += 1
-                    on_walk_progress(dirs_scanned)
 
             except:
                 log.error('Failed getting files from %s: %s', (folder, traceback.format_exc()))
@@ -194,7 +180,25 @@ class Scanner(Plugin):
         skipped_toosmall = 0
         accepted_movie = 0
 
+        # Progress tracking: report as each top-level subdirectory's files are processed
+        folder_prefix = folder.rstrip(os.sep) + os.sep
+        prev_top_dir = None
+        dirs_scanned = 0
+
         for file_path in files:
+
+            # Track progress by top-level subdirectory transitions
+            # Files are in os.walk depth-first order, so files from the same
+            # top-level subdir are contiguous. When the subdir changes, the
+            # previous one is fully processed.
+            if on_walk_progress and file_path.startswith(folder_prefix):
+                rel = file_path[len(folder_prefix):]
+                top_dir = rel.split(os.sep, 1)[0] if os.sep in rel else None
+                if top_dir is not None and top_dir != prev_top_dir:
+                    if prev_top_dir is not None:
+                        dirs_scanned += 1
+                        on_walk_progress(dirs_scanned)
+                    prev_top_dir = top_dir
 
             if not os.path.exists(file_path):
                 skipped_nonexist += 1
@@ -227,9 +231,11 @@ class Scanner(Plugin):
                         'unsorted_files': [],
                         'identifiers': identifiers,
                         'is_dvd': is_dvd_file,
+                        'primary_count': 0,
                     }
 
                 movie_files[identifier]['unsorted_files'].append(file_path)
+                movie_files[identifier]['primary_count'] += 1
                 accepted_movie += 1
             else:
                 leftovers.append(file_path)
@@ -238,6 +244,11 @@ class Scanner(Plugin):
             # Break if CP wants to shut down
             if self.shuttingDown():
                 break
+
+        # Final top-level dir completed
+        if on_walk_progress and prev_top_dir is not None:
+            dirs_scanned += 1
+            on_walk_progress(dirs_scanned)
 
         if accepted_movie == 0:
             log.info('Scanner file disposition: %s total, %s nonexistent, %s sample, %s ignored, %s too-small (<200MB), 0 accepted as movie',
@@ -369,12 +380,16 @@ class Scanner(Plugin):
                     continue
 
             # Only process movies newer than x
+            # Check only primary movie files, not companion files (subs, nfos, images)
+            # which may be updated by external media servers (Plex, Emby, etc.)
             if newer_than and newer_than > 0:
                 has_new_files = False
-                for cur_file in group['unsorted_files']:
+                primary_count = group.get('primary_count', len(group['unsorted_files']))
+                for cur_file in group['unsorted_files'][:primary_count]:
                     file_time = self.getFileTimes(cur_file)
                     if file_time[0] > newer_than or file_time[1] > newer_than:
                         has_new_files = True
+                        log.info('newer_than hit: %s mtime=%s ctime=%s newer_than=%s' % (cur_file, time.ctime(file_time[0]), time.ctime(file_time[1]) if file_time[1] else 'N/A', time.ctime(newer_than)))
                         break
 
                 if not has_new_files:
