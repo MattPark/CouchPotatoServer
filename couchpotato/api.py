@@ -86,8 +86,13 @@ class ApiHandler(RequestHandler):
                 route = prefix
 
         if not handler:
-            self.write('API call doesn\'t seem to exist')
-            self.finish()
+            # Empty route = base API URL hit (e.g. NZBGet connectivity check)
+            if not route:
+                self.write({'success': True})
+                self.finish()
+            else:
+                self.write('API call doesn\'t seem to exist')
+                self.finish()
             return
 
         # Create lock if it doesn't exist

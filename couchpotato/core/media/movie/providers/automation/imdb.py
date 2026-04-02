@@ -104,7 +104,11 @@ class IMDBBase(Automation):
                 log.error('Failed to fetch IMDB list %s via GraphQL' % list_id)
                 break
 
-            items = result['data']['list'].get('items', {})
+            items = result['data']['list'].get('items') or {}
+            if not items:
+                # List is private or requires authentication
+                log.warning('IMDB list %s returned no items (list may be private or require authentication)' % list_id)
+                break
             edges = items.get('edges', [])
 
             for edge in edges:
