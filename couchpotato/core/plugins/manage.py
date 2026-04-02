@@ -163,6 +163,9 @@ class Manage(Plugin):
                 onFound = self.createAddToLibrary(folder, added_identifiers)
                 fireEvent('scanner.scan', folder = folder, simple = True, newer_than = last_update if not full else 0, check_file_date = False, on_found = onFound, on_walk_progress = onWalkProgress, single = True)
 
+                # Scanner finished — mark folder done (empty subdirs won't trigger progress callbacks)
+                self.in_progress[folder]['to_go'] = 0
+
                 if self.last_scan_results:
                     self.last_scan_results['folders_scanned'] += 1
 
