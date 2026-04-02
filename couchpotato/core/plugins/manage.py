@@ -141,7 +141,15 @@ class Manage(Plugin):
                         log.error('Directory doesn\'t exist: %s', folder)
                     continue
 
-                log.info('Updating manage library: %s', folder)
+                # Quick directory count for immediate progress feedback
+                try:
+                    subdir_count = sum(1 for entry in os.scandir(folder) if entry.is_dir())
+                    self.in_progress[folder]['total'] = subdir_count
+                    self.in_progress[folder]['to_go'] = subdir_count
+                    log.info('Updating manage library: %s (%d folders)' % (folder, subdir_count))
+                except:
+                    log.info('Updating manage library: %s', folder)
+
                 fireEvent('notify.frontend', type = 'manage.update', data = True, message = 'Scanning for movies in "%s"' % folder)
 
                 onFound = self.createAddToLibrary(folder, added_identifiers)
@@ -239,13 +247,13 @@ class Manage(Plugin):
     def createAddToLibrary(self, folder, added_identifiers = []):
 
         def addToLibrary(group, total_found, to_go):
-            if self.in_progress[folder]['total'] is None:
-                self.in_progress[folder].update({
-                    'total': total_found,
-                    'to_go': total_found,
-                })
+            # Replace directory estimate with scanner's accurate count
+            self.in_progress[folder].update({
+                'total': total_found,
+                'to_go': to_go,
+            })
 
-            self.updateProgress(folder, to_go)
+            self.updateProgress(folder)
 
             # Track scan results
             if self.last_scan_results:
@@ -278,14 +286,18 @@ class Manage(Plugin):
 
         return afterUpdate
 
-    def updateProgress(self, folder, to_go):
+    def updateProgress(self, folder):
 
         pr = self.in_progress[folder]
-        if to_go < pr['to_go']:
-            pr['to_go'] = to_go
+        total = pr.get('total') or 0
+        to_go = pr.get('to_go') or 0
+        done = total - to_go
 
-        avg = (time.time() - pr['started']) / (pr['total'] - pr['to_go'])
-        pr['eta'] = tryInt(avg * pr['to_go'])
+        if done > 0:
+            avg = (time.time() - pr['started']) / done
+            pr['eta'] = tryInt(avg * to_go)
+        else:
+            pr['eta'] = -1
 
 
     def directories(self):

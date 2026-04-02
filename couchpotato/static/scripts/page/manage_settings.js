@@ -186,13 +186,17 @@ var ManageSettingTab = new Class({
 
 						sorted_table.each(function(folder){
 							var folder_progress = progress[folder];
+							var done = folder_progress.total ? (folder_progress.total - (folder_progress.to_go || 0)) : 0;
 
 							// Build folder detail text
 							var folder_text = folder;
+							if(folder_progress.total){
+								folder_text += ' (' + folder_progress.total + ' folders)';
+							}
 							if(folder_progress.eta > 0){
 								folder_text += ', ' + new Date().increment('second', folder_progress.eta).timeDiffInWords().replace('from now', 'to go');
-							} else if(folder_progress.started && !folder_progress.total){
-								// Still walking the filesystem — show elapsed time for this folder
+							} else if(folder_progress.started && done === 0){
+								// Scanner still walking filesystem — show elapsed time
 								var folder_elapsed = Math.round(Date.now() / 1000 - folder_progress.started);
 								if(folder_elapsed >= 60){
 									folder_text += ', scanning files for ' + Math.floor(folder_elapsed / 60) + 'm ' + (folder_elapsed % 60) + 's';
@@ -203,10 +207,12 @@ var ManageSettingTab = new Class({
 
 							// Progress text
 							var pct_text;
-							if(folder_progress.total){
-								pct_text = Math.round(((folder_progress.total - folder_progress.to_go) / folder_progress.total) * 100) + '%';
-							} else {
+							if(folder_progress.total && done > 0){
+								pct_text = Math.round((done / folder_progress.total) * 100) + '%';
+							} else if(folder_progress.total){
 								pct_text = 'scanning\u2026';
+							} else {
+								pct_text = 'waiting\u2026';
 							}
 
 							new Element('div.scan_folder_row').adopt(
