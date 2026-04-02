@@ -1,19 +1,23 @@
-import traceback
+import json
+import random
 import re
+import traceback
+from base64 import b64decode
 
-from bs4 import BeautifulSoup
 from couchpotato import fireEvent
-from couchpotato.core.helpers.encoding import ss
-from couchpotato.core.helpers.rss import RSS
-from couchpotato.core.helpers.variable import getImdb, splitString, tryInt
+from couchpotato.core.helpers.variable import splitString, tryInt
 from couchpotato.core.logger import CPLog
 from couchpotato.core.media._base.providers.base import MultiProvider
 from couchpotato.core.media.movie.providers.automation.base import Automation
 
-
 log = CPLog(__name__)
 
 autoload = 'IMDB'
+
+IMDB_GRAPHQL_URL = 'https://graphql.imdb.com/'
+
+# Same embedded TMDB API keys used by the TMDB info provider
+_TMDB_KEYS = ['ZTIyNGZlNGYzZmVjNWY3YjU1NzA2NDFmN2NkM2RmM2E=', 'ZjZiZDY4N2ZmYTYzY2QyODJiNmZmMmM2ODc3ZjI2Njk=']
 
 
 class IMDB(MultiProvider):
@@ -22,63 +26,209 @@ class IMDB(MultiProvider):
         return [IMDBWatchlist, IMDBAutomation, IMDBCharts]
 
 
-class IMDBBase(Automation, RSS):
+class IMDBBase(Automation):
 
     interval = 1800
 
     charts = {
-        'theater': {
+        'top250': {
             'order': 1,
-            'name': 'IMDB - Movies in Theaters',
-            'url': 'http://www.imdb.com/movies-in-theaters/',
+            'name': 'IMDB - Top 250 Movies',
+            'url': 'https://www.imdb.com/chart/top/',
+        },
+        'theater': {
+            'order': 2,
+            'name': 'IMDB - In Theaters (via TMDB)',
+            'url': 'https://www.imdb.com/movies-in-theaters/',
         },
         'boxoffice': {
-            'order': 2,
-            'name': 'IMDB - Box Office',
-            'url': 'http://www.imdb.com/boxoffice/',
-        },
-        'top250': {
             'order': 3,
-            'name': 'IMDB - Top 250 Movies',
-            'url': 'http://www.imdb.com/chart/top',
+            'name': 'IMDB - Popular Movies (via TMDB)',
+            'url': 'https://www.imdb.com/boxoffice/',
         },
     }
 
     def getInfo(self, imdb_id):
-        return fireEvent('movie.info', identifier = imdb_id, extended = False, adding = False, merge = True)
+        return fireEvent('movie.info', identifier=imdb_id, extended=False, adding=False, merge=True)
 
-    def getFromURL(self, url):
-        log.debug('Getting IMDBs from: %s', url)
-        html = self.getHTMLData(url)
-
+    def _graphqlRequest(self, query, variables=None):
+        """Make a request to the IMDB GraphQL API and return parsed JSON."""
+        payload = json.dumps({'query': query, 'variables': variables or {}})
         try:
-            split = splitString(html, split_on = "<div class=\"list compact\">")[1]
-            html = splitString(split, split_on = "<div class=\"pages\">")[0]
+            data = self.urlopen(
+                IMDB_GRAPHQL_URL,
+                data=payload,
+                headers={
+                    'Content-Type': 'application/json',
+                },
+                show_error=True,
+            )
+            if isinstance(data, bytes):
+                data = data.decode('utf-8')
+            return json.loads(data)
         except:
-            try:
-                split = splitString(html, split_on = "<div id=\"main\">")
+            log.error('IMDB GraphQL request failed: %s' % traceback.format_exc())
+            return None
 
-                if len(split) < 2:
-                    log.error('Failed parsing IMDB page "%s", unexpected html.', url)
-                    return []
+    def getListViaGraphQL(self, list_id):
+        """Fetch all IMDB IDs from a public IMDB list using the GraphQL API."""
+        imdb_ids = []
+        cursor = None
 
-                html = BeautifulSoup(split[1])
-                for x in ['list compact', 'lister', 'list detail sub-list']:
-                    html2 = html.find('div', attrs = {
-                        'class': x
-                    })
+        while True:
+            after_clause = ', after: "%s"' % cursor if cursor else ''
+            query = '''
+            {
+              list(id: "%s") {
+                items(first: 250%s) {
+                  edges {
+                    node {
+                      item {
+                        ... on Title {
+                          id
+                        }
+                      }
+                    }
+                  }
+                  pageInfo {
+                    hasNextPage
+                    endCursor
+                  }
+                }
+              }
+            }
+            ''' % (list_id, after_clause)
 
-                    if html2:
-                        html = html2.contents
-                        html = ''.join([str(x) for x in html])
-                        break
-            except:
-                log.error('Failed parsing IMDB page "%s": %s', (url, traceback.format_exc()))
+            result = self._graphqlRequest(query)
+            if not result or 'data' not in result or not result['data'].get('list'):
+                log.error('Failed to fetch IMDB list %s via GraphQL' % list_id)
+                break
 
-        html = ss(html)
-        imdbs = getImdb(html, multiple = True) if html else []
+            items = result['data']['list'].get('items', {})
+            edges = items.get('edges', [])
 
-        return imdbs
+            for edge in edges:
+                node = edge.get('node', {})
+                item = node.get('item', {})
+                title_id = item.get('id', '')
+                if title_id.startswith('tt'):
+                    # Normalize to 8-digit zero-padded format
+                    normalized = 'tt%s' % str(tryInt(title_id[2:])).zfill(8)
+                    if normalized not in imdb_ids:
+                        imdb_ids.append(normalized)
+
+            page_info = items.get('pageInfo', {})
+            if page_info.get('hasNextPage') and page_info.get('endCursor'):
+                cursor = page_info['endCursor']
+            else:
+                break
+
+            if self.shuttingDown():
+                break
+
+        log.debug('Fetched %d movies from IMDB list %s via GraphQL' % (len(imdb_ids), list_id))
+        return imdb_ids
+
+    def getTop250ViaGraphQL(self):
+        """Fetch the IMDB Top 250 chart using the GraphQL API."""
+        query = '''
+        {
+          titleChartRankings(input: {rankingsChartType: TOP_250}, first: 250) {
+            edges {
+              node {
+                item {
+                  id
+                }
+              }
+            }
+          }
+        }
+        '''
+
+        result = self._graphqlRequest(query)
+        if not result or 'data' not in result:
+            log.error('Failed to fetch IMDB Top 250 via GraphQL')
+            return []
+
+        rankings = result['data'].get('titleChartRankings', {})
+        edges = rankings.get('edges', [])
+
+        imdb_ids = []
+        for edge in edges:
+            node = edge.get('node', {})
+            item = node.get('item', {})
+            title_id = item.get('id', '')
+            if title_id.startswith('tt'):
+                normalized = 'tt%s' % str(tryInt(title_id[2:])).zfill(8)
+                imdb_ids.append(normalized)
+
+        log.debug('Fetched %d movies from IMDB Top 250 via GraphQL' % len(imdb_ids))
+        return imdb_ids
+
+    def _tmdbApiKey(self):
+        return b64decode(random.choice(_TMDB_KEYS)).decode('utf-8')
+
+    def _tmdbGet(self, endpoint, params=''):
+        """Make a TMDB API v3 request and return parsed JSON."""
+        url = 'https://api.themoviedb.org/3/%s?api_key=%s%s' % (
+            endpoint, self._tmdbApiKey(), '&%s' % params if params else '')
+        try:
+            data = self.getJsonData(url, show_error=False)
+            return data if data else None
+        except:
+            log.error('TMDB API request failed for %s: %s' % (endpoint, traceback.format_exc()))
+            return None
+
+    def _tmdbIdsToImdb(self, tmdb_results):
+        """Convert a list of TMDB movie result dicts to IMDB IDs by fetching each movie's detail."""
+        imdb_ids = []
+        for movie in tmdb_results:
+            tmdb_id = movie.get('id')
+            if not tmdb_id:
+                continue
+            # Fetch individual movie detail which includes imdb_id
+            detail = self._tmdbGet('movie/%d' % tmdb_id)
+            if detail and detail.get('imdb_id'):
+                imdb_id = detail['imdb_id']
+                normalized = 'tt%s' % str(tryInt(imdb_id[2:])).zfill(8)
+                if normalized not in imdb_ids:
+                    imdb_ids.append(normalized)
+            if self.shuttingDown():
+                break
+        return imdb_ids
+
+    def getTMDBNowPlaying(self):
+        """Fetch 'now playing' movies from TMDB as a replacement for IMDB In Theaters."""
+        all_results = []
+        for page in range(1, 3):  # 2 pages = ~40 movies
+            data = self._tmdbGet('movie/now_playing', 'page=%d' % page)
+            if not data or not isinstance(data, dict) or 'results' not in data:
+                break
+            all_results.extend(data['results'])
+            if self.shuttingDown():
+                break
+        imdb_ids = self._tmdbIdsToImdb(all_results)
+        log.debug('Fetched %d now-playing movies from TMDB' % len(imdb_ids))
+        return imdb_ids
+
+    def getTMDBPopular(self):
+        """Fetch popular movies from TMDB as a replacement for IMDB Box Office."""
+        data = self._tmdbGet('movie/popular', 'page=1')
+        if not data or not isinstance(data, dict) or 'results' not in data:
+            return []
+        imdb_ids = self._tmdbIdsToImdb(data['results'])
+        log.debug('Fetched %d popular movies from TMDB' % len(imdb_ids))
+        return imdb_ids
+
+    def getChartMovies(self, name):
+        """Get IMDB IDs for a chart by name."""
+        if name == 'top250':
+            return self.getTop250ViaGraphQL()
+        elif name == 'theater':
+            return self.getTMDBNowPlaying()
+        elif name == 'boxoffice':
+            return self.getTMDBPopular()
+        return []
 
 
 class IMDBWatchlist(IMDBBase):
@@ -95,29 +245,16 @@ class IMDBWatchlist(IMDBBase):
         index = -1
         for watchlist_url in watchlist_urls:
 
-            try:
-                # Get list ID
-                ids = re.findall(r'(?:list/|list_id=)([a-zA-Z0-9\-_]{11})', watchlist_url)
-                if len(ids) == 1:
-                    watchlist_url = 'http://www.imdb.com/list/%s/?view=compact&sort=created:asc' % ids[0]
-                # Try find user id with watchlist
-                else:
-                    userids = re.findall(r'(ur\d{7,9})', watchlist_url)
-                    if len(userids) == 1:
-                        watchlist_url = 'http://www.imdb.com/user/%s/watchlist?view=compact&sort=created:asc' % userids[0]
-            except:
-                log.error('Failed getting id from watchlist: %s', traceback.format_exc())
-
             index += 1
-            if not watchlist_enablers[index]:
+            if index >= len(watchlist_enablers) or not watchlist_enablers[index]:
                 continue
 
-            start = 0
-            while True:
-                try:
-
-                    w_url = '%s&start=%s' % (watchlist_url, start)
-                    imdbs = self.getFromURL(w_url)
+            try:
+                # Extract list ID from URL
+                ids = re.findall(r'(?:list/|list_id=)([a-zA-Z0-9\-_]{11})', watchlist_url)
+                if len(ids) == 1:
+                    list_id = ids[0]
+                    imdbs = self.getListViaGraphQL(list_id)
 
                     for imdb in imdbs:
                         if imdb not in movies:
@@ -126,16 +263,21 @@ class IMDBWatchlist(IMDBBase):
                         if self.shuttingDown():
                             break
 
-                    log.debug('Found %s movies on %s', (len(imdbs), w_url))
-
-                    if len(imdbs) < 225:
-                        break
-
-                    start = len(movies)
-
-                except:
-                    log.error('Failed loading IMDB watchlist: %s %s', (watchlist_url, traceback.format_exc()))
-                    break
+                    log.debug('Found %d movies from IMDB list %s' % (len(imdbs), list_id))
+                else:
+                    # Try user watchlist - these are often private and won't work via GraphQL
+                    userids = re.findall(r'(ur\d{7,9})', watchlist_url)
+                    if len(userids) == 1:
+                        log.warning(
+                            'User watchlist URLs (ur%s) are no longer supported. '
+                            'Please convert your watchlist to a public IMDB list and use the list URL instead. '
+                            'Go to your IMDB watchlist, click "..." menu, and choose "Copy list to new list".'
+                            % userids[0]
+                        )
+                    else:
+                        log.error('Could not extract IMDB list ID from URL: %s' % watchlist_url)
+            except:
+                log.error('Failed loading IMDB watchlist "%s": %s' % (watchlist_url, traceback.format_exc()))
 
         return movies
 
@@ -150,10 +292,9 @@ class IMDBAutomation(IMDBBase):
 
         for name in self.charts:
             chart = self.charts[name]
-            url = chart.get('url')
 
             if self.conf('automation_charts_%s' % name):
-                imdb_ids = self.getFromURL(url)
+                imdb_ids = self.getChartMovies(name)
 
                 try:
                     for imdb_id in imdb_ids:
@@ -165,7 +306,7 @@ class IMDBAutomation(IMDBBase):
                             break
 
                 except:
-                    log.error('Failed loading IMDB chart results from %s: %s', (url, traceback.format_exc()))
+                    log.error('Failed loading IMDB chart results for %s: %s' % (name, traceback.format_exc()))
 
         return movies
 
@@ -189,15 +330,13 @@ class IMDBCharts(IMDBBase):
                     movie_lists.append(chart)
                     continue
 
-                url = chart.get('url')
-
                 chart['list'] = []
-                imdb_ids = self.getFromURL(url)
+                imdb_ids = self.getChartMovies(name)
 
                 try:
                     for imdb_id in imdb_ids[0:max_items]:
 
-                        is_movie = fireEvent('movie.is_movie', identifier = imdb_id, adding = False, single = True)
+                        is_movie = fireEvent('movie.is_movie', identifier=imdb_id, adding=False, single=True)
                         if not is_movie:
                             continue
 
@@ -207,9 +346,9 @@ class IMDBCharts(IMDBBase):
                         if self.shuttingDown():
                             break
                 except:
-                    log.error('Failed loading IMDB chart results from %s: %s', (url, traceback.format_exc()))
+                    log.error('Failed loading IMDB chart results for %s: %s' % (name, traceback.format_exc()))
 
-                self.setCache(cache_key, chart['list'], timeout = 259200)
+                self.setCache(cache_key, chart['list'], timeout=259200)
 
                 if chart['list']:
                     movie_lists.append(chart)
@@ -225,7 +364,8 @@ config = [{
             'list': 'watchlist_providers',
             'name': 'imdb_automation_watchlist',
             'label': 'IMDB',
-            'description': 'From any <strong>public</strong> IMDB watchlists.',
+            'description': 'From any <strong>public</strong> IMDB lists. User watchlist URLs (ur...) are no longer supported; '
+                           'convert your watchlist to a public list on IMDB and paste the list URL here.',
             'options': [
                 {
                     'name': 'automation_enabled',
@@ -249,7 +389,7 @@ config = [{
             'list': 'automation_providers',
             'name': 'imdb_automation_charts',
             'label': 'IMDB',
-            'description': 'Import movies from IMDB Charts',
+            'description': 'Import movies from IMDB/TMDB Charts',
             'options': [
                 {
                     'name': 'automation_providers_enabled',
@@ -260,21 +400,21 @@ config = [{
                     'name': 'automation_charts_theater',
                     'type': 'bool',
                     'label': 'In Theaters',
-                    'description': 'New Movies <a href="http://www.imdb.com/movies-in-theaters/" target="_blank">In-Theaters</a> chart',
+                    'description': 'Currently in theaters (via TMDB now_playing)',
                     'default': True,
                 },
                 {
                     'name': 'automation_charts_top250',
                     'type': 'bool',
                     'label': 'TOP 250',
-                    'description': 'IMDB <a href="http://www.imdb.com/chart/top/" target="_blank">TOP 250</a> chart',
+                    'description': 'IMDB <a href="https://www.imdb.com/chart/top/" target="_blank">TOP 250</a> chart (via IMDB GraphQL)',
                     'default': False,
                 },
                 {
                     'name': 'automation_charts_boxoffice',
                     'type': 'bool',
-                    'label': 'Box office TOP 10',
-                    'description': 'IMDB Box office <a href="http://www.imdb.com/chart/" target="_blank">TOP 10</a> chart',
+                    'label': 'Popular Movies',
+                    'description': 'Popular movies (via TMDB popular)',
                     'default': True,
                 },
             ],
@@ -284,7 +424,7 @@ config = [{
             'list': 'charts_providers',
             'name': 'imdb_charts_display',
             'label': 'IMDB',
-            'description': 'Display movies from IMDB Charts',
+            'description': 'Display movies from IMDB/TMDB Charts',
             'options': [
                 {
                     'name': 'chart_display_enabled',
@@ -295,21 +435,21 @@ config = [{
                     'name': 'chart_display_theater',
                     'type': 'bool',
                     'label': 'In Theaters',
-                    'description': 'New Movies <a href="http://www.imdb.com/movies-in-theaters/" target="_blank">In-Theaters</a> chart',
+                    'description': 'Currently in theaters (via TMDB now_playing)',
                     'default': False,
                 },
                 {
                     'name': 'chart_display_top250',
                     'type': 'bool',
                     'label': 'TOP 250',
-                    'description': 'IMDB <a href="http://www.imdb.com/chart/top/" target="_blank">TOP 250</a> chart',
+                    'description': 'IMDB <a href="https://www.imdb.com/chart/top/" target="_blank">TOP 250</a> chart (via IMDB GraphQL)',
                     'default': False,
                 },
                 {
                     'name': 'chart_display_boxoffice',
                     'type': 'bool',
-                    'label': 'Box office TOP 10',
-                    'description': 'IMDB Box office <a href="http://www.imdb.com/chart/" target="_blank">TOP 10</a> chart',
+                    'label': 'Popular Movies',
+                    'description': 'Popular movies (via TMDB popular)',
                     'default': True,
                 },
             ],
