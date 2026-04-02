@@ -242,8 +242,23 @@ class Renamer(Plugin):
                 except:
                     log.error('Failed getting files from %s: %s', (media_folder, traceback.format_exc()))
 
+                if not files:
+                    log.warning('No files found in media folder: %s (folder exists: %s)',
+                                (media_folder, os.path.isdir(media_folder)))
+                    # List directory contents for diagnosis
+                    try:
+                        contents = os.listdir(media_folder) if os.path.isdir(media_folder) else []
+                        log.warning('Directory contents (%d items): %s', (len(contents), contents[:20]))
+                    except:
+                        log.warning('Could not list directory: %s' % traceback.format_exc())
+                else:
+                    log.info('Found %d file(s) in media folder' % len(files))
+
                 # post_filter files from configuration; this is a ":"-separated list of globs
+                before_filter = len(files)
                 files = self.filesAfterIgnoring(files)
+                if len(files) != before_filter:
+                    log.info('filesAfterIgnoring: %d -> %d files', (before_filter, len(files)))
 
         db = get_db()
 
@@ -264,7 +279,7 @@ class Renamer(Plugin):
         groups = fireEvent('scanner.scan', folder = folder if folder else base_folder,
                            files = files, release_download = release_download, return_ignored = False, single = True) or []
 
-        log.info('Scanner found %d group(s) to process', len(groups))
+        log.info('Scanner found %s group(s) to process' % len(groups))
 
         folder_name = self.conf('folder_name')
         file_name = self.conf('file_name')

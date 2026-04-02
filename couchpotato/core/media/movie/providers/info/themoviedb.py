@@ -6,7 +6,7 @@ from base64 import b64decode as bd
 
 from couchpotato.core.event import addEvent, fireEvent
 from couchpotato.core.helpers.encoding import toUnicode, ss, tryUrlencode
-from couchpotato.core.helpers.variable import tryInt, splitString
+from couchpotato.core.helpers.variable import tryInt, tryFloat, splitString
 from couchpotato.core.logger import CPLog
 from couchpotato.core.media.movie.providers.base import MovieProvider
 from couchpotato.environment import Env
@@ -318,6 +318,8 @@ class TheMovieDb(MovieProvider):
             'released': str(movie.get('release_date')),
             'year': tryInt(year, None),
             'plot': movie_default.get('overview') or movie.get('overview'),
+            'rating': tryFloat(movie.get('vote_average', 0)),
+            'votes': tryInt(movie.get('vote_count', 0)),
             'genres': genres,
             'collection': getattr(movie.get('belongs_to_collection'), 'name', None),
             'actor_roles': actors

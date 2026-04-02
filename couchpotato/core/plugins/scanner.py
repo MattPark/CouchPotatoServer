@@ -146,6 +146,7 @@ class Scanner(Plugin):
 
         # Scan all files of the folder if no files are set
         if not files:
+            log.info('No files provided, walking folder: %s', folder)
             try:
                 files = []
                 for root, dirs, walk_files in os.walk(folder, followlinks=True):
@@ -158,21 +159,33 @@ class Scanner(Plugin):
             except:
                 log.error('Failed getting files from %s: %s', (folder, traceback.format_exc()))
 
-            log.debug('Found %s files to scan and group in %s', (len(files), folder))
+            log.info('Found %s file(s) to scan and group in %s' % (len(files), folder))
         else:
             check_file_date = False
             files = [sp(x) for x in files]
+            log.info('Scanner received %s file(s) to process' % len(files))
+
+        total_files_scanned = len(files) if files else 0
+
+        skipped_nonexist = 0
+        skipped_sample = 0
+        skipped_ignored = 0
+        skipped_toosmall = 0
+        accepted_movie = 0
 
         for file_path in files:
 
             if not os.path.exists(file_path):
+                skipped_nonexist += 1
                 continue
 
             # Remove ignored files
             if self.isSampleFile(file_path):
                 leftovers.append(file_path)
+                skipped_sample += 1
                 continue
             elif not self.keepFile(file_path):
+                skipped_ignored += 1
                 continue
 
             is_dvd_file = self.isDVDFile(file_path)
@@ -196,12 +209,18 @@ class Scanner(Plugin):
                     }
 
                 movie_files[identifier]['unsorted_files'].append(file_path)
+                accepted_movie += 1
             else:
                 leftovers.append(file_path)
+                skipped_toosmall += 1
 
             # Break if CP wants to shut down
             if self.shuttingDown():
                 break
+
+        if accepted_movie == 0:
+            log.info('Scanner file disposition: %s total, %s nonexistent, %s sample, %s ignored, %s too-small (<200MB), 0 accepted as movie',
+                     (total_files_scanned, skipped_nonexist, skipped_sample, skipped_ignored, skipped_toosmall))
 
         # Cleanup
         del files
