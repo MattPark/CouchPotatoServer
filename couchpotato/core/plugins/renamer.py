@@ -1,3 +1,4 @@
+import collections
 import fnmatch
 import os
 import re
@@ -28,6 +29,7 @@ class Renamer(Plugin):
 
     _rename_lock = threading.RLock()
     _snatch_lock = threading.RLock()
+    _scan_queue = collections.deque()
     renaming_started = False
     checking_snatched = False
 
@@ -134,13 +136,27 @@ class Renamer(Plugin):
             return
 
         if not self._rename_lock.acquire(blocking=False):
-            log.info('Renamer is already running, if you see this often, check the logs above for errors.')
+            self._scan_queue.append((base_folder, release_download, to_folder))
+            log.info('Renamer is busy, queued scan request (queue depth: %d)' % len(self._scan_queue))
             return
 
         log.info('Renamer scan starting: base_folder=%s, release_download=%s', (base_folder, release_download))
         self.renaming_started = True
         try:
             self._doScan(base_folder, release_download, to_folder)
+
+            # Drain the queue while we hold the lock — any requests that arrived
+            # while we were busy get processed now instead of being dropped.
+            while self._scan_queue:
+                try:
+                    q_base, q_release, q_to = self._scan_queue.popleft()
+                except IndexError:
+                    break
+                log.info('Processing queued scan request (remaining in queue: %d)' % len(self._scan_queue))
+                try:
+                    self._doScan(q_base, q_release, q_to)
+                except:
+                    log.error('Queued renamer scan failed: %s', traceback.format_exc())
         except:
             log.error('Renamer scan failed: %s', traceback.format_exc())
         finally:
@@ -276,8 +292,15 @@ class Renamer(Plugin):
             folder, media_folder, files, extr_files = self.extractFiles(folder = folder, media_folder = media_folder, files = files,
                                                                         cleanup = self.conf('cleanup') and not keep_original)
 
+        # For targeted scans (nzbToMedia triggers), ignore .ignore tag files
+        # so previously-failed releases get a fresh chance.  Broad periodic
+        # sweeps still respect them to avoid retry loops.
+        is_targeted = media_folder and os.path.isdir(media_folder)
+        if is_targeted:
+            log.info('Targeted scan — .ignore tag files will be bypassed for %s', os.path.basename(media_folder))
+
         groups = fireEvent('scanner.scan', folder = folder if folder else base_folder,
-                           files = files, release_download = release_download, return_ignored = False, single = True) or []
+                           files = files, release_download = release_download, return_ignored = is_targeted, single = True) or []
 
         log.info('Scanner found %s group(s) to process' % len(groups))
 
