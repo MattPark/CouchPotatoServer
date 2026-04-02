@@ -52,6 +52,20 @@ class IMDBBase(Automation):
     def getInfo(self, imdb_id):
         return fireEvent('movie.info', identifier=imdb_id, extended=False, adding=False, merge=True)
 
+    @staticmethod
+    def _normalizeRating(info):
+        """Normalize TMDB-only rating (float) to the dict format the JS frontend expects.
+
+        movie.info (IMDB+OMDB path) returns: rating = {'imdb': (score, votes)}
+        movie.info_by_tmdb (TMDB-only path) returns: rating = score (float)
+        JS expects info.rating.imdb to be [score, votes].
+        """
+        rating = info.get('rating')
+        if rating is not None and not isinstance(rating, dict):
+            info['rating'] = {'imdb': (rating, info.get('votes', 0))}
+        # Remove standalone votes key since it's now inside rating dict
+        info.pop('votes', None)
+
     def _graphqlRequest(self, query, variables=None):
         """Make a request to the IMDB GraphQL API and return parsed JSON."""
         payload = json.dumps({'query': query, 'variables': variables or {}})
@@ -370,6 +384,7 @@ class IMDBCharts(IMDBBase):
                                 continue
                             info = self.getInfo(imdb_id)
                             if info:
+                                self._normalizeRating(info)
                                 chart['list'].append(info)
                             if self.shuttingDown():
                                 break
@@ -379,6 +394,7 @@ class IMDBCharts(IMDBBase):
                         for tmdb_id in tmdb_ids[0:max_items]:
                             info = fireEvent('movie.info_by_tmdb', identifier=tmdb_id, extended=False, merge=True)
                             if info:
+                                self._normalizeRating(info)
                                 chart['list'].append(info)
                             if self.shuttingDown():
                                 break
@@ -388,6 +404,7 @@ class IMDBCharts(IMDBBase):
                         for tmdb_id in tmdb_ids[0:max_items]:
                             info = fireEvent('movie.info_by_tmdb', identifier=tmdb_id, extended=False, merge=True)
                             if info:
+                                self._normalizeRating(info)
                                 chart['list'].append(info)
                             if self.shuttingDown():
                                 break

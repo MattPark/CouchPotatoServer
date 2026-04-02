@@ -1,10 +1,13 @@
 import time
+import traceback
 from couchpotato.api import addApiView
 from couchpotato.core.event import fireEvent, addEvent
 from couchpotato.core.helpers.variable import splitString, removeDuplicate, getIdentifier, getTitle
+from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
 from couchpotato.environment import Env
 
+log = CPLog(__name__)
 
 autoload = 'Suggestion'
 
@@ -35,19 +38,29 @@ class Suggestion(Plugin):
 
         cached_suggestion = self.getCache('suggestion_cached')
         if cached_suggestion:
+            log.info('Returning %s cached suggestions' % len(cached_suggestion))
             suggestions = cached_suggestion
         else:
 
             if not movies or len(movies) == 0:
                 active_movies = fireEvent('media.with_status', ['active', 'done'], types = 'movie', single = True)
                 movies = [getIdentifier(x) for x in active_movies]
+                log.info('suggestView: found %s active/done movies in library' % len(movies))
+                # Log sample of identifiers for debugging
+                non_none = [m for m in movies if m]
+                log.info('suggestView: %s have identifiers, sample: %s' % (len(non_none), non_none[:5]))
 
             if not ignored or len(ignored) == 0:
                 ignored = splitString(Env.prop('suggest_ignore', default = ''))
             if not seen or len(seen) == 0:
                 movies.extend(splitString(Env.prop('suggest_seen', default = '')))
 
-            suggestions = fireEvent('movie.suggest', movies = movies, ignore = ignored, single = True)
+            try:
+                suggestions = fireEvent('movie.suggest', movies = movies, ignore = ignored, single = True)
+                log.info('suggestView: movie.suggest returned %s suggestions' % (len(suggestions) if suggestions else 0))
+            except:
+                log.error('suggestView: movie.suggest failed: %s' % traceback.format_exc())
+                suggestions = None
             self.setCache('suggestion_cached', suggestions, timeout = 86400)  # Cache for 1 day
 
         if not suggestions:
@@ -63,6 +76,11 @@ class Suggestion(Plugin):
 
             cached_poster = fireEvent('file.download', url = posters[0], single = True) if len(posters) > 0 else False
             files = {'image_poster': [cached_poster] } if cached_poster else {}
+
+            # Normalize rating to dict format for JS frontend compatibility
+            rating = suggestion.get('rating')
+            if rating is not None and not isinstance(rating, dict):
+                suggestion['rating'] = {'imdb': (rating, suggestion.pop('votes', 0))}
 
             medias.append({
                 'status': 'suggested',

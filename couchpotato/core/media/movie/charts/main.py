@@ -51,6 +51,13 @@ class Charts(Plugin):
                 cached_poster = fireEvent('file.download', url = posters[0], single = True) if len(posters) > 0 else False
                 files = {'image_poster': [cached_poster] } if cached_poster else {}
 
+                # Normalize rating to dict format for JS frontend compatibility
+                # JS expects info.rating.imdb = [score, votes], but TMDB-only results
+                # return rating as a plain float when OMDB is unavailable
+                rating = media.get('rating')
+                if rating is not None and not isinstance(rating, dict):
+                    media['rating'] = {'imdb': (rating, media.pop('votes', 0))}
+
                 medias.append({
                     'status': 'chart',
                     'title': getTitle(media),
