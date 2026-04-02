@@ -230,13 +230,14 @@ class Scanner(Plugin):
         leftovers = set(sorted(leftovers, reverse = True))
 
         # Group files minus extension
-        ignored_identifiers = []
+        ignored_identifiers = {}
         for identifier, group in movie_files.items():
             if identifier not in group['identifiers'] and len(identifier) > 0: group['identifiers'].append(identifier)
 
             log.debug('Grouping files: %s', identifier)
 
             has_ignored = 0
+            ignore_files = []
             for file_path in list(group['unsorted_files']):
                 ext = getExt(file_path)
                 wo_ext = file_path[:-(len(ext) + 1)]
@@ -244,15 +245,19 @@ class Scanner(Plugin):
                 group['unsorted_files'].extend(found_files)
                 leftovers = leftovers - found_files
 
-                has_ignored += 1 if ext in self.ignored_extensions else 0
+                if ext in self.ignored_extensions:
+                    has_ignored += 1
+                    ignore_files.append(file_path)
 
             if has_ignored == 0:
                 for file_path in list(group['unsorted_files']):
                     ext = getExt(file_path)
-                    has_ignored += 1 if ext in self.ignored_extensions else 0
+                    if ext in self.ignored_extensions:
+                        has_ignored += 1
+                        ignore_files.append(file_path)
 
             if has_ignored > 0:
-                ignored_identifiers.append(identifier)
+                ignored_identifiers[identifier] = ignore_files
 
             # Break if CP wants to shut down
             if self.shuttingDown():
@@ -381,7 +386,15 @@ class Scanner(Plugin):
                 break
 
             if return_ignored is False and identifier in ignored_identifiers:
-                log.debug('Ignore file found, ignoring release: %s', identifier)
+                ignore_files = ignored_identifiers[identifier]
+                tags = []
+                for f in ignore_files:
+                    # Filename format: <name>.<tag>.ignore — extract the tag
+                    parts = os.path.basename(f).rsplit('.', 2)
+                    if len(parts) >= 3:
+                        tags.append(parts[-2])
+                log.warning('Skipping release "%s": tagged as %s by ignore file(s): %s',
+                         (identifier, tags if tags else ['unknown'], [os.path.basename(f) for f in ignore_files]))
                 total_found -= 1
                 continue
 
