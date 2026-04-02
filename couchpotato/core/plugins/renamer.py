@@ -300,7 +300,8 @@ class Renamer(Plugin):
         # Tag release folder as failed_rename in case no groups were found. This prevents check_snatched from removing the release from the downloader.
         if not groups and self.statusInfoComplete(release_download):
             log.warning('No groups found for release, tagging as failed_rename')
-            self.tagRelease(release_download = release_download, tag = 'failed_rename')
+            self.tagRelease(release_download = release_download, tag = 'failed_rename',
+                            reason = 'Scanner returned 0 groups for this release')
 
         for group_identifier in groups:
 
@@ -315,7 +316,8 @@ class Renamer(Plugin):
             # Add _UNKNOWN_ if no library item is connected
             if not group.get('media') or not media_title:
                 log.warning('Tagging group "%s" as unknown (no media match)', group_identifier)
-                self.tagRelease(group = group, tag = 'unknown')
+                self.tagRelease(group = group, tag = 'unknown',
+                                reason = 'No matching movie found in library for group "%s"' % group_identifier)
                 continue
             # Rename the files using the library data
             else:
@@ -586,7 +588,8 @@ class Renamer(Plugin):
                             log.info('Better quality release already exists for %s, with quality %s', (media_title, release.get('quality')))
 
                             # Add exists tag to the .ignore file
-                            self.tagRelease(group = group, tag = 'exists')
+                            self.tagRelease(group = group, tag = 'exists',
+                                            reason = 'Better quality %s already exists for %s' % (release.get('quality'), media_title))
 
                             # Notify on rename fail
                             download_message = 'Renaming of %s (%s) cancelled, exists in %s already.' % (media_title, group['meta_data']['quality']['label'], release.get('quality'))
@@ -636,7 +639,8 @@ class Renamer(Plugin):
                 renaming_size = getSize(rename_files.keys())
                 if renaming_size > available_space:
                     log.error('Not enough space left, need %s MB but only %s MB available', (renaming_size, available_space))
-                    self.tagRelease(group = group, tag = 'not_enough_space')
+                    self.tagRelease(group = group, tag = 'not_enough_space',
+                                    reason = 'Need %s MB but only %s MB available on %s' % (renaming_size, available_space, destination))
                     continue
 
             # Remove files
@@ -662,7 +666,8 @@ class Renamer(Plugin):
 
                 except:
                     log.error('Failed removing %s: %s', (src, traceback.format_exc()))
-                    self.tagRelease(group = group, tag = 'failed_remove')
+                    self.tagRelease(group = group, tag = 'failed_remove',
+                                    reason = 'Failed removing %s: %s' % (src, traceback.format_exc().strip().split('\n')[-1]))
 
             # Delete leftover folder from older releases
             delete_folders = sorted(delete_folders, key = len, reverse = True)
@@ -676,6 +681,7 @@ class Renamer(Plugin):
             log.info('Renaming %d file(s) for "%s"', (len([s for s in rename_files if rename_files[s]]), media_title))
             group['renamed_files'] = []
             failed_rename = False
+            rename_error = None
             for src in rename_files:
                 if rename_files[src]:
                     dst = rename_files[src]
@@ -693,12 +699,14 @@ class Renamer(Plugin):
                     except:
                         log.error('Failed renaming the file "%s" : %s', (os.path.basename(src), traceback.format_exc()))
                         failed_rename = True
+                        rename_error = 'Failed renaming "%s" to "%s": %s' % (src, dst, traceback.format_exc().strip().split('\n')[-1])
                         break
 
             # If renaming failed tag the release folder as failed and continue with next group. Note that all old files have already been deleted.
             if failed_rename:
                 log.error('Rename failed for "%s", tagging as failed_rename', media_title)
-                self.tagRelease(group = group, tag = 'failed_rename')
+                self.tagRelease(group = group, tag = 'failed_rename',
+                                reason = rename_error if rename_error else 'Rename failed for "%s"' % media_title)
                 continue
             # If renaming succeeded, make sure it is not tagged as failed (scanner didn't return a group, but a download_ID was provided in an earlier attempt)
             else:
@@ -706,7 +714,8 @@ class Renamer(Plugin):
 
             # Tag folder if it is in the 'from' folder and it will not be removed because it is a torrent
             if self.movieInFromFolder(media_folder) and keep_original:
-                self.tagRelease(group = group, tag = 'renamed_already')
+                self.tagRelease(group = group, tag = 'renamed_already',
+                                reason = 'Kept in from-folder for torrent seeding')
 
             # Remove matching releases
             for release in remove_releases:
@@ -763,7 +772,7 @@ class Renamer(Plugin):
         return rename_files
 
     # This adds a file to ignore / tag a release so it is ignored later
-    def tagRelease(self, tag, group = None, release_download = None):
+    def tagRelease(self, tag, group = None, release_download = None, reason = None):
         if not tag:
             return
 
@@ -772,6 +781,9 @@ It has marked this release as "%s"
 This file hides the release from the renamer
 Remove it if you want it to be renamed (again, or at least let it try again)
 """ % tag
+
+        if reason:
+            text += '\nReason: %s\n' % reason
 
         tag_files = []
 
@@ -1102,7 +1114,8 @@ Remove it if you want it to be renamed (again, or at least let it try again)
 
                         # Tag folder if it is in the 'from' folder and it will not be processed because it is still downloading
                         if self.movieInFromFolder(release_download['folder']):
-                            self.tagRelease(release_download = release_download, tag = 'downloading')
+                            self.tagRelease(release_download = release_download, tag = 'downloading',
+                                            reason = 'Still downloading: %s' % release_download.get('name', 'unknown'))
 
                     elif release_download['status'] == 'seeding':
                         #If linking setting is enabled, process release
@@ -1324,7 +1337,8 @@ Remove it if you want it to be renamed (again, or at least let it try again)
                 del rar_handle
                 # Tag archive as extracted if no cleanup.
                 if not cleanup and os.path.isfile(extr_file_path):
-                    self.tagRelease(release_download = {'folder': os.path.dirname(archive['file']), 'files': [archive['file']]}, tag = 'extracted')
+                    self.tagRelease(release_download = {'folder': os.path.dirname(archive['file']), 'files': [archive['file']]}, tag = 'extracted',
+                                    reason = 'Archive already extracted to %s' % extr_file_path)
             except Exception as e:
                 log.error('Failed to extract %s: %s %s', (archive['file'], e, traceback.format_exc()))
                 continue

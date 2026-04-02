@@ -387,14 +387,26 @@ class Scanner(Plugin):
 
             if return_ignored is False and identifier in ignored_identifiers:
                 ignore_files = ignored_identifiers[identifier]
-                tags = []
                 for f in ignore_files:
                     # Filename format: <name>.<tag>.ignore — extract the tag
                     parts = os.path.basename(f).rsplit('.', 2)
-                    if len(parts) >= 3:
-                        tags.append(parts[-2])
-                log.warning('Skipping release "%s": tagged as %s by ignore file(s): %s',
-                         (identifier, tags if tags else ['unknown'], [os.path.basename(f) for f in ignore_files]))
+                    tag = parts[-2] if len(parts) >= 3 else 'unknown'
+                    # Read the file for the reason line
+                    reason = ''
+                    try:
+                        with open(f, 'r') as fh:
+                            for line in fh:
+                                if line.startswith('Reason:'):
+                                    reason = line[len('Reason:'):].strip()
+                                    break
+                    except:
+                        pass
+                    if reason:
+                        log.warning('Skipping release "%s": tagged "%s" — %s (file: %s)',
+                                    (identifier, tag, reason, os.path.basename(f)))
+                    else:
+                        log.warning('Skipping release "%s": tagged "%s" (file: %s)',
+                                    (identifier, tag, os.path.basename(f)))
                 total_found -= 1
                 continue
 
