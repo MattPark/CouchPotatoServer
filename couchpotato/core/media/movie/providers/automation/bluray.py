@@ -75,7 +75,9 @@ class Bluray(Automation, RSS):
 
                                 if imdb:
                                     if self.isMinimalMovie(imdb):
-                                        movies.append(imdb['imdb'])
+                                        imdb_id = imdb.get('imdb')
+                                        if imdb_id:
+                                            movies.append(imdb_id)
                         except:
                             log.debug('Error parsing movie html: %s', traceback.format_exc())
                             break
@@ -101,7 +103,9 @@ class Bluray(Automation, RSS):
 
             if imdb:
                 if self.isMinimalMovie(imdb):
-                    movies.append(imdb['imdb'])
+                    imdb_id = imdb.get('imdb')
+                    if imdb_id:
+                        movies.append(imdb_id)
 
         return movies
 

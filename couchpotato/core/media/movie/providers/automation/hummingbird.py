@@ -14,7 +14,9 @@ class Hummingbird(Automation):
 		for movie in self.getWatchlist():
 			imdb = self.search(movie[0], movie[1])
 			if imdb:
-				movies.append(imdb['imdb'])
+				imdb_id = imdb.get('imdb')
+				if imdb_id:
+					movies.append(imdb_id)
 		return movies
 
 	def getWatchlist(self):

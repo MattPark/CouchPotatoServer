@@ -45,7 +45,9 @@ class CrowdAI(Automation, RSS):
                     imdb = self.search(title, year)
 
                     if imdb and self.isMinimalMovie(imdb):
-                        movies.append(imdb['imdb'])
+                        imdb_id = imdb.get('imdb')
+                        if imdb_id:
+                            movies.append(imdb_id)
 
         return movies
 

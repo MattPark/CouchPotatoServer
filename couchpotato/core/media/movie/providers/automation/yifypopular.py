@@ -63,7 +63,9 @@ class YTSPopular(Automation, RSS):
         for el in parser.getMovies():
             imdb = self.search(el['title'], el['year'])
             if imdb and self.isMinimalMovie(imdb):
-                movies.append(imdb['imdb'])
+                imdb_id = imdb.get('imdb')
+                if imdb_id:
+                    movies.append(imdb_id)
         
         return movies
     def getChartList(self):

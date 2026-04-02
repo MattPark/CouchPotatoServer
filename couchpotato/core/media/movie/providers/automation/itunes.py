@@ -56,7 +56,9 @@ class ITunes(Automation, RSS):
                         imdb = self.search(name, year)
 
                         if imdb and self.isMinimalMovie(imdb):
-                            movies.append(imdb['imdb'])
+                            imdb_id = imdb.get('imdb')
+                            if imdb_id:
+                                movies.append(imdb_id)
 
             except:
                 log.error('Failed loading iTunes rss feed: %s %s', (url, traceback.format_exc()))
