@@ -112,10 +112,8 @@ class IMDBBase(Automation):
                 item = node.get('item', {})
                 title_id = item.get('id', '')
                 if title_id.startswith('tt'):
-                    # Normalize to 8-digit zero-padded format
-                    normalized = 'tt%s' % str(tryInt(title_id[2:])).zfill(8)
-                    if normalized not in imdb_ids:
-                        imdb_ids.append(normalized)
+                    if title_id not in imdb_ids:
+                        imdb_ids.append(title_id)
 
             page_info = items.get('pageInfo', {})
             if page_info.get('hasNextPage') and page_info.get('endCursor'):
@@ -159,8 +157,7 @@ class IMDBBase(Automation):
             item = node.get('item', {})
             title_id = item.get('id', '')
             if title_id.startswith('tt'):
-                normalized = 'tt%s' % str(tryInt(title_id[2:])).zfill(8)
-                imdb_ids.append(normalized)
+                imdb_ids.append(title_id)
 
         log.debug('Fetched %d movies from IMDB Top 250 via GraphQL' % len(imdb_ids))
         return imdb_ids
@@ -190,9 +187,8 @@ class IMDBBase(Automation):
             detail = self._tmdbGet('movie/%d' % tmdb_id)
             if detail and detail.get('imdb_id'):
                 imdb_id = detail['imdb_id']
-                normalized = 'tt%s' % str(tryInt(imdb_id[2:])).zfill(8)
-                if normalized not in imdb_ids:
-                    imdb_ids.append(normalized)
+                if imdb_id not in imdb_ids:
+                    imdb_ids.append(imdb_id)
             if self.shuttingDown():
                 break
         return imdb_ids

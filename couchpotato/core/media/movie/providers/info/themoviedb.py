@@ -1,3 +1,4 @@
+import re
 import random
 import traceback
 import itertools
@@ -11,6 +12,20 @@ from couchpotato.core.media.movie.providers.base import MovieProvider
 from couchpotato.environment import Env
 
 log = CPLog(__name__)
+
+
+def _native_imdb_id(imdb_id):
+    """Convert a zero-padded IMDB ID (tt00111161) back to native format (tt0111161).
+
+    The codebase stores IMDB IDs with 8-digit zero-padding for consistency,
+    but TMDB's API only accepts the native IMDB format (7+ digits, no extra leading zeros).
+    """
+    if not imdb_id or not imdb_id.startswith('tt'):
+        return imdb_id
+    m = re.match(r'tt0*(\d+)$', imdb_id)
+    if m:
+        return 'tt%s' % m.group(1).zfill(7)
+    return imdb_id
 
 autoload = 'TheMovieDb'
 
@@ -88,7 +103,7 @@ class TheMovieDb(MovieProvider):
 
             # Look up TMDB ID from IMDB ID
             try:
-                find_data = self.request('find/%s' % imdb_id, {
+                find_data = self.request('find/%s' % _native_imdb_id(imdb_id), {
                     'external_source': 'imdb_id',
                 })
                 if not find_data or not find_data.get('movie_results'):
@@ -145,7 +160,7 @@ class TheMovieDb(MovieProvider):
             return True
 
         try:
-            data = self.request('find/%s' % identifier, {
+            data = self.request('find/%s' % _native_imdb_id(identifier), {
                 'external_source': 'imdb_id',
             })
             if data:
@@ -205,6 +220,11 @@ class TheMovieDb(MovieProvider):
 
         if not identifier:
             return {}
+
+        # TMDB's /movie/ endpoint accepts IMDB IDs but only in native format (tt0111161),
+        # not the 8-digit padded format (tt00111161) used internally
+        if isinstance(identifier, str) and identifier.startswith('tt'):
+            identifier = _native_imdb_id(identifier)
 
         result = self.parseMovie({
             'id': identifier

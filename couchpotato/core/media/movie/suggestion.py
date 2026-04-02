@@ -48,7 +48,7 @@ class Suggestion(Plugin):
                 movies.extend(splitString(Env.prop('suggest_seen', default = '')))
 
             suggestions = fireEvent('movie.suggest', movies = movies, ignore = ignored, single = True)
-            self.setCache('suggestion_cached', suggestions, timeout = 6048000)  # Cache for 10 weeks
+            self.setCache('suggestion_cached', suggestions, timeout = 86400)  # Cache for 1 day
 
         if not suggestions:
             suggestions = []
@@ -144,7 +144,7 @@ class Suggestion(Plugin):
             if suggestions:
                 new_suggestions.extend(suggestions)
 
-        self.setCache('suggestion_cached', new_suggestions, timeout = 3024000)
+        self.setCache('suggestion_cached', new_suggestions, timeout = 86400)
 
         return new_suggestions
 
