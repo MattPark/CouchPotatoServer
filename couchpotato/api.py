@@ -142,9 +142,14 @@ class ApiHandler(RequestHandler):
 
     def _run_locked(self, route, kwargs, lock):
         """Run the API handler with the per-route lock held. Runs in executor thread."""
+        import time as _time
+        t0 = _time.time()
+        log.debug('API request start: %s', route)
         lock.acquire()
         try:
-            return api[route](**kwargs)
+            result = api[route](**kwargs)
+            log.debug('API request done: %s (%.2fs)', (route, _time.time() - t0))
+            return result
         except:
             log.error('Failed doing api request "%s": %s', (route, traceback.format_exc()))
             return {'success': False, 'error': 'Failed returning results'}

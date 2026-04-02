@@ -134,8 +134,10 @@ class MediaPlugin(MediaBase):
             imdb_id = getImdb(str(media_id))
 
             if imdb_id:
+                log.debug('media.get lookup: imdb_id=%s (from media_id=%s)', (imdb_id, media_id))
                 media = db.get('media', 'imdb-%s' % imdb_id, with_doc = True)['doc']
             else:
+                log.debug('media.get lookup: raw id=%s', media_id)
                 media = db.get('id', media_id)
 
             if media:
@@ -151,10 +153,11 @@ class MediaPlugin(MediaBase):
         except (RecordNotFound, RecordDeleted):
             log.error('Media with id "%s" not found', media_id)
         except:
-            raise
+            log.error('Unexpected error getting media "%s": %s', (media_id, traceback.format_exc()))
 
     def getView(self, id = None, **kwargs):
 
+        log.debug('getView called with id=%s', id)
         media = self.get(id) if id else None
 
         return {

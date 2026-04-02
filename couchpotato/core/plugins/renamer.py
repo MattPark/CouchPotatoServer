@@ -83,7 +83,6 @@ class Renamer(Plugin):
 
     def scanView(self, **kwargs):
 
-        run_async = tryInt(kwargs.get('async', 0))
         base_folder = kwargs.get('base_folder')
         media_folder = sp(kwargs.get('media_folder'))
         to_folder = kwargs.get('to_folder')
@@ -97,6 +96,15 @@ class Renamer(Plugin):
         files = [sp(filename) for filename in splitString(kwargs.get('files'), '|')]
         status = kwargs.get('status', 'completed')
 
+        log.info('scanView called: media_folder=%s, downloader=%s, download_id=%s, status=%s',
+                 (media_folder, downloader, download_id, status))
+
+        if self.isDisabled():
+            log.warning('Renamer is disabled, scan skipped')
+            return {
+                'success': True
+            }
+
         release_download = None
         if not base_folder and media_folder:
             release_download = {'folder': media_folder}
@@ -109,8 +117,10 @@ class Renamer(Plugin):
                     'files': files
                 })
 
-        fire_handle = fireEvent if not run_async else fireEventAsync
-        fire_handle('renamer.scan', base_folder = base_folder, release_download = release_download, to_folder = to_folder)
+        # Always fire async so the API response returns immediately.
+        # Large file moves (10GB+) can take minutes and would block the API
+        # thread, causing nzbToMedia's subsequent media.get polls to time out.
+        fireEventAsync('renamer.scan', base_folder = base_folder, release_download = release_download, to_folder = to_folder)
 
         return {
             'success': True
@@ -120,12 +130,14 @@ class Renamer(Plugin):
         if not release_download: release_download = {}
 
         if self.isDisabled():
+            log.warning('Renamer scan skipped: renamer is disabled')
             return
 
         if not self._rename_lock.acquire(blocking=False):
             log.info('Renamer is already running, if you see this often, check the logs above for errors.')
             return
 
+        log.info('Renamer scan starting: base_folder=%s, release_download=%s', (base_folder, release_download))
         self.renaming_started = True
         try:
             self._doScan(base_folder, release_download, to_folder)
@@ -134,6 +146,7 @@ class Renamer(Plugin):
         finally:
             self.renaming_started = False
             self._rename_lock.release()
+            log.info('Renamer scan finished')
 
     def _doScan(self, base_folder = None, release_download = None, to_folder = None):
         if not release_download: release_download = {}
@@ -251,6 +264,8 @@ class Renamer(Plugin):
         groups = fireEvent('scanner.scan', folder = folder if folder else base_folder,
                            files = files, release_download = release_download, return_ignored = False, single = True) or []
 
+        log.info('Scanner found %d group(s) to process', len(groups))
+
         folder_name = self.conf('folder_name')
         file_name = self.conf('file_name')
         trailer_name = self.conf('trailer_name')
@@ -269,6 +284,7 @@ class Renamer(Plugin):
 
         # Tag release folder as failed_rename in case no groups were found. This prevents check_snatched from removing the release from the downloader.
         if not groups and self.statusInfoComplete(release_download):
+            log.warning('No groups found for release, tagging as failed_rename')
             self.tagRelease(release_download = release_download, tag = 'failed_rename')
 
         for group_identifier in groups:
@@ -283,10 +299,12 @@ class Renamer(Plugin):
 
             # Add _UNKNOWN_ if no library item is connected
             if not group.get('media') or not media_title:
+                log.warning('Tagging group "%s" as unknown (no media match)', group_identifier)
                 self.tagRelease(group = group, tag = 'unknown')
                 continue
             # Rename the files using the library data
             else:
+                log.info('Processing group: "%s" (%s)', (media_title, group_identifier))
 
                 # Media not in library, add it first
                 if not group['media'].get('_id'):
@@ -567,16 +585,19 @@ class Renamer(Plugin):
                             if release_download['release_id'] == release['_id']:
                                 if release_download['status'] == 'completed':
                                     # Set the release to downloaded
+                                    log.info('Setting release %s to "downloaded" for "%s"', (release['_id'], media_title))
                                     fireEvent('release.update_status', release['_id'], status = 'downloaded', single = True)
                                     group['release_download'] = release_download
                                     mark_as_recent = True
                                 elif release_download['status'] == 'seeding':
                                     # Set the release to seeding
+                                    log.info('Setting release %s to "seeding" for "%s"', (release['_id'], media_title))
                                     fireEvent('release.update_status', release['_id'], status = 'seeding', single = True)
                                     mark_as_recent = True
 
                         elif release.get('quality') == group['meta_data']['quality']['identifier']:
                             # Set the release to downloaded
+                            log.info('Setting release %s to "downloaded" (quality match) for "%s"', (release['_id'], media_title))
                             fireEvent('release.update_status', release['_id'], status = 'downloaded', single = True)
                             group['release_download'] = release_download
                             mark_as_recent = True
@@ -637,6 +658,7 @@ class Renamer(Plugin):
                     log.error('Failed to delete folder: %s %s', (e, traceback.format_exc()))
 
             # Rename all files marked
+            log.info('Renaming %d file(s) for "%s"', (len([s for s in rename_files if rename_files[s]]), media_title))
             group['renamed_files'] = []
             failed_rename = False
             for src in rename_files:
@@ -660,6 +682,7 @@ class Renamer(Plugin):
 
             # If renaming failed tag the release folder as failed and continue with next group. Note that all old files have already been deleted.
             if failed_rename:
+                log.error('Rename failed for "%s", tagging as failed_rename', media_title)
                 self.tagRelease(group = group, tag = 'failed_rename')
                 continue
             # If renaming succeeded, make sure it is not tagged as failed (scanner didn't return a group, but a download_ID was provided in an earlier attempt)
@@ -695,6 +718,7 @@ class Renamer(Plugin):
 
             # Notify on download, search for trailers etc
             download_message = 'Downloaded %s (%s%s)' % (media_title, replacements['quality'], (' ' + replacements['3d']) if replacements['3d'] else '')
+            log.info('Renamer complete: %s — %d file(s) renamed successfully', (download_message, len(group['renamed_files'])))
             try:
                 fireEvent('renamer.after', message = download_message, group = group, in_order = True)
             except:
