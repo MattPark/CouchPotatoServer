@@ -23,6 +23,10 @@ CACHE_FAILURE = 1 * 3600         # 1 hour for errors / empty results
 BUDGET_FREE = 900       # Free tier: 1,000/day, keep 100 headroom
 BUDGET_PATRON = 95000   # Patron tier: 100,000/day, keep 5,000 headroom
 
+# Actual hard caps enforced by OMDB servers
+HARD_CAP_FREE = 1000
+HARD_CAP_PATRON = 100000
+
 # Default built-in API key
 DEFAULT_API_KEY = 'bbc0e412'
 
@@ -39,7 +43,7 @@ class OMDBAPI(MovieProvider):
     # In-memory daily counters: {'YYYYMMDD': count}
     _daily_calls = {}
     _daily_cache_hits = {}
-
+    _rate_limited_today = False  # True once OMDB returns "Request limit reached"
     def __init__(self):
         addEvent('info.search', self.search)
         addEvent('movie.search', self.search)
@@ -54,6 +58,10 @@ class OMDBAPI(MovieProvider):
     def _getDailyBudget(self):
         tier = self.conf('key_tier') or 'free'
         return BUDGET_PATRON if tier == 'patron' else BUDGET_FREE
+
+    def _getHardCap(self):
+        tier = self.conf('key_tier') or 'free'
+        return HARD_CAP_PATRON if tier == 'patron' else HARD_CAP_FREE
 
     def _getDailyCount(self):
         return self._daily_calls.get(self._todayKey(), 0)
@@ -82,22 +90,48 @@ class OMDBAPI(MovieProvider):
                 del self._daily_cache_hits[k]
 
     def _overBudget(self):
-        return self._getDailyCount() >= self._getDailyBudget()
+        return self._rate_limited_today or self._getDailyCount() >= self._getDailyBudget()
+
+    def _checkRateLimited(self, data):
+        """Parse raw OMDB response; if rate-limited, snap counter to hard cap and return True."""
+        if not data:
+            return False
+        try:
+            if isinstance(data, bytes):
+                data = data.decode('utf-8')
+            if isinstance(data, str):
+                parsed = json.loads(data)
+            else:
+                parsed = data
+            error_msg = parsed.get('Error', '')
+            if 'request limit reached' in error_msg.lower():
+                hard_cap = self._getHardCap()
+                key = self._todayKey()
+                self._daily_calls[key] = max(self._daily_calls.get(key, 0), hard_cap)
+                self._rate_limited_today = True
+                log.warning('OMDB rate limit reached — API returned: %s' % error_msg)
+                return True
+        except (ValueError, AttributeError):
+            pass
+        return False
 
     # --- stats ---------------------------------------------------------------
 
     def getStats(self):
         budget = self._getDailyBudget()
+        hard_cap = self._getHardCap()
         calls = self._getDailyCount()
         api_key = self.getApiKey()
         return {
             'omdb': {
                 'calls_today': calls,
                 'budget': budget,
-                'budget_remaining': max(0, budget - calls),
+                'hard_cap': hard_cap,
+                'budget_remaining': max(0, hard_cap - calls) if self._rate_limited_today else max(0, budget - calls),
                 'cache_hits_today': self._getDailyCacheHits(),
                 'key_tier': self.conf('key_tier') or 'free',
                 'has_custom_key': api_key != DEFAULT_API_KEY and api_key != '',
+                'rate_limited': self._rate_limited_today,
             }
         }
 
@@ -142,6 +176,8 @@ class OMDBAPI(MovieProvider):
             return []
 
         if data:
+            if self._checkRateLimited(data):
+                return []
             result = self.parseMovie(data)
             if result.get('titles') and len(result.get('titles')) > 0:
                 self.setCache(cache_key, data, timeout = CACHE_SUCCESS)
@@ -187,6 +223,8 @@ class OMDBAPI(MovieProvider):
             return {}
 
         if data:
+            if self._checkRateLimited(data):
+                return {}
             result = self.parseMovie(data)
             if result.get('titles') and len(result.get('titles')) > 0:
                 self.setCache(cache_key, data, timeout = CACHE_SUCCESS)

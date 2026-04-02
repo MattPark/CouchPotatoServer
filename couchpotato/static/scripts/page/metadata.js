@@ -67,9 +67,25 @@ var MetadataSettingTab = new Class({
 		// OMDB
 		if (json.omdb && self.stats_panels['omdbapi']) {
 			var o = json.omdb;
-			var pct = o.budget > 0 ? Math.round((o.calls_today / o.budget) * 100) : 0;
-			var bar_class = pct > 80 ? 'bar_warning' : (pct > 50 ? 'bar_caution' : 'bar_ok');
+			var hard_cap = o.hard_cap || o.budget;
+			var soft_pct = hard_cap > 0 ? (o.budget / hard_cap * 100) : 100;
+			var fill_pct = hard_cap > 0 ? Math.min(Math.round(o.calls_today / hard_cap * 100), 100) : 0;
 			var tier_label = o.key_tier === 'patron' ? 'Patron' : 'Free';
+			var bar_class, bar_text;
+
+			if (o.rate_limited) {
+				bar_class = 'bar_depleted';
+				bar_text = 'Rate limited by OMDB (' + o.calls_today + ' / ' + hard_cap + ')';
+			} else if (o.calls_today >= o.budget) {
+				bar_class = 'bar_warning';
+				bar_text = 'Soft budget reached (' + o.calls_today + ' / ' + o.budget + '), hard cap ' + hard_cap;
+			} else if (o.calls_today > o.budget * 0.8) {
+				bar_class = 'bar_caution';
+				bar_text = o.calls_today + ' / ' + o.budget + ' budget (' + hard_cap + ' hard cap)';
+			} else {
+				bar_class = 'bar_ok';
+				bar_text = o.calls_today + ' / ' + o.budget + ' budget (' + hard_cap + ' hard cap)';
+			}
 
 			self.stats_panels['omdbapi'].set('html',
 				'<div class="stats_grid">' +
@@ -91,8 +107,9 @@ var MetadataSettingTab = new Class({
 					'</div>' +
 				'</div>' +
 				'<div class="stats_bar_wrap">' +
-					'<div class="stats_bar ' + bar_class + '" style="width:' + Math.min(pct, 100) + '%"></div>' +
-					'<span class="stats_bar_text">' + pct + '% of daily budget used (' + o.calls_today + ' / ' + o.budget + ')</span>' +
+					'<div class="stats_bar_soft_mark" style="left:' + soft_pct + '%"></div>' +
+					'<div class="stats_bar ' + bar_class + '" style="width:' + fill_pct + '%"></div>' +
+					'<span class="stats_bar_text">' + bar_text + '</span>' +
 				'</div>'
 			);
 		}
