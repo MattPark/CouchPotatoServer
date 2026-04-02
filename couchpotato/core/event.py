@@ -146,9 +146,14 @@ def _run_serial(name, handlers, return_on_first, *args, **kwargs):
 def _run_concurrent(name, handlers, *args, **kwargs):
     """Run handlers concurrently via thread pool, return results in priority order."""
     futures = {}
-    for i, entry in enumerate(handlers):
-        f = _pool.submit(entry['handler'], *args, **kwargs)
-        futures[f] = i
+    try:
+        for i, entry in enumerate(handlers):
+            f = _pool.submit(entry['handler'], *args, **kwargs)
+            futures[f] = i
+    except RuntimeError:
+        # Pool has been shut down (app is exiting) — fall back to serial
+        log.debug('Thread pool shut down, running %s handlers serially', name)
+        return _run_serial(name, handlers, False, *args, **kwargs)
 
     results = [None] * len(handlers)
     for f in as_completed(futures):

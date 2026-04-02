@@ -58,7 +58,7 @@ class Automation(AutomationBase):
 
         result = fireEvent('movie.search', q = '%s %s' % (name, year if year else ''), limit = 1, merge = True)
 
-        if len(result) > 0:
+        if result and len(result) > 0:
             if imdb_only and result[0].get('imdb'):
                 Env.prop(prop_name, result[0].get('imdb'))
 
