@@ -7,6 +7,7 @@ LABEL org.opencontainers.image.description="CouchPotato - Automatic movie downlo
 
 # environment
 ENV COUCHPOTATO_DOCKER=1
+ENV S6_KILL_GRACETIME=45000
 
 # build args for baking version info (set by CI)
 ARG VERSION_HASH=unknown

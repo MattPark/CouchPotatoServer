@@ -1,3 +1,4 @@
+import atexit
 import json
 import os
 import time
@@ -31,6 +32,10 @@ class Database(object):
         addEvent('database.setup_index', self.setupIndex)
         addEvent('app.after_shutdown', self.close)
 
+        # Safety net: flush DB on interpreter exit even if graceful shutdown
+        # is interrupted (e.g. s6-overlay sends SIGKILL before shutdown completes)
+        atexit.register(self._atexit_flush)
+
     def getDB(self):
         if not self.db:
             from couchpotato import get_db
@@ -39,6 +44,19 @@ class Database(object):
 
     def close(self, **kwargs):
         self.getDB().close()
+
+    def _atexit_flush(self):
+        """Last-resort flush: called by atexit if the process is exiting
+        without a clean app.after_shutdown (e.g. SIGKILL grace period expired
+        while plugins were still winding down)."""
+        try:
+            db = self.getDB()
+            if db and db._db:
+                storage = db._db.storage
+                if hasattr(storage, 'flush'):
+                    storage.flush()
+        except Exception:
+            pass  # Best-effort; don't raise during interpreter shutdown
 
     def setupIndex(self, index_name, klass):
         """Register an index name.  TinyDB does not use separate index

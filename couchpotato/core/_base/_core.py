@@ -149,6 +149,19 @@ class Core(Plugin):
 
         self.shutdown_started = True
 
+        # Flush DB early so cached writes survive even if SIGKILL arrives
+        # during the plugin wind-down wait below
+        try:
+            from couchpotato import get_db
+            db = get_db()
+            if db and db._db:
+                storage = db._db.storage
+                if hasattr(storage, 'flush'):
+                    storage.flush()
+                    log.info('Database flushed before plugin shutdown')
+        except Exception:
+            log.debug('Early DB flush skipped (DB not open)')
+
         fireEvent('app.do_shutdown', restart = restart)
         log.debug('Every plugin got shutdown event')
 
