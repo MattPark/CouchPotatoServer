@@ -83,12 +83,15 @@ class TheMovieDb(MovieProvider):
         """Get movie suggestions based on the user's library using TMDB recommendations."""
 
         if not movies:
+            log.debug('getSuggestions: no movies in library, returning empty')
             return []
         if not ignore:
             ignore = []
 
         if self.isDisabled():
             return []
+
+        log.debug('getSuggestions: %d library movies, sampling up to 5' % len(movies))
 
         # Sample a handful of library movies to get recommendations from
         sample_size = min(5, len(movies))
@@ -101,15 +104,21 @@ class TheMovieDb(MovieProvider):
             if self.shuttingDown():
                 break
 
+            if not imdb_id:
+                continue
+
             # Look up TMDB ID from IMDB ID
             try:
-                find_data = self.request('find/%s' % _native_imdb_id(imdb_id), {
+                native_id = _native_imdb_id(imdb_id)
+                find_data = self.request('find/%s' % native_id, {
                     'external_source': 'imdb_id',
                 })
                 if not find_data or not find_data.get('movie_results'):
+                    log.debug('getSuggestions: no TMDB match for %s' % imdb_id)
                     continue
                 tmdb_id = find_data['movie_results'][0]['id']
             except:
+                log.debug('getSuggestions: failed TMDB lookup for %s: %s' % (imdb_id, traceback.format_exc()))
                 continue
 
             # Get recommendations for this movie
@@ -118,7 +127,9 @@ class TheMovieDb(MovieProvider):
                     'language': 'en',
                 }, return_key = 'results')
                 if not recs:
+                    log.debug('getSuggestions: no recommendations for TMDB %s' % tmdb_id)
                     continue
+                log.debug('getSuggestions: got %d recommendations for TMDB %s' % (len(recs), tmdb_id))
             except:
                 continue
 
@@ -147,6 +158,7 @@ class TheMovieDb(MovieProvider):
             if len(suggestions) >= 20:
                 break
 
+        log.debug('getSuggestions: returning %d suggestions' % len(suggestions))
         return suggestions
 
     def isMovie(self, identifier = None, adding = False, **kwargs):

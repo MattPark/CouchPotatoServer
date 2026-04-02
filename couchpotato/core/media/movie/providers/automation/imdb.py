@@ -29,6 +29,7 @@ class IMDB(MultiProvider):
 class IMDBBase(Automation):
 
     interval = 1800
+    http_time_between_calls = 0.5  # Override Automation's 2s; TMDB allows ~4 req/s, IMDB GraphQL is generous
 
     charts = {
         'top250': {
@@ -198,7 +199,8 @@ class IMDBBase(Automation):
         return imdb_ids
 
     def getTMDBNowPlaying(self):
-        """Fetch 'now playing' movies from TMDB as a replacement for IMDB In Theaters."""
+        """Fetch 'now playing' movies from TMDB as a replacement for IMDB In Theaters.
+        Returns IMDB IDs (for automation/background use)."""
         all_results = []
         for page in range(1, 3):  # 2 pages = ~40 movies
             data = self._tmdbGet('movie/now_playing', 'page=%d' % page)
@@ -212,7 +214,8 @@ class IMDBBase(Automation):
         return imdb_ids
 
     def getTMDBPopular(self):
-        """Fetch popular movies from TMDB as a replacement for IMDB Box Office."""
+        """Fetch popular movies from TMDB as a replacement for IMDB Box Office.
+        Returns IMDB IDs (for automation/background use)."""
         data = self._tmdbGet('movie/popular', 'page=1')
         if not data or not isinstance(data, dict) or 'results' not in data:
             return []
@@ -220,8 +223,33 @@ class IMDBBase(Automation):
         log.debug('Fetched %d popular movies from TMDB' % len(imdb_ids))
         return imdb_ids
 
+    def getTMDBNowPlayingTmdbIds(self):
+        """Fetch 'now playing' TMDB IDs directly (fast, for chart display)."""
+        tmdb_ids = []
+        for page in range(1, 3):
+            data = self._tmdbGet('movie/now_playing', 'page=%d' % page)
+            if not data or not isinstance(data, dict) or 'results' not in data:
+                break
+            for movie in data['results']:
+                tid = movie.get('id')
+                if tid:
+                    tmdb_ids.append(tid)
+            if self.shuttingDown():
+                break
+        log.debug('Fetched %d now-playing TMDB IDs' % len(tmdb_ids))
+        return tmdb_ids
+
+    def getTMDBPopularTmdbIds(self):
+        """Fetch popular TMDB IDs directly (fast, for chart display)."""
+        data = self._tmdbGet('movie/popular', 'page=1')
+        if not data or not isinstance(data, dict) or 'results' not in data:
+            return []
+        tmdb_ids = [m.get('id') for m in data['results'] if m.get('id')]
+        log.debug('Fetched %d popular TMDB IDs' % len(tmdb_ids))
+        return tmdb_ids
+
     def getChartMovies(self, name):
-        """Get IMDB IDs for a chart by name."""
+        """Get IMDB IDs for a chart by name (for automation/background use)."""
         if name == 'top250':
             return self.getTop250ViaGraphQL()
         elif name == 'theater':
@@ -331,22 +359,40 @@ class IMDBCharts(IMDBBase):
                     continue
 
                 chart['list'] = []
-                imdb_ids = self.getChartMovies(name)
 
                 try:
-                    for imdb_id in imdb_ids[0:max_items]:
-
-                        is_movie = fireEvent('movie.is_movie', identifier=imdb_id, adding=False, single=True)
-                        if not is_movie:
-                            continue
-
-                        info = self.getInfo(imdb_id)
-                        chart['list'].append(info)
-
-                        if self.shuttingDown():
-                            break
+                    if name == 'top250':
+                        # Top 250: GraphQL returns IMDB IDs, need isMovie + getInfo
+                        imdb_ids = self.getTop250ViaGraphQL()
+                        for imdb_id in imdb_ids[0:max_items]:
+                            is_movie = fireEvent('movie.is_movie', identifier=imdb_id, adding=False, single=True)
+                            if not is_movie:
+                                continue
+                            info = self.getInfo(imdb_id)
+                            if info:
+                                chart['list'].append(info)
+                            if self.shuttingDown():
+                                break
+                    elif name == 'theater':
+                        # In Theaters: use TMDB IDs directly (skip _tmdbIdsToImdb + isMovie)
+                        tmdb_ids = self.getTMDBNowPlayingTmdbIds()
+                        for tmdb_id in tmdb_ids[0:max_items]:
+                            info = fireEvent('movie.info_by_tmdb', identifier=tmdb_id, extended=False, merge=True)
+                            if info:
+                                chart['list'].append(info)
+                            if self.shuttingDown():
+                                break
+                    elif name == 'boxoffice':
+                        # Popular: use TMDB IDs directly (skip _tmdbIdsToImdb + isMovie)
+                        tmdb_ids = self.getTMDBPopularTmdbIds()
+                        for tmdb_id in tmdb_ids[0:max_items]:
+                            info = fireEvent('movie.info_by_tmdb', identifier=tmdb_id, extended=False, merge=True)
+                            if info:
+                                chart['list'].append(info)
+                            if self.shuttingDown():
+                                break
                 except:
-                    log.error('Failed loading IMDB chart results for %s: %s' % (name, traceback.format_exc()))
+                    log.error('Failed loading chart results for %s: %s' % (name, traceback.format_exc()))
 
                 self.setCache(cache_key, chart['list'], timeout=259200)
 
