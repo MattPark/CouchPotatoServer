@@ -790,6 +790,139 @@
 		}
 	}
 
+	// Manage settings tab — scan toolbar
+	.scan_toolbar {
+		padding: $padding/2 0;
+
+		.scan_buttons {
+			display: flex;
+			gap: $padding/2;
+			margin-bottom: $padding/2;
+
+			@include media-phablet {
+				flex-direction: column;
+			}
+		}
+
+		.scan_btn {
+			flex: 1;
+			display: flex;
+			flex-wrap: wrap;
+			align-items: center;
+			padding: $padding/2 $padding;
+			border: 1px solid rgba(0,0,0,.15);
+			border-radius: $border_radius;
+			cursor: pointer;
+			transition: border-color 200ms, opacity 200ms;
+
+			@include theme-dark {
+				border-color: rgba(255,255,255,.15);
+			}
+
+			&:hover {
+				@include theme(border-color, primary);
+			}
+
+			&.disabled {
+				opacity: .4;
+				pointer-events: none;
+			}
+
+			.scan_btn_icon {
+				font-size: 1.4em;
+				margin-right: $padding/2;
+				@include theme(color, primary);
+			}
+
+			.scan_btn_label {
+				font-weight: bold;
+				font-size: 1.05em;
+			}
+
+			.scan_btn_desc {
+				width: 100%;
+				font-size: .85em;
+				opacity: .6;
+				margin-top: 2px;
+				padding-left: 1.4em + $padding/2;
+			}
+		}
+
+		.scan_progress {
+			padding: $padding/4 0;
+
+			.scan_status {
+				padding: $padding/4 0;
+				font-weight: bold;
+
+				.scan_status_icon {
+					margin-right: 6px;
+					@include theme(color, primary);
+				}
+
+				.scan_live_count {
+					font-weight: normal;
+					opacity: .7;
+				}
+			}
+
+			.scan_folder_row {
+				display: flex;
+				padding: $padding/8 0;
+
+				.folder {
+					flex: 1;
+					overflow: hidden;
+					text-overflow: ellipsis;
+					white-space: nowrap;
+					margin-right: $padding/2;
+					opacity: .7;
+				}
+
+				.percentage {
+					font-weight: bold;
+				}
+			}
+		}
+
+		.scan_results {
+			padding: $padding/4 0;
+
+			.scan_results_inner {
+				display: flex;
+				align-items: center;
+				padding: $padding/2;
+				border-radius: $border_radius;
+				background: rgba(0,128,0,.08);
+
+				@include theme-dark {
+					background: rgba(0,200,0,.1);
+				}
+			}
+
+			.scan_results_icon {
+				margin-right: $padding/2;
+				color: #2a2;
+				font-size: 1.2em;
+			}
+
+			.scan_results_text {
+				flex: 1;
+			}
+
+			.scan_results_dismiss {
+				margin-left: $padding/2;
+				opacity: .5;
+				cursor: pointer;
+				font-size: .85em;
+
+				&:hover {
+					opacity: 1;
+				}
+			}
+		}
+	}
+
 }
 
 .directory_list {
