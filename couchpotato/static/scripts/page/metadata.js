@@ -1,0 +1,139 @@
+var MetadataSettingTab = new Class({
+
+	stats_panels: {},
+	refresh_timer: null,
+
+	initialize: function(){
+		var self = this;
+		App.addEvent('loadSettings', self.addSettings.bind(self));
+	},
+
+	addSettings: function(){
+		var self = this;
+
+		self.settings = App.getPage('Settings');
+		self.settings.addEvent('create', function(){
+			// The metadata tab is auto-created by the config framework.
+			// Wait a tick for config groups to render, then inject stats panels.
+			requestTimeout(function(){
+				var tab = self.settings.tabs['metadata'];
+				if (!tab) return;
+
+				// Listen for tab activation to fetch stats
+				tab.content.addEvent('activate', function(){
+					self.refresh();
+					self.startAutoRefresh();
+				});
+
+				self.injectStats(tab.content);
+			}, 100);
+		});
+	},
+
+	injectStats: function(content){
+		var self = this;
+
+		var services = ['omdbapi', 'themoviedb', 'fanarttv'];
+		services.each(function(name){
+			var group = content.getElement('.group_' + name);
+			if (group) {
+				var panel = new Element('div.metadata_stats.stats_' + name, {
+					'html': '<div class="stats_loading">Loading statistics...</div>'
+				});
+				panel.inject(group.getElement('h2'), 'after');
+				self.stats_panels[name] = panel;
+			}
+		});
+	},
+
+	refresh: function(){
+		var self = this;
+		Api.request('metadata.stats', {
+			'onComplete': function(json){
+				if (json) self.renderStats(json);
+			}
+		});
+	},
+
+	startAutoRefresh: function(){
+		var self = this;
+		if (self.refresh_timer) clearInterval(self.refresh_timer);
+		self.refresh_timer = setInterval(self.refresh.bind(self), 30000);
+	},
+
+	renderStats: function(json){
+		var self = this;
+
+		// OMDB
+		if (json.omdb && self.stats_panels['omdbapi']) {
+			var o = json.omdb;
+			var pct = o.budget > 0 ? Math.round((o.calls_today / o.budget) * 100) : 0;
+			var bar_class = pct > 80 ? 'bar_warning' : (pct > 50 ? 'bar_caution' : 'bar_ok');
+			var tier_label = o.key_tier === 'patron' ? 'Patron' : 'Free';
+
+			self.stats_panels['omdbapi'].set('html',
+				'<div class="stats_grid">' +
+					'<div class="stat_item">' +
+						'<span class="stat_value">' + o.calls_today + '</span>' +
+						'<span class="stat_label">Calls Today</span>' +
+					'</div>' +
+					'<div class="stat_item">' +
+						'<span class="stat_value">' + o.budget_remaining + '</span>' +
+						'<span class="stat_label">Remaining</span>' +
+					'</div>' +
+					'<div class="stat_item">' +
+						'<span class="stat_value">' + o.cache_hits_today + '</span>' +
+						'<span class="stat_label">Cache Hits</span>' +
+					'</div>' +
+					'<div class="stat_item">' +
+						'<span class="stat_value">' + tier_label + '</span>' +
+						'<span class="stat_label">Tier</span>' +
+					'</div>' +
+				'</div>' +
+				'<div class="stats_bar_wrap">' +
+					'<div class="stats_bar ' + bar_class + '" style="width:' + Math.min(pct, 100) + '%"></div>' +
+					'<span class="stats_bar_text">' + pct + '% of daily budget used (' + o.calls_today + ' / ' + o.budget + ')</span>' +
+				'</div>'
+			);
+		}
+
+		// TMDB
+		if (json.tmdb && self.stats_panels['themoviedb']) {
+			var t = json.tmdb;
+			self.stats_panels['themoviedb'].set('html',
+				'<div class="stats_grid">' +
+					'<div class="stat_item">' +
+						'<span class="stat_value">' + t.calls_today + '</span>' +
+						'<span class="stat_label">Calls Today</span>' +
+					'</div>' +
+					'<div class="stat_item">' +
+						'<span class="stat_value">' + (t.has_custom_key ? 'Custom' : 'Built-in') + '</span>' +
+						'<span class="stat_label">Key Type</span>' +
+					'</div>' +
+				'</div>'
+			);
+		}
+
+		// FanartTV
+		if (json.fanarttv && self.stats_panels['fanarttv']) {
+			var f = json.fanarttv;
+			self.stats_panels['fanarttv'].set('html',
+				'<div class="stats_grid">' +
+					'<div class="stat_item">' +
+						'<span class="stat_value">' + f.calls_today + '</span>' +
+						'<span class="stat_label">Calls Today</span>' +
+					'</div>' +
+					'<div class="stat_item">' +
+						'<span class="stat_value">' + (f.has_custom_key ? 'Custom' : 'Built-in') + '</span>' +
+						'<span class="stat_label">Key Type</span>' +
+					'</div>' +
+				'</div>'
+			);
+		}
+	}
+
+});
+
+window.addEvent('domready', function(){
+	new MetadataSettingTab();
+});

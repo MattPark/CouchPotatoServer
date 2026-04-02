@@ -44,6 +44,10 @@ class Core(Plugin):
         addApiView('app.version', self.versionView, docs = {
             'desc': 'Get version.'
         })
+        addApiView('metadata.stats', self.metadataStats, docs = {
+            'desc': 'Return usage statistics for metadata service providers (OMDB, TMDB, Fanart.tv).',
+            'return': {'type': 'object', 'example': '{"omdb": {...}, "tmdb": {...}, "fanarttv": {...}}'}
+        })
 
         addEvent('app.shutdown', self.shutdown)
         addEvent('app.restart', self.restart)
@@ -115,6 +119,9 @@ class Core(Plugin):
         return {
             'success': True
         }
+
+    def metadataStats(self, **kwargs):
+        return fireEvent('metadata.stats', merge = True) or {}
 
     def shutdown(self, **kwargs):
         if self.shutdown_started:

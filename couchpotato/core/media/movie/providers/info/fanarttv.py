@@ -1,3 +1,4 @@
+import time
 import traceback
 
 from couchpotato import tryInt
@@ -11,18 +12,55 @@ log = CPLog(__name__)
 
 autoload = 'FanartTV'
 
+# Default built-in API key
+DEFAULT_API_KEY = 'b28b14e9be662e027cfbc7c3dd600405'
+
 
 class FanartTV(MovieProvider):
 
     urls = {
-        'api': 'http://webservice.fanart.tv/v3/movies/%s?api_key=b28b14e9be662e027cfbc7c3dd600405'
+        'api': 'http://webservice.fanart.tv/v3/movies/%s?api_key=%s'
     }
 
     MAX_EXTRAFANART = 20
     http_time_between_calls = 0
 
+    # In-memory daily call counter: {'YYYYMMDD': count}
+    _daily_calls = {}
+
     def __init__(self):
         addEvent('movie.info', self.getArt, priority = 1)
+        addEvent('metadata.stats', self.getStats)
+
+    # --- call tracking -------------------------------------------------------
+
+    def _todayKey(self):
+        return time.strftime('%Y%m%d')
+
+    def _incrementDaily(self):
+        key = self._todayKey()
+        self._daily_calls[key] = self._daily_calls.get(key, 0) + 1
+        for k in list(self._daily_calls):
+            if k != key:
+                del self._daily_calls[k]
+
+    def _getDailyCount(self):
+        return self._daily_calls.get(self._todayKey(), 0)
+
+    def getStats(self):
+        api_key = self.getApiKey()
+        return {
+            'fanarttv': {
+                'calls_today': self._getDailyCount(),
+                'has_custom_key': api_key != DEFAULT_API_KEY and api_key != '',
+            }
+        }
+
+    def getApiKey(self):
+        key = self.conf('api_key')
+        return key if key else DEFAULT_API_KEY
+
+    # --- API methods ---------------------------------------------------------
 
     def getArt(self, identifier = None, extended = True, **kwargs):
 
@@ -32,16 +70,19 @@ class FanartTV(MovieProvider):
         images = {}
 
         try:
-            url = self.urls['api'] % identifier
+            url = self.urls['api'] % (identifier, self.getApiKey())
             fanart_data = self.getJsonData(url, show_error = False)
+            self._incrementDaily()
 
             if fanart_data:
                 log.debug('Found images for %s', fanart_data.get('name'))
                 images = self._parseMovie(fanart_data)
         except HTTPError as e:
+            self._incrementDaily()
             log.debug('Failed getting extra art for %s: %s',
                       (identifier, e))
         except:
+            self._incrementDaily()
             log.error('Failed getting extra art for %s: %s',
                       (identifier, traceback.format_exc()))
             return {}
@@ -127,7 +168,28 @@ class FanartTV(MovieProvider):
         return image_urls
 
     def isDisabled(self):
-        if self.conf('api_key') == '':
+        if self.getApiKey() == '':
             log.error('No API key provided.')
             return True
         return False
+
+
+config = [{
+    'name': 'fanarttv',
+    'groups': [
+        {
+            'tab': 'metadata',
+            'name': 'fanarttv',
+            'label': 'Fanart.tv',
+            'description': 'Provides extra artwork — logos, disc art, banners, and fanart backgrounds.',
+            'options': [
+                {
+                    'name': 'api_key',
+                    'default': DEFAULT_API_KEY,
+                    'label': 'API Key',
+                    'description': 'A built-in key is provided. Get your own at <a href="https://fanart.tv/get-an-api-key/" target="_blank">fanart.tv</a>',
+                },
+            ],
+        },
+    ],
+}]

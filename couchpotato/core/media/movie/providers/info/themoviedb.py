@@ -1,5 +1,6 @@
 import re
 import random
+import time
 import traceback
 import itertools
 from base64 import b64decode as bd
@@ -35,6 +36,9 @@ class TheMovieDb(MovieProvider):
     languages = [ 'en' ]
     default_language = 'en'
 
+    # In-memory daily call counter: {'YYYYMMDD': count}
+    _daily_calls = {}
+
     def __init__(self):
         addEvent('info.search', self.search, priority = 3)
         addEvent('movie.search', self.search, priority = 3)
@@ -43,6 +47,31 @@ class TheMovieDb(MovieProvider):
         addEvent('app.load', self.config)
         addEvent('movie.is_movie', self.isMovie)
         addEvent('movie.suggest', self.getSuggestions)
+        addEvent('metadata.stats', self.getStats)
+
+    # --- call tracking -------------------------------------------------------
+
+    def _todayKey(self):
+        return time.strftime('%Y%m%d')
+
+    def _incrementDaily(self):
+        key = self._todayKey()
+        self._daily_calls[key] = self._daily_calls.get(key, 0) + 1
+        for k in list(self._daily_calls):
+            if k != key:
+                del self._daily_calls[k]
+
+    def _getDailyCount(self):
+        return self._daily_calls.get(self._todayKey(), 0)
+
+    def getStats(self):
+        key = self.conf('api_key')
+        return {
+            'tmdb': {
+                'calls_today': self._getDailyCount(),
+                'has_custom_key': key != '' and key is not None,
+            }
+        }
 
     def config(self):
 
@@ -364,8 +393,10 @@ class TheMovieDb(MovieProvider):
         try:
             url = 'https://api.themoviedb.org/3/%s?api_key=%s%s' % (call, self.getApiKey(), '&%s' % params if params else '')
             data = self.getJsonData(url, show_error = False)
+            self._incrementDaily()
         except:
             log.debug('Movie not found: %s, %s', (call, params))
+            self._incrementDaily()
             data = None
 
         if data and return_key and return_key in data:
@@ -417,16 +448,16 @@ config = [{
     'name': 'themoviedb',
     'groups': [
         {
-            'tab': 'providers',
-            'name': 'tmdb',
+            'tab': 'metadata',
+            'name': 'themoviedb',
             'label': 'TheMovieDB',
-            'hidden': True,
-            'description': 'Used for all calls to TheMovieDB.',
+            'description': 'Primary source for movie info, posters, and search results.',
             'options': [
                 {
                     'name': 'api_key',
                     'default': '',
-                    'label': 'Api Key',
+                    'label': 'API Key',
+                    'description': 'Optional. Leave empty to use built-in keys. Get your own at <a href="https://www.themoviedb.org/settings/api" target="_blank">themoviedb.org</a>',
                 },
             ],
         },

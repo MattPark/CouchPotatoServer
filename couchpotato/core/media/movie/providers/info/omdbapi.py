@@ -19,8 +19,12 @@ autoload = 'OMDBAPI'
 CACHE_SUCCESS = 30 * 24 * 3600   # 30 days for successful lookups
 CACHE_FAILURE = 1 * 3600         # 1 hour for errors / empty results
 
-# Daily API budget (free tier = 1000/day, keep 100 headroom)
-DAILY_BUDGET = 900
+# Daily API budgets by tier (with headroom)
+BUDGET_FREE = 900       # Free tier: 1,000/day, keep 100 headroom
+BUDGET_PATRON = 95000   # Patron tier: 100,000/day, keep 5,000 headroom
+
+# Default built-in API key
+DEFAULT_API_KEY = 'bbc0e412'
 
 
 class OMDBAPI(MovieProvider):
@@ -32,21 +36,30 @@ class OMDBAPI(MovieProvider):
 
     http_time_between_calls = 0
 
-    # In-memory daily call counter: {'YYYYMMDD': count}
+    # In-memory daily counters: {'YYYYMMDD': count}
     _daily_calls = {}
+    _daily_cache_hits = {}
 
     def __init__(self):
         addEvent('info.search', self.search)
         addEvent('movie.search', self.search)
         addEvent('movie.info', self.getInfo)
+        addEvent('metadata.stats', self.getStats)
 
     # --- daily call budget ---------------------------------------------------
 
     def _todayKey(self):
         return time.strftime('%Y%m%d')
 
+    def _getDailyBudget(self):
+        tier = self.conf('key_tier') or 'free'
+        return BUDGET_PATRON if tier == 'patron' else BUDGET_FREE
+
     def _getDailyCount(self):
         return self._daily_calls.get(self._todayKey(), 0)
+
+    def _getDailyCacheHits(self):
+        return self._daily_cache_hits.get(self._todayKey(), 0)
 
     def _incrementDaily(self):
         key = self._todayKey()
@@ -56,15 +69,37 @@ class OMDBAPI(MovieProvider):
         for k in list(self._daily_calls):
             if k != key:
                 del self._daily_calls[k]
-        if count == DAILY_BUDGET:
-            log.warning('OMDB daily budget of %d reached — skipping further calls today' % DAILY_BUDGET)
+        budget = self._getDailyBudget()
+        if count == budget:
+            log.warning('OMDB daily budget of %d reached — skipping further calls today' % budget)
         return count
 
+    def _incrementCacheHit(self):
+        key = self._todayKey()
+        self._daily_cache_hits[key] = self._daily_cache_hits.get(key, 0) + 1
+        for k in list(self._daily_cache_hits):
+            if k != key:
+                del self._daily_cache_hits[k]
+
     def _overBudget(self):
-        count = self._getDailyCount()
-        if count >= DAILY_BUDGET:
-            return True
-        return False
+        return self._getDailyCount() >= self._getDailyBudget()
+
+    # --- stats ---------------------------------------------------------------
+
+    def getStats(self):
+        budget = self._getDailyBudget()
+        calls = self._getDailyCount()
+        api_key = self.getApiKey()
+        return {
+            'omdb': {
+                'calls_today': calls,
+                'budget': budget,
+                'budget_remaining': max(0, budget - calls),
+                'cache_hits_today': self._getDailyCacheHits(),
+                'key_tier': self.conf('key_tier') or 'free',
+                'has_custom_key': api_key != DEFAULT_API_KEY and api_key != '',
+            }
+        }
 
     # --- API methods ---------------------------------------------------------
 
@@ -84,6 +119,7 @@ class OMDBAPI(MovieProvider):
         # Check cache first (before budget check)
         cached = self.getCache(cache_key)
         if cached:
+            self._incrementCacheHit()
             result = self.parseMovie(cached)
             if result.get('titles') and len(result.get('titles')) > 0:
                 log.info('Found: %s', result['titles'][0] + ' (' + str(result.get('year')) + ')')
@@ -128,6 +164,7 @@ class OMDBAPI(MovieProvider):
         # Check cache first (before budget check)
         cached = self.getCache(cache_key)
         if cached:
+            self._incrementCacheHit()
             result = self.parseMovie(cached)
             if result.get('titles') and len(result.get('titles')) > 0:
                 log.info('Found: %s', result['titles'][0] + ' (' + str(result['year']) + ')')
@@ -243,16 +280,24 @@ config = [{
     'name': 'omdbapi',
     'groups': [
         {
-            'tab': 'providers',
-            'name': 'tmdb',
-            'label': 'OMDB API',
-            'hidden': True,
-            'description': 'Used for all calls to TheMovieDB.',
+            'tab': 'metadata',
+            'name': 'omdbapi',
+            'label': 'OMDB',
+            'description': 'Open Movie Database — provides IMDB ratings, plot summaries, and cast info.',
             'options': [
                 {
                     'name': 'api_key',
-                    'default': 'bbc0e412',  # Don't be a dick and use this somewhere else
-                    'label': 'Api Key',
+                    'default': DEFAULT_API_KEY,
+                    'label': 'API Key',
+                    'description': 'Get a free key at <a href="https://www.omdbapi.com/apikey.aspx" target="_blank">omdbapi.com</a>',
+                },
+                {
+                    'name': 'key_tier',
+                    'default': 'free',
+                    'type': 'dropdown',
+                    'label': 'Key Tier',
+                    'description': 'Free keys: 1,000 calls/day. Patron keys: 100,000 calls/day and access to the Poster API.',
+                    'values': [('Free (1,000/day)', 'free'), ('Patron (100,000/day)', 'patron')],
                 },
             ],
         },

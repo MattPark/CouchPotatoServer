@@ -711,6 +711,74 @@
 		}
 	}
 
+	// Metadata settings tab — stats panels
+	.metadata_stats {
+		padding: $padding;
+		margin: 0 0 $padding/2;
+		background: rgba(0,0,0,.15);
+		border-radius: $border_radius;
+
+		.stats_loading {
+			font-style: italic;
+			opacity: .5;
+		}
+
+		.stats_grid {
+			display: flex;
+			flex-wrap: wrap;
+			gap: $padding;
+			margin-bottom: $padding/2;
+		}
+
+		.stat_item {
+			display: flex;
+			flex-direction: column;
+			min-width: 80px;
+		}
+
+		.stat_value {
+			font-size: 1.4em;
+			font-weight: bold;
+			@include theme(color, primary);
+		}
+
+		.stat_label {
+			font-size: .8em;
+			opacity: .6;
+			text-transform: uppercase;
+		}
+
+		.stats_bar_wrap {
+			position: relative;
+			background: rgba(0,0,0,.2);
+			border-radius: $border_radius;
+			height: 22px;
+			overflow: hidden;
+		}
+
+		.stats_bar {
+			height: 100%;
+			border-radius: $border_radius;
+			transition: width .3s ease;
+
+			&.bar_ok { background: #4caf50; }
+			&.bar_caution { background: #ff9800; }
+			&.bar_warning { background: #f44336; }
+		}
+
+		.stats_bar_text {
+			position: absolute;
+			top: 0;
+			left: 0;
+			right: 0;
+			text-align: center;
+			line-height: 22px;
+			font-size: .75em;
+			color: #fff;
+			text-shadow: 0 1px 2px rgba(0,0,0,.5);
+		}
+	}
+
 }
 
 .directory_list {
