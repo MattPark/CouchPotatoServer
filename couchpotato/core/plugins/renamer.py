@@ -941,7 +941,7 @@ Remove it if you want it to be renamed (again, or at least let it try again)
     def replaceDoubles(self, string):
 
         replaces = [
-            (r'\.+', '.'), (r'_+', '_'), (r'-+', '-'), (r'\s+', ' '), (r' \\', '\\'), (' /', '/'),
+            (r'\.+', '.'), (r'_+', '_'), (r'-+', '-'), (r'\s+', ' '), (r' \\', r'\\'), (' /', '/'),
             (r'(\s\.)+', '.'), (r'(-\.)+', '.'), (r'(\s-[^\s])+', '-'), (' ]', ']'),
         ]
 
