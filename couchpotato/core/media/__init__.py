@@ -88,9 +88,15 @@ class MediaBase(Plugin):
             del existing_files[file_type]
 
         images = image_urls.get(image_type, [])
-        for y in ['SX300', 'tmdb']:
-            initially_try = [x for x in images if y in x]
-            images[:-1] = initially_try
+
+        # Prefer reliable CDNs (FanartTV, TMDB) over OMDB's Amazon URLs which go stale.
+        # The original code here was destructive — it dropped non-matching URLs
+        # via a broken slice assignment (images[:-1] = initially_try).
+        # The merge order already puts FanartTV first (priority 1) and TMDB second
+        # (priority 3), so just push stale-prone Amazon/OMDB URLs to the end.
+        reliable = [x for x in images if 'fanart' in x or 'tmdb' in x]
+        rest = [x for x in images if x not in reliable]
+        images = reliable + rest
 
         # Loop over type
         for image in images:

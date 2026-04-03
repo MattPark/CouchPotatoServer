@@ -293,6 +293,12 @@ class MovieBase(MovieTypeBase):
                 log.error('Could not update, no movie info to work with: %s', identifier)
                 return False
 
+            # Update identifiers from API response (self-heals padded IMDB IDs)
+            if info.get('imdb') and info['imdb'].startswith('tt'):
+                if 'identifiers' not in media:
+                    media['identifiers'] = {}
+                media['identifiers']['imdb'] = info['imdb']
+
             # Update basic info
             media['info'] = info
 

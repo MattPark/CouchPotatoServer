@@ -93,6 +93,7 @@ class FanartTV(MovieProvider):
 
     def _parseMovie(self, movie):
         images = {
+            'poster': self._getMultImages(movie.get('movieposter', []), 1),
             'landscape': self._getMultImages(movie.get('moviethumb', []), 1),
             'logo': [],
             'disc_art': self._getMultImages(self._trimDiscs(movie.get('moviedisc', [])), 1),

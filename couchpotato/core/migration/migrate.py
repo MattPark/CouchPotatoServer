@@ -8,6 +8,7 @@ cross-references, and bulk-inserts into the new TinyDB-backed CouchDB.
 
 import logging
 import os
+import re
 import shutil
 import struct
 from uuid import uuid4
@@ -126,6 +127,34 @@ def _remap_ids(docs):
     return docs, id_map
 
 
+def _normalize_imdb_ids(docs):
+    """Fix 8-digit zero-padded IMDB IDs (tt0XXXXXXX -> ttXXXXXXX) in media documents.
+
+    The old CouchPotato used getImdb() with .zfill(8) which produced IDs like
+    tt00111161 instead of the native tt0111161. External APIs (TMDB, OMDB) reject
+    the padded format. This pass normalizes all IMDB identifiers in-place.
+
+    Returns the count of IDs fixed.
+    """
+    fixed = 0
+    for doc in docs:
+        if doc.get('_t') != 'media':
+            continue
+        identifiers = doc.get('identifiers')
+        if not identifiers or not isinstance(identifiers, dict):
+            continue
+        imdb = identifiers.get('imdb', '')
+        if not imdb or not isinstance(imdb, str) or not imdb.startswith('tt'):
+            continue
+        m = re.match(r'tt0*(\d+)$', imdb)
+        if m:
+            native = 'tt%s' % m.group(1).zfill(7)
+            if native != imdb:
+                identifiers['imdb'] = native
+                fixed += 1
+    return fixed
+
+
 def migrate_codernity_to_tinydb(old_db_path, new_db_path):
     """Run the full CodernityDB -> TinyDB migration.
 
@@ -169,6 +198,11 @@ def migrate_codernity_to_tinydb(old_db_path, new_db_path):
         log.info('Assigning new UUIDs and updating cross-references...')
         docs, id_map = _remap_ids(docs)
         log.info('Remapped %d IDs', len(id_map))
+
+        # Step 2b: Normalize 8-digit padded IMDB IDs to native 7-digit format
+        imdb_fixed = _normalize_imdb_ids(docs)
+        if imdb_fixed:
+            log.info('Normalized %d padded IMDB IDs (tt0XXXXXXX -> ttXXXXXXX)', imdb_fixed)
 
         # Step 3: Move old CodernityDB files out of the way
         if os.path.isdir(legacy_dir):

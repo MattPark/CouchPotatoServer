@@ -78,14 +78,14 @@ def fireEvent(name, *args, **kwargs):
             if x in kwargs:
                 options[x] = kwargs.pop(x)
 
-        handlers = sorted(events[name], key=lambda e: e['priority'])
+        _event_handlers = sorted(events[name], key=lambda e: e['priority'])
 
-        if options['in_order'] or options['single'] or len(handlers) == 1:
+        if options['in_order'] or options['single'] or len(_event_handlers) == 1:
             # Serial execution
-            results = _run_serial(name, handlers, options['single'], *args, **kwargs)
+            results = _run_serial(name, _event_handlers, options['single'], *args, **kwargs)
         else:
             # Concurrent execution via thread pool
-            results = _run_concurrent(name, handlers, *args, **kwargs)
+            results = _run_concurrent(name, _event_handlers, *args, **kwargs)
 
         # Process results
         if options['single'] and not options['merge']:
@@ -127,10 +127,10 @@ def fireEvent(name, *args, **kwargs):
         log.error('%s: %s', (name, traceback.format_exc()))
 
 
-def _run_serial(name, handlers, return_on_first, *args, **kwargs):
+def _run_serial(name, _event_handlers, return_on_first, *args, **kwargs):
     """Run handlers sequentially, optionally stopping at first non-None result."""
     results = []
-    for entry in handlers:
+    for entry in _event_handlers:
         try:
             r = entry['handler'](*args, **kwargs)
             results.append((True, r))
@@ -143,19 +143,19 @@ def _run_serial(name, handlers, return_on_first, *args, **kwargs):
     return results
 
 
-def _run_concurrent(name, handlers, *args, **kwargs):
+def _run_concurrent(name, _event_handlers, *args, **kwargs):
     """Run handlers concurrently via thread pool, return results in priority order."""
     futures = {}
     try:
-        for i, entry in enumerate(handlers):
+        for i, entry in enumerate(_event_handlers):
             f = _pool.submit(entry['handler'], *args, **kwargs)
             futures[f] = i
     except RuntimeError:
         # Pool has been shut down (app is exiting) — fall back to serial
         log.debug('Thread pool shut down, running %s handlers serially', name)
-        return _run_serial(name, handlers, False, *args, **kwargs)
+        return _run_serial(name, _event_handlers, False, *args, **kwargs)
 
-    results = [None] * len(handlers)
+    results = [None] * len(_event_handlers)
     for f in as_completed(futures):
         idx = futures[f]
         try:
