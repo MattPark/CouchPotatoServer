@@ -1,4 +1,5 @@
 from datetime import timedelta
+import re
 import time
 import traceback
 from string import ascii_lowercase
@@ -63,11 +64,29 @@ class MediaPlugin(MediaBase):
 
         addApiView('media.available_chars', self.charView)
 
+        addApiView('media.fix_imdb_ids', self.fixImdbIdsView, docs = {
+            'desc': 'Normalize padded 8-digit IMDB IDs (tt0XXXXXXXX) to native 7-digit format (ttXXXXXXX) in the database',
+            'return': {'type': 'object', 'example': """{
+    'success': True,
+    'fixed': 456,
+    'total_media': 3012
+}"""},
+        })
+
+        addApiView('media.refresh_unknown', self.refreshUnknownView, docs = {
+            'desc': 'Queue a refresh for all UNKNOWN-titled media to resolve their titles via API lookups',
+            'return': {'type': 'object', 'example': """{
+    'success': True,
+    'queued': 766
+}"""},
+        })
+
         addEvent('app.load', self.addSingleRefreshView, priority = 100)
         addEvent('app.load', self.addSingleListView, priority = 100)
         addEvent('app.load', self.addSingleCharView, priority = 100)
         addEvent('app.load', self.addSingleDeleteView, priority = 100)
         addEvent('app.load', self.cleanupFaults)
+        addEvent('app.load', self.fixImdbIds)
 
         addEvent('media.get', self.get)
         addEvent('media.with_status', self.withStatus)
@@ -89,6 +108,91 @@ class MediaPlugin(MediaBase):
                 db.update(media)
             except:
                 pass
+
+    def fixImdbIdsView(self, **kwargs):
+        return self.fixImdbIds()
+
+    def fixImdbIds(self):
+        """Normalize all padded 8-digit IMDB IDs to native 7-digit format in the database."""
+        db = get_db()
+        fixed = 0
+        total = 0
+
+        try:
+            media_entries = db.all('media', with_doc=True)
+        except Exception:
+            media_entries = []
+
+        for entry in media_entries:
+            media = entry.get('doc') if isinstance(entry, dict) and 'doc' in entry else entry
+            total += 1
+            identifiers = media.get('identifiers')
+            if not identifiers or not isinstance(identifiers, dict):
+                continue
+            imdb = identifiers.get('imdb', '')
+            if not imdb or not isinstance(imdb, str) or not imdb.startswith('tt'):
+                continue
+            m = re.match(r'tt0*(\d+)$', imdb)
+            if not m:
+                continue
+            native = 'tt%s' % m.group(1).zfill(7)
+            if native != imdb:
+                identifiers['imdb'] = native
+                try:
+                    db.update(media)
+                    fixed += 1
+                except Exception:
+                    log.error('Failed to fix IMDB ID for media %s: %s', (media.get('_id', '?'), traceback.format_exc()))
+
+        log.info('Fixed %d padded IMDB IDs out of %d media documents' % (fixed, total))
+
+        return {
+            'success': True,
+            'fixed': fixed,
+            'total_media': total,
+        }
+
+    def refreshUnknownView(self, **kwargs):
+        return self.refreshUnknown()
+
+    def refreshUnknown(self):
+        """Queue a refresh for all UNKNOWN-titled media to resolve their titles."""
+        db = get_db()
+        queued = 0
+        handlers = []
+
+        try:
+            media_entries = db.all('media', with_doc=True)
+        except Exception:
+            media_entries = []
+
+        for entry in media_entries:
+            media = entry.get('doc') if isinstance(entry, dict) and 'doc' in entry else entry
+            title = media.get('title', '')
+            if title != 'UNKNOWN':
+                continue
+            media_id = media.get('_id')
+            if not media_id:
+                continue
+            media_type = media.get('type', 'movie')
+
+            def make_handler(mid, mtype):
+                def handler():
+                    fireEvent('%s.update' % mtype, media_id=mid,
+                              on_complete=self.createOnComplete(mid))
+                return handler
+
+            handlers.append(make_handler(media_id, media_type))
+            queued += 1
+
+        if handlers:
+            log.info('Queueing refresh for %d UNKNOWN media' % queued)
+            fireEventAsync('schedule.queue', handlers=handlers)
+
+        return {
+            'success': True,
+            'queued': queued,
+        }
 
     def refresh(self, id = '', **kwargs):
         handlers = []
