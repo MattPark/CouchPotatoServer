@@ -182,6 +182,13 @@ class MediaPlugin(MediaBase):
 
         log.info('Fixed %d padded IMDB IDs out of %d media documents' % (fixed, total))
 
+        # Flush DB to disk so normalized IDs survive container restarts
+        if fixed > 0:
+            try:
+                db.compact()
+            except Exception:
+                pass
+
         return {
             'success': True,
             'fixed': fixed,
@@ -365,6 +372,14 @@ class MediaPlugin(MediaBase):
         action = 'Would delete' if dry_run else 'Deleted'
         log.info('%s %d UNKNOWN media entries (kept %d, skipped %d with files)' % (action, deleted_count, kept_count, skipped_has_files))
 
+        # Flush DB to disk so bulk deletes survive container restarts
+        if not dry_run and deleted_count > 0:
+            try:
+                db = get_db()
+                db.compact()
+            except Exception:
+                pass
+
         return {
             'success': True,
             'deleted': deleted_count,
@@ -434,6 +449,13 @@ class MediaPlugin(MediaBase):
         if handlers:
             log.info('Queueing refresh for %d repaired media' % len(handlers))
             fireEventAsync('schedule.queue', handlers=handlers)
+
+        # Flush DB to disk so repaired IMDB IDs survive container restarts
+        if not dry_run and repaired > 0:
+            try:
+                db.compact()
+            except Exception:
+                pass
 
         action = 'Would repair' if dry_run else 'Repaired'
         log.info('%s %d UNKNOWN media with truncated IMDB IDs' % (action, repaired))

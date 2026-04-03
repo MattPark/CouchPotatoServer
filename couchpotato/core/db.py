@@ -149,6 +149,9 @@ class CouchDB:
         self._do_open()
 
     def _do_open(self):
+        # Flush every 50 writes instead of the default 1000 — container restarts
+        # can kill the process before a clean shutdown flushes pending writes.
+        CachingMiddleware.WRITE_CACHE_SIZE = 50
         self._db = TinyDB(self._db_file, storage=CachingMiddleware(JSONStorage))
         self._rebuild_caches()
 
