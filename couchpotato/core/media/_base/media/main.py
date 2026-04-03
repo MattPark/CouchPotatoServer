@@ -178,8 +178,9 @@ class MediaPlugin(MediaBase):
 
             def make_handler(mid, mtype):
                 def handler():
-                    fireEvent('%s.update' % mtype, media_id=mid,
-                              on_complete=self.createOnComplete(mid))
+                    # Only update info — skip the searcher (no on_complete)
+                    # to avoid wasteful download searches for title-fix refreshes
+                    fireEvent('%s.update' % mtype, media_id=mid)
                 return handler
 
             handlers.append(make_handler(media_id, media_type))
