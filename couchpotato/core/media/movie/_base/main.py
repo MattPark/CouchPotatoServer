@@ -116,8 +116,45 @@ class MovieBase(MovieTypeBase):
 
             new = False
             previous_profile = None
+            imdb_key = 'imdb-%s' % params.get('identifier')
             try:
-                m = db.get('media', 'imdb-%s' % params.get('identifier'), with_doc = True)['doc']
+                # Use get_many to find ALL entries with this IMDB ID
+                existing = db.get_many('media', imdb_key, with_doc=True)
+                if not existing:
+                    raise RecordNotFound('No match')
+
+                # Auto-heal: if multiple entries exist, keep best one, delete rest
+                if len(existing) > 1:
+                    log.warning('Found %s duplicates for %s, auto-healing' % (len(existing), imdb_key))
+                    # Score: most releases wins, then done status, then has poster
+                    scored = []
+                    for entry in existing:
+                        doc = entry.get('doc', entry)
+                        rels = fireEvent('release.for_media', doc['_id'], single=True) or []
+                        sc = len(rels) * 1000
+                        if doc.get('status') == 'done':
+                            sc += 500
+                        info_d = doc.get('info') or {}
+                        if (info_d.get('images') or {}).get('poster'):
+                            sc += 10
+                        scored.append((sc, doc, rels))
+                    scored.sort(key=lambda x: x[0], reverse=True)
+                    # Keep the winner, delete the rest
+                    m = scored[0][1]
+                    for _, loser_doc, loser_rels in scored[1:]:
+                        # Re-parent releases to winner
+                        for rel in loser_rels:
+                            rel['media_id'] = m['_id']
+                            try:
+                                db.update(rel)
+                            except Exception:
+                                pass
+                        try:
+                            db.delete(loser_doc)
+                        except Exception:
+                            pass
+                else:
+                    m = existing[0].get('doc', existing[0])
 
                 try:
                     db.get('id', m.get('profile_id'))
@@ -126,7 +163,7 @@ class MovieBase(MovieTypeBase):
                     pass
                 except:
                     log.error('Failed getting previous profile: %s', traceback.format_exc())
-            except:
+            except (RecordNotFound, IndexError):
                 new = True
                 m = db.insert(media)
 

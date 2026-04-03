@@ -9,7 +9,7 @@ from couchpotato import tryInt, get_db
 from couchpotato.api import addApiView
 from couchpotato.core.event import fireEvent, fireEventAsync, addEvent
 from couchpotato.core.helpers.encoding import toUnicode
-from couchpotato.core.helpers.variable import splitString, getImdb, getTitle
+from couchpotato.core.helpers.variable import splitString, getImdb, getTitle, nativeImdbId
 from couchpotato.core.logger import CPLog
 from couchpotato.core.media import MediaBase
 
@@ -114,6 +114,20 @@ class MediaPlugin(MediaBase):
     'success': True,
     'repaired': 55,
     'skipped': 0,
+}"""},
+        })
+
+        addApiView('media.dedup', self.dedupView, docs = {
+            'desc': 'Find and remove duplicate media entries (same IMDB ID). Re-parents releases from losers to winners.',
+            'params': {
+                'dry_run': {'desc': 'If true (default), only report duplicates without deleting', 'type': 'bool'},
+            },
+            'return': {'type': 'object', 'example': """{
+    'success': True,
+    'dry_run': True,
+    'duplicates': [{'title': '...', 'year': 2024, 'imdb': 'tt1234567', 'winner_id': '...', 'loser_ids': ['...'], 'releases_moved': 2}],
+    'total_groups': 72,
+    'total_removed': 72
 }"""},
         })
 
@@ -952,3 +966,169 @@ class MediaPlugin(MediaBase):
             log.error('Failed untagging: %s', traceback.format_exc())
 
         return False
+
+    def dedupView(self, **kwargs):
+        dry_run_val = kwargs.get('dry_run', 'true')
+        if isinstance(dry_run_val, bool):
+            dry_run = dry_run_val
+        else:
+            dry_run = str(dry_run_val).lower() not in ('false', '0', 'no')
+        return self.dedup(dry_run=dry_run)
+
+    def dedup(self, dry_run=True):
+        """Find and remove duplicate media entries with the same IMDB ID.
+
+        For each duplicate group, picks a winner (most releases, best metadata)
+        and re-parents the losers' releases to the winner before deleting.
+        """
+        db = get_db()
+
+        # 1. Collect all media, group by normalized IMDB ID
+        try:
+            all_media = db.all('media', with_doc=True)
+        except Exception:
+            log.error('Failed to read media for dedup: %s', traceback.format_exc())
+            return {'success': False, 'error': 'Failed to read media'}
+
+        by_imdb = {}
+        for entry in all_media:
+            doc = entry.get('doc', entry)
+            imdb = (doc.get('identifiers') or {}).get('imdb', '')
+            if not imdb:
+                continue
+            norm = nativeImdbId(imdb)
+            if norm not in by_imdb:
+                by_imdb[norm] = []
+            by_imdb[norm].append(doc)
+
+        # 2. Find groups with duplicates
+        dup_groups = {k: v for k, v in by_imdb.items() if len(v) > 1}
+
+        if not dup_groups:
+            return {'success': True, 'dry_run': dry_run, 'duplicates': [],
+                    'total_groups': 0, 'total_removed': 0}
+
+        log.info('Found %d duplicate IMDB groups' % len(dup_groups))
+
+        results = []
+        total_removed = 0
+
+        for imdb_id, entries in sorted(dup_groups.items()):
+            # 3. Score each entry to pick a winner
+            scored = []
+            for doc in entries:
+                media_id = doc['_id']
+                releases = fireEvent('release.for_media', media_id, single=True) or []
+                info = doc.get('info') or {}
+                images = info.get('images') or {}
+                posters = images.get('poster') or []
+
+                score = 0
+                # Most releases wins (big weight)
+                score += len(releases) * 1000
+                # Done status wins over active
+                if doc.get('status') == 'done':
+                    score += 500
+                # Has poster
+                if posters:
+                    score += 10
+                # Has plot
+                if info.get('plot'):
+                    score += 5
+                # Has year
+                if info.get('year'):
+                    score += 2
+
+                scored.append({
+                    'doc': doc,
+                    'media_id': media_id,
+                    'releases': releases,
+                    'score': score,
+                })
+
+            # Sort by score descending; ties broken by keeping the first (oldest)
+            scored.sort(key=lambda x: x['score'], reverse=True)
+            winner = scored[0]
+            losers = scored[1:]
+
+            info = winner['doc'].get('info') or {}
+            title = info.get('original_title', '') or (info.get('titles', [''])[0] if info.get('titles') else '')
+            year = info.get('year', 0)
+
+            group_result = {
+                'title': title,
+                'year': year,
+                'imdb': imdb_id,
+                'winner_id': winner['media_id'],
+                'winner_releases': len(winner['releases']),
+                'winner_score': winner['score'],
+                'loser_ids': [l['media_id'] for l in losers],
+                'loser_releases': [len(l['releases']) for l in losers],
+                'releases_moved': 0,
+            }
+
+            if not dry_run:
+                # 4. Re-parent loser releases to winner
+                moved = 0
+                # Track winner's existing release names to avoid duplicates
+                winner_release_names = set()
+                for r in winner['releases']:
+                    rname = (r.get('info') or {}).get('name', '')
+                    if rname:
+                        winner_release_names.add(rname)
+
+                for loser in losers:
+                    for release in loser['releases']:
+                        rname = (release.get('info') or {}).get('name', '')
+                        if rname and rname in winner_release_names:
+                            # Duplicate release — delete it instead of moving
+                            try:
+                                db.delete(release)
+                            except Exception:
+                                pass
+                            continue
+
+                        # Re-parent release to winner
+                        release['media_id'] = winner['media_id']
+                        try:
+                            db.update(release)
+                            moved += 1
+                            if rname:
+                                winner_release_names.add(rname)
+                        except Exception:
+                            log.error('Failed to re-parent release %s: %s', (release.get('_id', '?'), traceback.format_exc()))
+
+                    # 5. Delete the loser media doc (releases already moved/deleted)
+                    try:
+                        db.delete(loser['doc'])
+                        total_removed += 1
+                        log.info('Dedup: deleted %s (%s) id=%s, moved %s releases to %s',
+                                 (title, imdb_id, loser['media_id'], moved, winner['media_id']))
+                    except Exception:
+                        log.error('Failed to delete duplicate %s: %s', (loser['media_id'], traceback.format_exc()))
+
+                group_result['releases_moved'] = moved
+            else:
+                total_removed += len(losers)
+
+            results.append(group_result)
+
+        # 6. Flush DB after bulk operation
+        if not dry_run and total_removed > 0:
+            try:
+                db.compact()
+                log.info('Dedup complete: removed %d duplicates from %d groups' % (total_removed, len(results)))
+            except Exception:
+                pass
+
+            # Notify frontend
+            fireEvent('notify.frontend', type='media.dedup_complete',
+                      data={'removed': total_removed, 'groups': len(results)})
+
+        return {
+            'success': True,
+            'dry_run': dry_run,
+            'duplicates': results,
+            'total_groups': len(results),
+            'total_removed': total_removed,
+        }
