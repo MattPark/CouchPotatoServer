@@ -254,12 +254,29 @@ class TheMovieDb(MovieProvider):
 
         # TMDB's /movie/ endpoint accepts IMDB IDs but only in native format (tt0111161),
         # not the 8-digit padded format (tt00111161) used internally
-        if isinstance(identifier, str) and identifier.startswith('tt'):
+        is_imdb = isinstance(identifier, str) and identifier.startswith('tt')
+        if is_imdb:
             identifier = _native_imdb_id(identifier)
 
         result = self.parseMovie({
             'id': identifier
         }, extended = extended)
+
+        # Fallback: TMDB's /movie/tt... endpoint returns 404 for some movies even
+        # though they exist.  Use /find to resolve the numeric TMDB ID and retry.
+        if not result and is_imdb:
+            try:
+                find_data = self.request('find/%s' % identifier, {
+                    'external_source': 'imdb_id',
+                })
+                if find_data and find_data.get('movie_results'):
+                    tmdb_id = find_data['movie_results'][0]['id']
+                    log.info('TMDB /movie/%s failed, resolved via /find to TMDB id %d' % (identifier, tmdb_id))
+                    result = self.parseMovie({
+                        'id': tmdb_id
+                    }, extended = extended)
+            except:
+                log.debug('TMDB /find fallback failed for %s: %s' % (identifier, traceback.format_exc()))
 
         return result or {}
 
