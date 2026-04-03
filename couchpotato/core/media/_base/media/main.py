@@ -81,6 +81,42 @@ class MediaPlugin(MediaBase):
 }"""},
         })
 
+        addApiView('media.list_unknown', self.listUnknownView, docs = {
+            'desc': 'List all UNKNOWN-titled media with IMDB category info',
+            'return': {'type': 'object', 'example': """{
+    'success': True,
+    'unknown': [{'_id': '...', 'imdb': 'tt1234567', 'status': 'active', 'imdb_type': 'tvEpisode', 'imdb_title': '...'}],
+    'total': 311,
+    'by_type': {'tvEpisode': 160, 'deleted': 141, ...}
+}"""},
+        })
+
+        addApiView('media.cleanup_unknown', self.cleanupUnknownView, docs = {
+            'desc': 'Delete UNKNOWN-titled media that are not real movies (TV episodes, deleted IMDB IDs, etc.)',
+            'params': {
+                'delete_types': {'desc': 'Comma-separated IMDB types to delete. Default: tvEpisode,tvSeries,tvMiniSeries,tvSpecial,deleted', 'type': 'string'},
+                'dry_run': {'desc': 'If true, only report what would be deleted without actually deleting', 'type': 'bool'},
+            },
+            'return': {'type': 'object', 'example': """{
+    'success': True,
+    'deleted': 309,
+    'kept': 2,
+    'by_type': {'tvEpisode': 160, 'deleted': 141, ...}
+}"""},
+        })
+
+        addApiView('media.repair_unknown', self.repairUnknownView, docs = {
+            'desc': 'Repair UNKNOWN entries with truncated IMDB IDs by recovering the full ID from filenames',
+            'params': {
+                'dry_run': {'desc': 'If true, only report what would be repaired without actually repairing', 'type': 'bool'},
+            },
+            'return': {'type': 'object', 'example': """{
+    'success': True,
+    'repaired': 55,
+    'skipped': 0,
+}"""},
+        })
+
         addEvent('app.load', self.addSingleRefreshView, priority = 100)
         addEvent('app.load', self.addSingleListView, priority = 100)
         addEvent('app.load', self.addSingleCharView, priority = 100)
@@ -193,6 +229,217 @@ class MediaPlugin(MediaBase):
         return {
             'success': True,
             'queued': queued,
+        }
+
+    def _getUnknownMedia(self):
+        """Get all UNKNOWN-titled media entries from the database."""
+        db = get_db()
+        unknown = []
+
+        try:
+            media_entries = db.all('media', with_doc=True)
+        except Exception:
+            media_entries = []
+
+        for entry in media_entries:
+            media = entry.get('doc') if isinstance(entry, dict) and 'doc' in entry else entry
+            title = media.get('title', '')
+            if title != 'UNKNOWN':
+                continue
+            media_id = media.get('_id')
+            if not media_id:
+                continue
+            imdb = media.get('identifiers', {}).get('imdb', '')
+
+            # Check if this entry has files on disk (from releases)
+            has_files = False
+            file_imdb = ''
+            try:
+                releases = fireEvent('release.for_media', media_id, single=True) or []
+                for release in releases:
+                    for file_type, file_paths in release.get('files', {}).items():
+                        paths = file_paths if isinstance(file_paths, list) else [file_paths]
+                        for fp in paths:
+                            if fp:
+                                has_files = True
+                                # Try to extract the full IMDB ID from the filename
+                                if not file_imdb:
+                                    m = re.search(r'(tt\d{7,})', fp)
+                                    if m:
+                                        file_imdb = m.group(1)
+            except Exception:
+                pass
+
+            unknown.append({
+                '_id': media_id,
+                'imdb': imdb,
+                'status': media.get('status', ''),
+                'type': media.get('type', 'movie'),
+                'has_files': has_files,
+                'file_imdb': file_imdb,
+            })
+
+        return unknown
+
+    def _checkImdbType(self, imdb_id):
+        """Check the type and title of an IMDB ID via the IMDB GraphQL API.
+        Returns (imdb_type, imdb_title) or ('deleted', '') if not found."""
+        import json
+        from urllib.request import Request, urlopen
+
+        try:
+            query = '{ title(id: "%s") { titleText { text } titleType { id } } }' % imdb_id
+            data = json.dumps({"query": query}).encode()
+            req = Request('https://graphql.imdb.com/', data=data,
+                         headers={'content-type': 'application/json'})
+            with urlopen(req, timeout=10) as resp:
+                r = json.loads(resp.read())
+                title_data = r.get('data', {}).get('title', {})
+                title_type = (title_data.get('titleType') or {}).get('id', '')
+                title_text = (title_data.get('titleText') or {}).get('text', '')
+                if not title_type and not title_text:
+                    return ('deleted', '')
+                return (title_type or 'unknown_type', title_text)
+        except Exception:
+            return ('error', '')
+
+    def listUnknownView(self, **kwargs):
+        """List all UNKNOWN-titled media — fast, no external API calls."""
+        unknown = self._getUnknownMedia()
+
+        by_status = {}
+        for entry in unknown:
+            s = entry['status']
+            by_status[s] = by_status.get(s, 0) + 1
+
+        return {
+            'success': True,
+            'unknown': unknown,
+            'total': len(unknown),
+            'by_status': by_status,
+        }
+
+    def cleanupUnknownView(self, **kwargs):
+        """Delete UNKNOWN-titled media that are not real movies.
+        Entries with files on disk are SKIPPED — use media.repair_unknown for those.
+        Also removes associated files and empty parent directories from disk for fileless entries."""
+        import os
+        import shutil
+
+        delete_types = splitString(kwargs.get('delete_types', 'tvEpisode,tvSeries,tvMiniSeries,tvSpecial,tvMovie,short,video,videoGame,deleted,no_imdb,error'))
+        dry_run = kwargs.get('dry_run', '').lower() in ('1', 'true', 'yes')
+
+        unknown = self._getUnknownMedia()
+        deleted_count = 0
+        kept_count = 0
+        skipped_has_files = 0
+        files_deleted = 0
+        folders_deleted = 0
+        by_type = {}
+
+        for entry in unknown:
+            # Skip entries with files on disk — those need repair, not deletion
+            if entry.get('has_files'):
+                skipped_has_files += 1
+                by_type['has_files'] = by_type.get('has_files', 0) + 1
+                continue
+
+            imdb_id = entry['imdb']
+            if imdb_id:
+                imdb_type, imdb_title = self._checkImdbType(imdb_id)
+            else:
+                imdb_type, imdb_title = ('no_imdb', '')
+
+            by_type[imdb_type] = by_type.get(imdb_type, 0) + 1
+
+            if imdb_type in delete_types:
+                if not dry_run:
+                    # Delete from database (media + releases)
+                    self.delete(entry['_id'], delete_from='all')
+
+                deleted_count += 1
+            else:
+                kept_count += 1
+
+        action = 'Would delete' if dry_run else 'Deleted'
+        log.info('%s %d UNKNOWN media entries (kept %d, skipped %d with files)' % (action, deleted_count, kept_count, skipped_has_files))
+
+        return {
+            'success': True,
+            'deleted': deleted_count,
+            'kept': kept_count,
+            'skipped_has_files': skipped_has_files,
+            'by_type': by_type,
+            'dry_run': dry_run,
+        }
+
+    def repairUnknownView(self, **kwargs):
+        """Repair UNKNOWN entries that have files with truncated IMDB IDs."""
+        return self.repairUnknown(dry_run=kwargs.get('dry_run', '').lower() in ('1', 'true', 'yes'))
+
+    def repairUnknown(self, dry_run=False):
+        """Fix UNKNOWN entries that have files on disk with truncated IMDB IDs.
+
+        The original CouchPotato regex (tt\\d{4,7}) only captured 7 digits after 'tt',
+        so native 8-digit IMDB IDs like tt10310140 (Fatman) got truncated to tt1031014
+        (a random TV episode). This method recovers the full ID from the filename,
+        updates the DB, and queues a refresh.
+        """
+        db = get_db()
+        unknown = self._getUnknownMedia()
+        repaired = 0
+        skipped = 0
+        handlers = []
+
+        for entry in unknown:
+            if not entry.get('has_files') or not entry.get('file_imdb'):
+                continue
+
+            db_imdb = entry['imdb']
+            file_imdb = entry['file_imdb']
+            media_id = entry['_id']
+
+            # Only repair if the file has a DIFFERENT (longer) IMDB ID
+            if file_imdb == db_imdb:
+                skipped += 1
+                continue
+
+            log.info('Repairing truncated IMDB ID: %s -> %s (media %s)', (db_imdb, file_imdb, media_id))
+
+            if not dry_run:
+                try:
+                    media = db.get('id', media_id)
+                    if media:
+                        identifiers = media.get('identifiers', {})
+                        identifiers['imdb'] = file_imdb
+                        media['identifiers'] = identifiers
+                        db.update(media)
+
+                        # Queue a refresh to get the proper title
+                        media_type = media.get('type', 'movie')
+                        def make_handler(mid, mtype):
+                            def handler():
+                                fireEvent('%s.update' % mtype, media_id=mid)
+                            return handler
+                        handlers.append(make_handler(media_id, media_type))
+                        repaired += 1
+                except Exception:
+                    log.error('Failed to repair media %s: %s', (media_id, traceback.format_exc()))
+            else:
+                repaired += 1
+
+        if handlers:
+            log.info('Queueing refresh for %d repaired media' % len(handlers))
+            fireEventAsync('schedule.queue', handlers=handlers)
+
+        action = 'Would repair' if dry_run else 'Repaired'
+        log.info('%s %d UNKNOWN media with truncated IMDB IDs' % (action, repaired))
+
+        return {
+            'success': True,
+            'repaired': repaired,
+            'skipped': skipped,
+            'dry_run': dry_run,
         }
 
     def refresh(self, id = '', **kwargs):
