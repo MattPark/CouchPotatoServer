@@ -327,7 +327,8 @@ class MediaPlugin(MediaBase):
         import shutil
 
         delete_types = splitString(kwargs.get('delete_types', 'tvEpisode,tvSeries,tvMiniSeries,tvSpecial,tvMovie,short,video,videoGame,deleted,no_imdb,error'))
-        dry_run = kwargs.get('dry_run', '').lower() in ('1', 'true', 'yes')
+        dry_run_val = kwargs.get('dry_run', False)
+        dry_run = str(dry_run_val).lower() in ('1', 'true', 'yes') if dry_run_val else False
 
         unknown = self._getUnknownMedia()
         deleted_count = 0
@@ -375,7 +376,9 @@ class MediaPlugin(MediaBase):
 
     def repairUnknownView(self, **kwargs):
         """Repair UNKNOWN entries that have files with truncated IMDB IDs."""
-        return self.repairUnknown(dry_run=kwargs.get('dry_run', '').lower() in ('1', 'true', 'yes'))
+        dry_run_val = kwargs.get('dry_run', False)
+        dry_run = str(dry_run_val).lower() in ('1', 'true', 'yes') if dry_run_val else False
+        return self.repairUnknown(dry_run=dry_run)
 
     def repairUnknown(self, dry_run=False):
         """Fix UNKNOWN entries that have files on disk with truncated IMDB IDs.
