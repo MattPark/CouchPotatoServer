@@ -447,7 +447,10 @@ class Plugin(object):
         return False, None
 
     def getFileTimes(self, file_path):
-        return [os.path.getmtime(file_path), os.path.getctime(file_path) if os.name != 'posix' else 0]
+        # On POSIX, getctime() returns inode change time (updated on move/rename/chmod).
+        # Previously hardcoded to 0 on POSIX, which caused quick scans to miss files
+        # that were moved into the library with old mtimes.
+        return [os.path.getmtime(file_path), os.path.getctime(file_path)]
 
     def isDisabled(self):
         return not self.isEnabled()

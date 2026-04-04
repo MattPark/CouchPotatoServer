@@ -989,6 +989,15 @@ Remove it if you want it to be renamed (again, or at least let it try again)
                     os.popen('icacls "' + dest + '"* /reset /T')
             except:
                 log.debug('Failed setting permissions for file: %s, %s', (dest, traceback.format_exc(1)))
+
+            # Touch mtime so quick scans (newer_than filter) will see this file
+            # as recently modified, even if the source file had an old mtime.
+            # This is a safety net: if the release.add call after moveFile fails,
+            # the next quick scan will still discover the file.
+            try:
+                os.utime(dest, None)
+            except:
+                log.debug('Failed touching mtime for file: %s, %s', (dest, traceback.format_exc(1)))
         except:
             log.error('Couldn\'t move file "%s" to "%s": %s', (old, dest, traceback.format_exc()))
             raise
