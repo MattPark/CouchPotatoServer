@@ -102,6 +102,7 @@ class QualityPlugin(Plugin):
         addEvent('app.initialize', self.fill, priority = 10)
         addEvent('app.load', self.migrateQualities, priority = 100)
         addEvent('app.load', self.fillBlank, priority = 120)
+        addEvent('app.load', self.cleanupDuplicateCoreProfiles, priority = 130)
 
         addEvent('app.test', self.doTest)
 
@@ -196,12 +197,90 @@ class QualityPlugin(Plugin):
         db = get_db()
 
         try:
-            existing = list(db.all('quality'))
-            if len(self.qualities) > len(existing):
-                log.error('Filling in new qualities')
+            # Check each quality identifier individually to ensure none are missing
+            missing = False
+            for q in self.qualities:
+                try:
+                    db.get('quality', q.get('identifier'))
+                except RecordNotFound:
+                    log.info('Missing quality doc for %s, will recreate' % q.get('identifier'))
+                    missing = True
+                    break
+
+            if missing:
+                log.info('Filling in missing quality docs')
                 self.fill(reorder = True)
         except:
             log.error('Failed filling quality database with new qualities: %s', traceback.format_exc())
+
+    def cleanupDuplicateCoreProfiles(self):
+        """Remove duplicate core profiles that have the same quality set.
+
+        This handles the case where migration ran before fillBlank created
+        missing quality docs (and their core profiles). For example, if the
+        'sd' quality doc was missing during migration, the old 'DVD-R' core
+        profile (migrated to ['sd']) survived. Then fillBlank created the
+        proper 'SD' core profile. Now we have two core profiles for ['sd'].
+
+        Runs at app.load priority 130 (after fillBlank at 120).
+        """
+        try:
+            db = get_db()
+            profiles = list(db.all('profile', with_doc=True))
+
+            # Group core profiles by their quality tuple
+            core_by_quals = {}
+            for p in profiles:
+                doc = p.get('doc', p)
+                if not doc.get('core'):
+                    continue
+                key = tuple(doc.get('qualities', []))
+                if key not in core_by_quals:
+                    core_by_quals[key] = []
+                core_by_quals[key].append(doc)
+
+            deleted = 0
+            for key, docs in core_by_quals.items():
+                if len(docs) <= 1:
+                    continue
+
+                # Keep the one whose label matches a current quality label or
+                # a known default profile name; delete the rest.
+                # Current quality labels from self.qualities
+                current_labels = set(q.get('label') for q in self.qualities)
+                # Default profile names from profile fill()
+                default_names = {'Best', 'HD', 'SD', 'Prefer 3D HD', '3D HD', 'UHD 4K'}
+                known_labels = current_labels | default_names
+
+                # Score each doc: prefer one whose label matches a known name
+                best = None
+                best_score = -1
+                for doc in docs:
+                    score = 0
+                    label = doc.get('label', '')
+                    # Strip "CORE " prefix if present for matching
+                    clean_label = label.replace('CORE ', '') if label.startswith('CORE ') else label
+                    if clean_label in known_labels:
+                        score += 10
+                    # Prefer lower order (created earlier in fill loop)
+                    score -= doc.get('order', 999) * 0.001
+                    if score > best_score:
+                        best_score = score
+                        best = doc
+
+                for doc in docs:
+                    if doc is not best:
+                        log.info('Deleting duplicate core profile "%s" (quals=%s, keeping "%s")' % (
+                            doc.get('label', '?'), list(key), best.get('label', '?')))
+                        db.delete(doc)
+                        deleted += 1
+
+            if deleted > 0:
+                db.compact()
+                log.info('Cleaned up %d duplicate core profiles' % deleted)
+
+        except:
+            log.error('Failed cleaning up duplicate core profiles: %s', traceback.format_exc())
 
     def fill(self, reorder = False):
 
