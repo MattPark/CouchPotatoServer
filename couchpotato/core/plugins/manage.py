@@ -132,6 +132,7 @@ class Manage(Plugin):
                     'eta': -1,
                     'total': None,
                     'to_go': None,
+                    'phase': 'walking',
                 }
 
             for directory in directories:
@@ -258,7 +259,14 @@ class Manage(Plugin):
     def createAddToLibrary(self, folder, added_identifiers = []):
 
         def addToLibrary(group, total_found, to_go):
-            # Progress is tracked at directory level via on_walk_progress callback
+            # Once the directory walk is done, switch progress tracking to
+            # group processing so the progress bar reflects actual work remaining
+            # instead of showing 100% while thousands of groups still need processing.
+            if folder in self.in_progress:
+                self.in_progress[folder]['total'] = total_found
+                self.in_progress[folder]['to_go'] = to_go
+                self.in_progress[folder]['phase'] = 'processing'
+                self.updateProgress(folder)
 
             # Track scan results
             if self.last_scan_results:

@@ -191,7 +191,8 @@ var ManageSettingTab = new Class({
 							// Build folder detail text
 							var folder_text = folder;
 							if(folder_progress.total){
-								folder_text += ' (' + folder_progress.total + ' folders)';
+								var unit = folder_progress.phase === 'processing' ? 'movies' : 'folders';
+								folder_text += ' (' + folder_progress.total + ' ' + unit + ')';
 							}
 							if(folder_progress.eta > 0){
 								folder_text += ', ' + new Date().increment('second', folder_progress.eta).timeDiffInWords().replace('from now', 'to go');
