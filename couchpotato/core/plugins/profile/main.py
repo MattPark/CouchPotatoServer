@@ -200,13 +200,13 @@ class ProfilePlugin(Plugin):
 
             profiles = [{
                 'label': 'Best',
-                'qualities': ['720p', '1080p', 'brrip', 'dvdrip']
+                'qualities': ['720p', '1080p', 'sd']
             }, {
                 'label': 'HD',
                 'qualities': ['720p', '1080p']
             }, {
                 'label': 'SD',
-                'qualities': ['dvdrip', 'dvdr']
+                'qualities': ['sd']
             }, {
                 'label': 'Prefer 3D HD',
                 'qualities': ['1080p', '720p', '720p', '1080p'],

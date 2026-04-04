@@ -568,7 +568,7 @@ class Scanner(Plugin):
             data['quality'] = quality
 
             if not data['quality']:
-                data['quality'] = fireEvent('quality.single', 'dvdr' if group['is_dvd'] else 'dvdrip', single = True)
+                data['quality'] = fireEvent('quality.single', 'sd', single = True)
 
         data['quality_type'] = 'HD' if data.get('resolution_width', 0) >= 1280 or data['quality'].get('hd') else 'SD'
 

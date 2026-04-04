@@ -164,6 +164,8 @@ class Release(Plugin):
                         'identifier': release_identifier,
                         'quality': group['meta_data']['quality'].get('identifier'),
                         'is_3d': group['meta_data']['quality'].get('is_3d', 0),
+                        'source': group['meta_data']['quality'].get('source', 'unknown'),
+                        'codec': group['meta_data']['quality'].get('codec'),
                         'last_edit': int(time.time()),
                         'status': 'done'
                     }
@@ -446,6 +448,8 @@ class Release(Plugin):
                     'media_id': media.get('_id'),
                     'quality': quality.get('identifier'),
                     'is_3d': is_3d,
+                    'source': quality.get('source', 'unknown'),
+                    'codec': quality.get('codec'),
                     'status': rel.get('status', 'available'),
                     'last_edit': int(time.time()),
                     'info': {}

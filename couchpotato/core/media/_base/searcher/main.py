@@ -100,18 +100,21 @@ class Searcher(SearcherBase):
 
         year_name = fireEvent('scanner.name_year', name, single = True)
         if len(found) == 0 and movie_year < datetime.datetime.now().year - 3 and not year_name.get('year', None):
-            if size > 20000:  # Assume bd50
-                log.info('Quality was missing in name, assuming it\'s a BR-Disk based on the size: %s', size)
-                found['bd50'] = True
-            elif size > 3000:  # Assume dvdr
-                log.info('Quality was missing in name, assuming it\'s a DVD-R based on the size: %s', size)
-                found['dvdr'] = True
-            else:  # Assume dvdrip
-                log.info('Quality was missing in name, assuming it\'s a DVD-Rip based on the size: %s', size)
-                found['dvdrip'] = True
+            if size > 15000:  # Assume 2160p
+                log.info('Quality was missing in name, assuming it\'s 2160p based on the size: %s', size)
+                found['2160p'] = True
+            elif size > 6000:  # Assume 1080p
+                log.info('Quality was missing in name, assuming it\'s 1080p based on the size: %s', size)
+                found['1080p'] = True
+            elif size > 2500:  # Assume 720p
+                log.info('Quality was missing in name, assuming it\'s 720p based on the size: %s', size)
+                found['720p'] = True
+            else:  # Assume SD
+                log.info('Quality was missing in name, assuming it\'s SD based on the size: %s', size)
+                found['sd'] = True
 
         # Allow other qualities
-        for allowed in preferred_quality.get('allow'):
+        for allowed in preferred_quality.get('allow', []):
             if found.get(allowed):
                 del found[allowed]
 
