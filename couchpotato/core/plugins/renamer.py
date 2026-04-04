@@ -368,6 +368,29 @@ class Renamer(Plugin):
                 media = group['media']
                 media_title = getTitle(media)
 
+                # Refuse to rename if title resolved to UNKNOWN — metadata fetch failed.
+                # Leave the files in the download dir so they can be retried later
+                # instead of moving them to an "UNKNOWN (0)/" folder in the library.
+                if not media_title or media_title == 'UNKNOWN':
+                    log.error('Refusing to rename "%s": title resolved to "%s" (metadata fetch likely failed). '
+                              'Files will stay in download dir for retry.', (group_identifier, media_title))
+                    self.tagRelease(group = group, tag = 'unknown',
+                                    reason = 'Title resolved to UNKNOWN — metadata providers may be down')
+                    if release_download and release_download.get('release_id'):
+                        fireEvent('release.update_status', release_download['release_id'], status = 'failed', single = True)
+                    continue
+
+                # Also refuse if year is missing/zero — folder would be "Title (0)"
+                media_year = media.get('info', {}).get('year', 0)
+                if not media_year:
+                    log.error('Refusing to rename "%s": year is %s (metadata incomplete). '
+                              'Files will stay in download dir for retry.', (group_identifier, media_year))
+                    self.tagRelease(group = group, tag = 'unknown',
+                                    reason = 'Year is missing — metadata providers may be down')
+                    if release_download and release_download.get('release_id'):
+                        fireEvent('release.update_status', release_download['release_id'], status = 'failed', single = True)
+                    continue
+
                 # Overwrite destination when set in category
                 destination = to_folder
                 category_label = ''

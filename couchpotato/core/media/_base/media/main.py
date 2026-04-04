@@ -1,5 +1,7 @@
 from datetime import timedelta
+import os
 import re
+import shutil
 import time
 import traceback
 from string import ascii_lowercase
@@ -129,6 +131,13 @@ class MediaPlugin(MediaBase):
     'total_groups': 72,
     'total_removed': 72
 }"""},
+        })
+
+        addApiView('media.fix_unknown_paths', self.fixUnknownPathsView, docs = {
+            'desc': 'Find releases with files in UNKNOWN (0) folders and rename them to correct title/year paths.',
+            'params': {
+                'dry_run': {'desc': 'If true (default), only report what would change', 'type': 'bool'},
+            },
         })
 
         addEvent('app.load', self.addSingleRefreshView, priority = 100)
@@ -1131,4 +1140,259 @@ class MediaPlugin(MediaBase):
             'duplicates': results,
             'total_groups': len(results),
             'total_removed': total_removed,
+        }
+
+    def fixUnknownPathsView(self, **kwargs):
+        dry_run_val = kwargs.get('dry_run', 'true')
+        if isinstance(dry_run_val, bool):
+            dry_run = dry_run_val
+        else:
+            dry_run = str(dry_run_val).lower() not in ('false', '0', 'no')
+        return self.fixUnknownPaths(dry_run=dry_run)
+
+    def _getTitleVariants(self, title):
+        """Return (the_name, name_the) for a title, handling articles."""
+        clean = re.sub(r'[\x00/\\:*?"<>|]', '', title)
+        the_name = clean
+        name_the = clean
+        for prefix in ['The ', 'An ', 'A ']:
+            if clean.lower().startswith(prefix.lower()):
+                name_the = clean[len(prefix):] + ', ' + prefix.strip()
+                break
+        return the_name, name_the
+
+    def _resolveMovieInfo(self, imdb_id, db, dry_run=False):
+        """Look up title/year for an IMDB ID. Returns (title, year) or (None, None)."""
+        # Try DB first
+        try:
+            media = db.get('media', 'imdb-%s' % imdb_id, with_doc=True)['doc']
+            title = getTitle(media)
+            year = media.get('info', {}).get('year', 0)
+            if title and title != 'UNKNOWN' and year:
+                return title, year
+        except:
+            pass
+
+        # Fetch from providers
+        if not dry_run:
+            fresh_info = fireEvent('movie.info', merge=True, extended=False, identifier=nativeImdbId(imdb_id))
+            if fresh_info and fresh_info.get('titles') and fresh_info.get('year'):
+                return fresh_info['titles'][0], fresh_info['year']
+
+        return None, None
+
+    def fixUnknownPaths(self, dry_run=True):
+        """Find releases with files in UNKNOWN folders and rename them to correct paths.
+
+        For each file in an UNKNOWN release, extracts the IMDB ID from the filename
+        to determine the correct movie — this handles cross-movie releases where
+        the scanner grouped files from different movies into one release because
+        they shared the UNKNOWN (0) folder.
+        """
+        db = get_db()
+        results = []
+        errors = []
+
+        # Get the library root (e.g. /movies/)
+        library_dirs = []
+        try:
+            library_str = self.conf('library', section='manage') or ''
+            library_dirs = [d.strip() for d in library_str.split('::') if d.strip()]
+        except:
+            pass
+        if not library_dirs:
+            library_dirs = ['/movies']
+        log.info('Library directories: %s', str(library_dirs))
+
+        # Find all releases with UNKNOWN in file paths
+        all_releases = db.all('release')
+        unknown_releases = []
+        for rel in all_releases:
+            files = rel.get('files', {})
+            for ftype, fpaths in files.items():
+                if isinstance(fpaths, list):
+                    for fp in fpaths:
+                        if 'UNKNOWN' in fp and '(0)' in fp:
+                            unknown_releases.append(rel)
+                            break
+                    else:
+                        continue
+                    break
+
+        log.info('Found %d releases with UNKNOWN paths' % len(unknown_releases))
+
+        # Collect all file moves, grouped by file's own IMDB ID
+        # This handles cross-movie releases correctly
+        file_actions = []  # list of {old, new, release_id, ftype, file_imdb, media_imdb}
+
+        for rel in unknown_releases:
+            try:
+                media_id = rel.get('media_id')
+                rel_imdb = ''
+                if media_id:
+                    try:
+                        media = db.get('id', media_id)
+                        rel_imdb = media.get('identifiers', {}).get('imdb', '')
+                    except (RecordNotFound, RecordDeleted):
+                        pass
+
+                for ftype, fpaths in rel.get('files', {}).items():
+                    if not isinstance(fpaths, list):
+                        continue
+                    for old_path in fpaths:
+                        if 'UNKNOWN' not in old_path or '(0)' not in old_path:
+                            continue
+
+                        # Try to extract IMDB ID from the filename — not every
+                        # file will have one (subtitles, NFOs, etc.), so fall
+                        # back to the release's parent media IMDB ID.
+                        file_imdb = getImdb(old_path)
+                        used_fallback = False
+                        if not file_imdb:
+                            file_imdb = rel_imdb
+                            used_fallback = True
+                            if file_imdb:
+                                log.warning('No IMDB in filename "%s", using release media IMDB %s', (os.path.basename(old_path), file_imdb))
+
+                        if not file_imdb:
+                            errors.append({
+                                'release_id': rel['_id'],
+                                'file': old_path,
+                                'error': 'No IMDB ID found in filename or release'
+                            })
+                            continue
+
+                        # Resolve title/year for this file's IMDB ID
+                        title, year = self._resolveMovieInfo(file_imdb, db, dry_run=dry_run)
+                        if not title or not year:
+                            errors.append({
+                                'release_id': rel['_id'],
+                                'file': old_path,
+                                'imdb': file_imdb,
+                                'error': 'Could not resolve title/year for %s' % file_imdb
+                            })
+                            continue
+
+                        the_name, name_the = self._getTitleVariants(title)
+
+                        # Compute new paths using renamer naming convention
+                        new_folder_name = '%s (%s)' % (name_the, year)
+                        old_basename = os.path.basename(old_path)
+                        new_basename = old_basename.replace('UNKNOWN (0)', '%s (%s)' % (the_name, year))
+
+                        # Find library root
+                        lib_root = None
+                        for ld in library_dirs:
+                            normalized = ld.rstrip('/') + '/'
+                            if old_path.startswith(normalized) or old_path.startswith(ld):
+                                lib_root = ld
+                                break
+                        if not lib_root:
+                            lib_root = os.path.dirname(os.path.dirname(old_path))
+
+                        new_dir = os.path.join(lib_root, new_folder_name)
+                        new_path = os.path.join(new_dir, new_basename)
+
+                        file_actions.append({
+                            'old': old_path,
+                            'new': new_path,
+                            'release_id': rel['_id'],
+                            'ftype': ftype,
+                            'file_imdb': file_imdb,
+                            'media_imdb': rel_imdb,
+                            'title': title,
+                            'year': year,
+                            'cross_movie': file_imdb != rel_imdb,
+                            'imdb_from_fallback': used_fallback,
+                        })
+
+            except:
+                log.error('Failed processing release %s: %s', (rel.get('_id', '?'), traceback.format_exc()))
+                errors.append({'release_id': rel.get('_id', '?'), 'error': traceback.format_exc()})
+
+        log.info('Computed %d file moves' % len(file_actions))
+
+        # Execute moves
+        moved_count = 0
+        if not dry_run:
+            for action in file_actions:
+                try:
+                    dest_dir = os.path.dirname(action['new'])
+                    if not os.path.exists(dest_dir):
+                        os.makedirs(dest_dir, exist_ok=True)
+                        log.info('Created directory: %s', dest_dir)
+
+                    if os.path.exists(action['old']):
+                        if os.path.exists(action['new']):
+                            log.warning('Destination already exists, skipping: %s', action['new'])
+                        else:
+                            shutil.move(action['old'], action['new'])
+                            log.info('Moved: %s -> %s', (action['old'], action['new']))
+                            try:
+                                os.utime(action['new'], None)
+                            except:
+                                pass
+                            moved_count += 1
+                    else:
+                        log.warning('Source file missing: %s', action['old'])
+                except:
+                    log.error('Failed moving %s: %s', (action['old'], traceback.format_exc()))
+                    action['move_error'] = traceback.format_exc()
+
+            # Now fix release records: remove UNKNOWN files from old releases
+            # and create proper new releases for correctly-moved files
+            releases_updated = set()
+            for rel in unknown_releases:
+                new_files = {}
+                changed = False
+                for ftype, fpaths in rel.get('files', {}).items():
+                    if not isinstance(fpaths, list):
+                        new_files[ftype] = fpaths
+                        continue
+                    kept = []
+                    for fp in fpaths:
+                        if 'UNKNOWN' in fp and '(0)' in fp:
+                            changed = True
+                            # File was moved out — don't keep in this release
+                        else:
+                            kept.append(fp)
+                    new_files[ftype] = kept
+
+                if changed:
+                    rel['files'] = new_files
+                    # If no movie files left, delete the release
+                    movie_files_left = [f for f in new_files.get('movie', []) if f]
+                    if not movie_files_left:
+                        try:
+                            db.delete(rel)
+                            log.info('Deleted empty release %s' % rel['_id'])
+                        except:
+                            log.error('Failed deleting release %s: %s', (rel['_id'], traceback.format_exc()))
+                    else:
+                        db.update(rel)
+                        log.info('Updated release %s, removed UNKNOWN files' % rel['_id'])
+                    releases_updated.add(rel['_id'])
+
+            # After moving files, trigger a quick scan so the scanner picks them up
+            # and creates proper done releases with correct media associations
+            log.info('Files moved. A library scan will be needed to create proper releases.')
+
+            # Clean up empty UNKNOWN folders
+            for ld in library_dirs:
+                unknown_dir = os.path.join(ld, 'UNKNOWN (0)')
+                if os.path.isdir(unknown_dir):
+                    remaining = os.listdir(unknown_dir)
+                    if not remaining:
+                        os.rmdir(unknown_dir)
+                        log.info('Removed empty UNKNOWN (0) directory: %s', unknown_dir)
+
+            db.compact()
+
+        return {
+            'success': True,
+            'dry_run': dry_run,
+            'files': file_actions,
+            'total_files': len(file_actions),
+            'moved': moved_count,
+            'errors': errors,
         }
