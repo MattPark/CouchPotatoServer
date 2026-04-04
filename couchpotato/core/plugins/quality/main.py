@@ -214,13 +214,13 @@ class QualityPlugin(Plugin):
             log.error('Failed filling quality database with new qualities: %s', traceback.format_exc())
 
     def cleanupDuplicateCoreProfiles(self):
-        """Remove duplicate core profiles that have the same quality set.
+        """Remove duplicate and obsolete core profiles, ensure Pre-release exists.
 
-        This handles the case where migration ran before fillBlank created
-        missing quality docs (and their core profiles). For example, if the
-        'sd' quality doc was missing during migration, the old 'DVD-R' core
-        profile (migrated to ['sd']) survived. Then fillBlank created the
-        proper 'SD' core profile. Now we have two core profiles for ['sd'].
+        Handles three cases:
+        1. Old individual pre-release core profiles (e.g. core ['screener'], core ['r5'])
+           that are now replaced by the combined 'Pre-release' profile.
+        2. Duplicate core profiles with the same quality set from migration timing issues.
+        3. Missing combined 'Pre-release' core profile (creates it if absent).
 
         Runs at app.load priority 130 (after fillBlank at 120).
         """
@@ -228,7 +228,51 @@ class QualityPlugin(Plugin):
             db = get_db()
             profiles = list(db.all('profile', with_doc=True))
 
-            # Group core profiles by their quality tuple
+            pre_release_set = set(self.pre_releases)
+            pre_release_ranked = ['screener', 'r5', 'tc', 'ts', 'cam']
+            deleted = 0
+
+            # Pass 1: Delete old individual pre-release core profiles
+            # These are core profiles with a single pre-release quality
+            # (superseded by the combined Pre-release profile)
+            for p in profiles:
+                doc = p.get('doc', p)
+                if not doc.get('core'):
+                    continue
+                quals = doc.get('qualities', [])
+                if len(quals) == 1 and quals[0] in pre_release_set:
+                    log.info('Deleting obsolete individual pre-release core profile "%s" (quals=%s)' % (
+                        doc.get('label', '?'), quals))
+                    db.delete(doc)
+                    deleted += 1
+
+            # Re-fetch after deletions
+            if deleted > 0:
+                profiles = list(db.all('profile', with_doc=True))
+
+            # Pass 2: Ensure combined Pre-release core profile exists
+            has_pre_release = False
+            for p in profiles:
+                doc = p.get('doc', p)
+                if doc.get('core') and doc.get('qualities') == pre_release_ranked:
+                    has_pre_release = True
+                    break
+
+            if not has_pre_release:
+                log.info('Creating combined Pre-release core profile')
+                db.insert({
+                    '_t': 'profile',
+                    'order': 29,  # After other core profiles (order 20-28)
+                    'core': True,
+                    'qualities': pre_release_ranked,
+                    'label': 'Pre-release',
+                    'finish': [True] * len(pre_release_ranked),
+                    'wait_for': [0] * len(pre_release_ranked),
+                })
+                # Re-fetch for pass 3
+                profiles = list(db.all('profile', with_doc=True))
+
+            # Pass 3: Remove duplicate core profiles with same quality set
             core_by_quals = {}
             for p in profiles:
                 doc = p.get('doc', p)
@@ -239,30 +283,24 @@ class QualityPlugin(Plugin):
                     core_by_quals[key] = []
                 core_by_quals[key].append(doc)
 
-            deleted = 0
             for key, docs in core_by_quals.items():
                 if len(docs) <= 1:
                     continue
 
                 # Keep the one whose label matches a current quality label or
                 # a known default profile name; delete the rest.
-                # Current quality labels from self.qualities
                 current_labels = set(q.get('label') for q in self.qualities)
-                # Default profile names from profile fill()
-                default_names = {'Best', 'HD', 'SD', 'Prefer 3D HD', '3D HD', 'UHD 4K'}
+                default_names = {'Best', 'HD', 'SD', 'Prefer 3D HD', '3D HD', 'UHD 4K', 'Pre-release'}
                 known_labels = current_labels | default_names
 
-                # Score each doc: prefer one whose label matches a known name
                 best = None
                 best_score = -1
                 for doc in docs:
                     score = 0
                     label = doc.get('label', '')
-                    # Strip "CORE " prefix if present for matching
                     clean_label = label.replace('CORE ', '') if label.startswith('CORE ') else label
                     if clean_label in known_labels:
                         score += 10
-                    # Prefer lower order (created earlier in fill loop)
                     score -= doc.get('order', 999) * 0.001
                     if score > best_score:
                         best_score = score
@@ -275,17 +313,21 @@ class QualityPlugin(Plugin):
                         db.delete(doc)
                         deleted += 1
 
-            if deleted > 0:
+            if deleted > 0 or not has_pre_release:
                 db.compact()
-                log.info('Cleaned up %d duplicate core profiles' % deleted)
+                log.info('Core profile cleanup complete (%d deleted, pre-release %s)' % (
+                    deleted, 'existed' if has_pre_release else 'created'))
 
         except:
-            log.error('Failed cleaning up duplicate core profiles: %s', traceback.format_exc())
+            log.error('Failed cleaning up core profiles: %s', traceback.format_exc())
 
     def fill(self, reorder = False):
 
         try:
             db = get_db()
+
+            pre_release_set = set(self.pre_releases)
+            created_new_qualities = []
 
             order = 0
             for q in self.qualities:
@@ -304,23 +346,42 @@ class QualityPlugin(Plugin):
                         'size_min': tryInt(q.get('size')[0]),
                         'size_max': tryInt(q.get('size')[1]),
                     })
+                    created_new_qualities.append(q.get('identifier'))
 
-                    log.info('Creating profile: %s', q.get('label'))
-                    db.insert({
-                        '_t': 'profile',
-                        'order': order + 20,  # Make sure it goes behind other profiles
-                        'core': True,
-                        'qualities': [q.get('identifier')],
-                        'label': toUnicode(q.get('label')),
-                        'finish': [True],
-                        'wait_for': [0],
-                    })
+                    # Create individual core profile only for non-pre-release tiers
+                    # Pre-release qualities get a single combined profile below
+                    if q.get('identifier') not in pre_release_set:
+                        log.info('Creating core profile: %s', q.get('label'))
+                        db.insert({
+                            '_t': 'profile',
+                            'order': order + 20,  # Make sure it goes behind other profiles
+                            'core': True,
+                            'qualities': [q.get('identifier')],
+                            'label': toUnicode(q.get('label')),
+                            'finish': [True],
+                            'wait_for': [0],
+                        })
                 elif reorder:
                     log.info2('Updating quality order')
                     existing['doc']['order'] = order
                     db.update(existing['doc'])
 
                 order += 1
+
+            # Create combined Pre-release core profile if any pre-release qualities were new
+            if any(qid in pre_release_set for qid in created_new_qualities):
+                # Ranked order: best pre-release first
+                pre_release_ranked = ['screener', 'r5', 'tc', 'ts', 'cam']
+                log.info('Creating combined Pre-release core profile')
+                db.insert({
+                    '_t': 'profile',
+                    'order': order + 20,
+                    'core': True,
+                    'qualities': pre_release_ranked,
+                    'label': 'Pre-release',
+                    'finish': [True] * len(pre_release_ranked),
+                    'wait_for': [0] * len(pre_release_ranked),
+                })
 
             return True
         except:
