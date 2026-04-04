@@ -1,8 +1,12 @@
 import os
 import re
+import sys
+import platform
+import ctypes
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from couchpotato import get_db
 from couchpotato.core.event import fireEvent, addEvent
@@ -19,6 +23,50 @@ import enzyme
 log = CPLog(__name__)
 
 autoload = 'Scanner'
+
+# Thread pool sizes for parallel scanning
+WALK_WORKERS = 16    # Parallel directory walkers (I/O-bound stat calls on NAS)
+PROCESS_WORKERS = 8  # Parallel group processors (enzyme + TMDB API calls)
+
+# --- I/O priority helper (Linux ionice via ioprio_set syscall) ---
+_ionice_set = threading.local()
+_ioprio_syscall_nr = None
+
+
+def _set_thread_io_idle():
+    """Set current thread to idle I/O scheduling class (Linux only).
+    Falls back to lowest best-effort (class 2, data 7) if idle class not permitted.
+    Silent no-op on non-Linux platforms. Called once per thread (cached via thread-local)."""
+    if getattr(_ionice_set, 'done', False):
+        return
+    _ionice_set.done = True
+    if sys.platform != 'linux':
+        return
+
+    global _ioprio_syscall_nr
+    if _ioprio_syscall_nr is None:
+        arch = platform.machine()
+        _ioprio_syscall_nr = {
+            'x86_64': 251, 'aarch64': 30, 'i386': 289, 'i686': 289,
+        }.get(arch, 0)
+    if _ioprio_syscall_nr == 0:
+        return
+
+    try:
+        tid = threading.get_native_id()
+        libc = ctypes.CDLL('libc.so.6', use_errno=True)
+        IOPRIO_WHO_PROCESS = 1
+        IOPRIO_CLASS_IDLE = 3
+        IOPRIO_CLASS_BE = 2
+        # Try idle class first (may require CAP_SYS_NICE)
+        ioprio = IOPRIO_CLASS_IDLE << 13
+        ret = libc.syscall(_ioprio_syscall_nr, IOPRIO_WHO_PROCESS, tid, ioprio)
+        if ret != 0:
+            # Fall back to best-effort, lowest data priority (7)
+            ioprio = (IOPRIO_CLASS_BE << 13) | 7
+            libc.syscall(_ioprio_syscall_nr, IOPRIO_WHO_PROCESS, tid, ioprio)
+    except Exception:
+        pass
 
 
 class Scanner(Plugin):
@@ -74,7 +122,7 @@ class Scanner(Plugin):
     }
 
     resolutions = {
-		'2160p': {'resolution_width': 3840, 'resolution_height': 2160, 'aspect': 1.78},
+        '2160p': {'resolution_width': 3840, 'resolution_height': 2160, 'aspect': 1.78},
         '1080p': {'resolution_width': 1920, 'resolution_height': 1080, 'aspect': 1.78},
         '1080i': {'resolution_width': 1920, 'resolution_height': 1080, 'aspect': 1.78},
         '720p': {'resolution_width': 1280, 'resolution_height': 720, 'aspect': 1.78},
@@ -140,125 +188,20 @@ class Scanner(Plugin):
             log.error('Folder doesn\'t exists: %s', folder)
             return {}
 
-        # Get movie "master" files
-        movie_files = {}
-        leftovers = []
-
-        # Scan all files of the folder if no files are set
+        # Phase A: Collect and categorize files
         if not files:
-            log.info('No files provided, walking folder: %s', folder)
-            try:
-                files = []
-                reported_total = False
-
-                for root, dirs, walk_files in os.walk(folder, followlinks=True):
-                    files.extend([sp(os.path.join(sp(root), ss(filename))) for filename in walk_files])
-
-                    # First iteration is the scan root — report total top-level dirs
-                    if on_walk_progress and not reported_total:
-                        on_walk_progress(0, len(dirs))
-                        reported_total = True
-
-                    # Break if CP wants to shut down
-                    if self.shuttingDown():
-                        break
-
-            except:
-                log.error('Failed getting files from %s: %s', (folder, traceback.format_exc()))
-
-            log.info('Found %s file(s) to scan and group in %s' % (len(files), folder))
+            log.info('Walking folder with %d parallel workers: %s' % (WALK_WORKERS, folder))
+            movie_files, leftovers = self._parallel_walk_and_categorize(
+                folder, newer_than, on_walk_progress)
+            log.info('Walk complete: %d movie groups, %d leftover files' % (len(movie_files), len(leftovers)))
         else:
             check_file_date = False
             files = [sp(x) for x in files]
             log.info('Scanner received %s file(s) to process' % len(files))
+            movie_files, leftovers = self._categorize_files(files, folder)
 
-        total_files_scanned = len(files) if files else 0
-
-        skipped_nonexist = 0
-        skipped_sample = 0
-        skipped_ignored = 0
-        skipped_toosmall = 0
-        accepted_movie = 0
-
-        # Progress tracking: report as each top-level subdirectory's files are processed
-        folder_prefix = folder.rstrip(os.sep) + os.sep
-        prev_top_dir = None
-        dirs_scanned = 0
-
-        for file_path in files:
-
-            # Track progress by top-level subdirectory transitions
-            # Files are in os.walk depth-first order, so files from the same
-            # top-level subdir are contiguous. When the subdir changes, the
-            # previous one is fully processed.
-            if on_walk_progress and file_path.startswith(folder_prefix):
-                rel = file_path[len(folder_prefix):]
-                top_dir = rel.split(os.sep, 1)[0] if os.sep in rel else None
-                if top_dir is not None and top_dir != prev_top_dir:
-                    if prev_top_dir is not None:
-                        dirs_scanned += 1
-                        on_walk_progress(dirs_scanned)
-                    prev_top_dir = top_dir
-
-            if not os.path.exists(file_path):
-                skipped_nonexist += 1
-                continue
-
-            # Remove ignored files
-            if self.isSampleFile(file_path):
-                leftovers.append(file_path)
-                skipped_sample += 1
-                continue
-            elif not self.keepFile(file_path):
-                skipped_ignored += 1
-                continue
-
-            is_dvd_file = self.isDVDFile(file_path)
-            if self.filesizeBetween(file_path, self.file_sizes['movie']) or is_dvd_file: # Minimal 300MB files or is DVD file
-
-                # Normal identifier
-                identifier = self.createStringIdentifier(file_path, folder, exclude_filename = is_dvd_file)
-                identifiers = [identifier]
-
-                # Identifier with quality
-                quality = fireEvent('quality.guess', files = [file_path], size = self.getFileSize(file_path), single = True) if not is_dvd_file else {'identifier':'dvdr'}
-                if quality:
-                    identifier_with_quality = '%s %s' % (identifier, quality.get('identifier', ''))
-                    identifiers = [identifier_with_quality, identifier]
-
-                if not movie_files.get(identifier):
-                    movie_files[identifier] = {
-                        'unsorted_files': [],
-                        'identifiers': identifiers,
-                        'is_dvd': is_dvd_file,
-                        'primary_count': 0,
-                    }
-
-                movie_files[identifier]['unsorted_files'].append(file_path)
-                movie_files[identifier]['primary_count'] += 1
-                accepted_movie += 1
-            else:
-                leftovers.append(file_path)
-                skipped_toosmall += 1
-
-            # Break if CP wants to shut down
-            if self.shuttingDown():
-                break
-
-        # Final top-level dir completed
-        if on_walk_progress and prev_top_dir is not None:
-            dirs_scanned += 1
-            on_walk_progress(dirs_scanned)
-
-        if accepted_movie == 0:
-            log.info('Scanner file disposition: %s total, %s nonexistent, %s sample, %s ignored, %s too-small (<200MB), 0 accepted as movie',
-                     (total_files_scanned, skipped_nonexist, skipped_sample, skipped_ignored, skipped_toosmall))
-
-        # Cleanup
-        del files
-
-        # Sort reverse, this prevents "Iron man 2" from getting grouped with "Iron man" as the "Iron Man 2"
-        # files will be grouped first.
+        # Phase B: Group leftovers with movie groups
+        # Sort reverse so "Iron man 2" groups before "Iron man"
         leftovers = set(sorted(leftovers, reverse = True))
 
         # Group files minus extension
@@ -360,7 +303,8 @@ class Scanner(Plugin):
                 del path_identifiers[identifier]
         del delete_identifiers
 
-        # Make sure we remove older / still extracting files
+        # Phase C: Filter still-unpacking files (check_file_date)
+        # newer_than is already handled in Phase A (parallel walk workers)
         valid_files = {}
         while True and not self.shuttingDown():
             try:
@@ -373,27 +317,6 @@ class Scanner(Plugin):
                 files_too_new, time_string = self.checkFilesChanged(group['unsorted_files'])
                 if files_too_new:
                     log.info('Files seem to be still unpacking or just unpacked (created on %s), ignoring for now: %s', (time_string, identifier))
-
-                    # Delete the unsorted list
-                    del group['unsorted_files']
-
-                    continue
-
-            # Only process movies newer than x
-            # Check only primary movie files, not companion files (subs, nfos, images)
-            # which may be updated by external media servers (Plex, Emby, etc.)
-            if newer_than and newer_than > 0:
-                has_new_files = False
-                primary_count = group.get('primary_count', len(group['unsorted_files']))
-                for cur_file in group['unsorted_files'][:primary_count]:
-                    file_time = self.getFileTimes(cur_file)
-                    if file_time[0] > newer_than or file_time[1] > newer_than:
-                        has_new_files = True
-                        log.info('newer_than hit: %s mtime=%s ctime=%s newer_than=%s' % (cur_file, time.ctime(file_time[0]), time.ctime(file_time[1]) if file_time[1] else 'N/A', time.ctime(newer_than)))
-                        break
-
-                if not has_new_files:
-                    log.debug('None of the files have changed since %s for %s, skipping.', (time.ctime(newer_than), identifier))
 
                     # Delete the unsorted list
                     del group['unsorted_files']
@@ -413,109 +336,10 @@ class Scanner(Plugin):
             log.info('Download ID provided (%s), but more than one group found (%s). Ignoring Download ID...', (release_download.get('imdb_id'), len(valid_files)))
             release_download = None
 
-        # Determine file types
-        processed_movies = {}
-        while True and not self.shuttingDown():
-            try:
-                identifier, group = valid_files.popitem()
-            except:
-                break
-
-            if return_ignored is False and identifier in ignored_identifiers:
-                ignore_files = ignored_identifiers[identifier]
-                for f in ignore_files:
-                    # Filename format: <name>.<tag>.ignore — extract the tag
-                    parts = os.path.basename(f).rsplit('.', 2)
-                    tag = parts[-2] if len(parts) >= 3 else 'unknown'
-                    # Read the file for the reason line
-                    reason = ''
-                    try:
-                        with open(f, 'r') as fh:
-                            for line in fh:
-                                if line.startswith('Reason:'):
-                                    reason = line[len('Reason:'):].strip()
-                                    break
-                    except:
-                        pass
-                    if reason:
-                        log.warning('Skipping release "%s": tagged "%s" — %s (file: %s)',
-                                    (identifier, tag, reason, os.path.basename(f)))
-                    else:
-                        log.warning('Skipping release "%s": tagged "%s" (file: %s)',
-                                    (identifier, tag, os.path.basename(f)))
-                total_found -= 1
-                continue
-
-            # Group extra (and easy) files first
-            group['files'] = {
-                'movie_extra': self.getMovieExtras(group['unsorted_files']),
-                'subtitle': self.getSubtitles(group['unsorted_files']),
-                'subtitle_extra': self.getSubtitlesExtras(group['unsorted_files']),
-                'nfo': self.getNfo(group['unsorted_files']),
-                'trailer': self.getTrailers(group['unsorted_files']),
-                'leftover': set(group['unsorted_files']),
-            }
-
-            # Media files
-            if group['is_dvd']:
-                group['files']['movie'] = self.getDVDFiles(group['unsorted_files'])
-            else:
-                group['files']['movie'] = self.getMediaFiles(group['unsorted_files'])
-
-            if len(group['files']['movie']) == 0:
-                log.error('Couldn\'t find any movie files for %s', identifier)
-                total_found -= 1
-                continue
-
-            log.debug('Getting metadata for %s', identifier)
-            group['meta_data'] = self.getMetaData(group, folder = folder, release_download = release_download)
-
-            # Subtitle meta
-            group['subtitle_language'] = self.getSubtitleLanguage(group) if not simple else {}
-
-            # Get parent dir from movie files
-            for movie_file in group['files']['movie']:
-                group['parentdir'] = os.path.dirname(movie_file)
-                group['dirname'] = None
-
-                folder_names = group['parentdir'].replace(folder, '').split(os.path.sep)
-                folder_names.reverse()
-
-                # Try and get a proper dirname, so no "A", "Movie", "Download" etc
-                for folder_name in folder_names:
-                    if folder_name.lower() not in self.ignore_names and len(folder_name) > 2:
-                        group['dirname'] = folder_name
-                        break
-
-                break
-
-            # Leftover "sorted" files
-            for file_type in group['files']:
-                if not file_type == 'leftover':
-                    group['files']['leftover'] -= set(group['files'][file_type])
-                    group['files'][file_type] = list(group['files'][file_type])
-            group['files']['leftover'] = list(group['files']['leftover'])
-
-            # Delete the unsorted list
-            del group['unsorted_files']
-
-            # Determine movie
-            group['media'] = self.determineMedia(group, release_download = release_download)
-            if not group['media']:
-                log.error('Unable to determine media: %s', group['identifiers'])
-            else:
-                group['identifier'] = getIdentifier(group['media']) or group['media']['info'].get('imdb')
-
-            processed_movies[identifier] = group
-
-            # Notify parent & progress on something found
-            if on_found:
-                on_found(group, total_found, len(valid_files))
-
-            # Wait for all the async events calm down a bit
-            while threading.activeCount() > 100 and not self.shuttingDown():
-                log.debug('Too many threads active, waiting a few seconds')
-                time.sleep(10)
+        # Phase D: Process groups in parallel
+        processed_movies = self._parallel_process_groups(
+            valid_files, folder, release_download, simple,
+            return_ignored, ignored_identifiers, on_found, total_found)
 
         if len(processed_movies) > 0:
             log.info('Found %s movies in the folder %s', (len(processed_movies), folder))
@@ -523,6 +347,456 @@ class Scanner(Plugin):
             log.debug('Found no movies in the folder %s', folder)
 
         return processed_movies
+
+    # ---- Parallel scanning infrastructure ----
+
+    def _scandir_recursive(self, top, followlinks=True):
+        """Recursively walk directory using os.scandir, yielding (path, stat_result).
+        DirEntry objects avoid redundant stat syscalls for type checking."""
+        try:
+            with os.scandir(top) as entries:
+                dirs = []
+                for entry in entries:
+                    try:
+                        if entry.is_file(follow_symlinks=followlinks):
+                            st = entry.stat(follow_symlinks=followlinks)
+                            yield (entry.path, st)
+                        elif entry.is_dir(follow_symlinks=followlinks):
+                            dirs.append(entry.path)
+                    except OSError:
+                        pass
+                for d in dirs:
+                    yield from self._scandir_recursive(d, followlinks)
+        except OSError:
+            pass
+
+    def _walk_and_categorize_subdir(self, subdir_path, folder, newer_than):
+        """Walk one top-level subdirectory, categorize files into movie groups.
+        Called from worker threads with idle I/O priority.
+        Returns (movie_files_dict, leftovers_list, stats_dict)."""
+        _set_thread_io_idle()
+
+        movie_files = {}
+        leftovers = []
+        stats = {'sample': 0, 'ignored': 0, 'toosmall': 0, 'accepted': 0}
+
+        # Collect all files via scandir (one stat per file instead of 4-5)
+        all_files = []
+        for file_path, stat_result in self._scandir_recursive(subdir_path):
+            all_files.append((sp(file_path), stat_result))
+
+        if self.shuttingDown() or not all_files:
+            return movie_files, leftovers, stats
+
+        # Quick scan optimization: if newer_than is set, check if ANY movie-sized
+        # file has mtime or ctime newer than threshold. If none do, skip the entire
+        # subdirectory — avoids expensive quality.guess calls for unchanged movies.
+        if newer_than and newer_than > 0:
+            min_movie_bytes = self.file_sizes['movie'].get('min', 0) * 1024 * 1024
+            has_new = False
+            for file_path, st in all_files:
+                if st.st_size >= min_movie_bytes:
+                    if st.st_mtime > newer_than or st.st_ctime > newer_than:
+                        has_new = True
+                        break
+            if not has_new:
+                return movie_files, leftovers, stats
+
+        # Categorize files
+        for file_path, st in all_files:
+            if self.shuttingDown():
+                break
+
+            # Remove ignored files
+            if self.isSampleFile(file_path):
+                leftovers.append(file_path)
+                stats['sample'] += 1
+                continue
+            elif not self.keepFile(file_path):
+                stats['ignored'] += 1
+                continue
+
+            size_mb = st.st_size / 1024 / 1024
+            is_dvd_file = self.isDVDFile(file_path)
+            if self.filesizeBetween(file_path, self.file_sizes['movie'], cached_size_mb=size_mb) or is_dvd_file:
+
+                # Normal identifier
+                identifier = self.createStringIdentifier(file_path, folder, exclude_filename = is_dvd_file)
+                identifiers = [identifier]
+
+                # Identifier with quality
+                quality = fireEvent('quality.guess', files = [file_path], size = size_mb, single = True) if not is_dvd_file else {'identifier':'dvdr'}
+                if quality:
+                    identifier_with_quality = '%s %s' % (identifier, quality.get('identifier', ''))
+                    identifiers = [identifier_with_quality, identifier]
+
+                if not movie_files.get(identifier):
+                    movie_files[identifier] = {
+                        'unsorted_files': [],
+                        'identifiers': identifiers,
+                        'is_dvd': is_dvd_file,
+                        'primary_count': 0,
+                    }
+
+                movie_files[identifier]['unsorted_files'].append(file_path)
+                movie_files[identifier]['primary_count'] += 1
+                stats['accepted'] += 1
+            else:
+                leftovers.append(file_path)
+                stats['toosmall'] += 1
+
+        return movie_files, leftovers, stats
+
+    def _parallel_walk_and_categorize(self, folder, newer_than, on_walk_progress):
+        """Walk library folder in parallel, categorize files into movie groups.
+        Splits top-level subdirectories across WALK_WORKERS threads, each with
+        idle I/O priority. Returns (all_movie_files, all_leftovers)."""
+        folder_path = folder.rstrip(os.sep)
+
+        # List top-level entries
+        top_level_subdirs = []
+        top_level_files = []
+        try:
+            with os.scandir(folder_path) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=True):
+                            top_level_subdirs.append(entry.path)
+                        elif entry.is_file(follow_symlinks=True):
+                            top_level_files.append((sp(entry.path), entry.stat(follow_symlinks=True)))
+                    except OSError:
+                        pass
+        except OSError:
+            log.error('Failed listing directory: %s', folder)
+            return {}, []
+
+        total_dirs = len(top_level_subdirs)
+        if on_walk_progress:
+            on_walk_progress(0, total_dirs)
+
+        log.info('Scanning %d top-level folders in %s with %d workers' % (total_dirs, folder, WALK_WORKERS))
+
+        # Accumulators (only touched from main thread during merge)
+        all_movie_files = {}
+        all_leftovers = []
+        total_stats = {'sample': 0, 'ignored': 0, 'toosmall': 0, 'accepted': 0}
+
+        # Handle files directly in the scan root (rare but possible)
+        for file_path, st in top_level_files:
+            if self.shuttingDown():
+                break
+            if self.isSampleFile(file_path):
+                all_leftovers.append(file_path)
+                continue
+            if not self.keepFile(file_path):
+                continue
+            size_mb = st.st_size / 1024 / 1024
+            is_dvd = self.isDVDFile(file_path)
+            if self.filesizeBetween(file_path, self.file_sizes['movie'], cached_size_mb=size_mb) or is_dvd:
+                identifier = self.createStringIdentifier(file_path, folder, exclude_filename=is_dvd)
+                identifiers = [identifier]
+                quality = fireEvent('quality.guess', files=[file_path], size=size_mb, single=True) if not is_dvd else {'identifier': 'dvdr'}
+                if quality:
+                    identifier_with_quality = '%s %s' % (identifier, quality.get('identifier', ''))
+                    identifiers = [identifier_with_quality, identifier]
+                if not all_movie_files.get(identifier):
+                    all_movie_files[identifier] = {
+                        'unsorted_files': [], 'identifiers': identifiers,
+                        'is_dvd': is_dvd, 'primary_count': 0,
+                    }
+                all_movie_files[identifier]['unsorted_files'].append(file_path)
+                all_movie_files[identifier]['primary_count'] += 1
+            else:
+                all_leftovers.append(file_path)
+
+        # Parallel walk of subdirectories
+        dirs_done = [0]
+        progress_lock = threading.Lock()
+
+        try:
+            with ThreadPoolExecutor(max_workers=WALK_WORKERS) as pool:
+                future_to_subdir = {}
+                for subdir in top_level_subdirs:
+                    if self.shuttingDown():
+                        break
+                    future = pool.submit(self._walk_and_categorize_subdir, subdir, folder, newer_than)
+                    future_to_subdir[future] = subdir
+
+                for future in as_completed(future_to_subdir):
+                    subdir = future_to_subdir[future]
+                    try:
+                        subdir_movies, subdir_leftovers, subdir_stats = future.result()
+
+                        # Merge movie_files
+                        for identifier, group in subdir_movies.items():
+                            if identifier in all_movie_files:
+                                all_movie_files[identifier]['unsorted_files'].extend(group['unsorted_files'])
+                                all_movie_files[identifier]['primary_count'] += group['primary_count']
+                                for ident in group['identifiers']:
+                                    if ident not in all_movie_files[identifier]['identifiers']:
+                                        all_movie_files[identifier]['identifiers'].append(ident)
+                            else:
+                                all_movie_files[identifier] = group
+
+                        # Merge leftovers
+                        all_leftovers.extend(subdir_leftovers)
+
+                        # Merge stats
+                        for k, v in subdir_stats.items():
+                            total_stats[k] = total_stats.get(k, 0) + v
+
+                    except Exception:
+                        log.error('Error scanning subdir %s: %s', (os.path.basename(subdir), traceback.format_exc()))
+
+                    # Progress
+                    with progress_lock:
+                        dirs_done[0] += 1
+                        if on_walk_progress:
+                            on_walk_progress(dirs_done[0])
+
+        except RuntimeError:
+            # Thread pool shut down (app exiting) — fall back to serial
+            log.warning('Thread pool unavailable, falling back to serial scan')
+            for subdir in top_level_subdirs:
+                if self.shuttingDown():
+                    break
+                try:
+                    subdir_movies, subdir_leftovers, subdir_stats = self._walk_and_categorize_subdir(subdir, folder, newer_than)
+                    for identifier, group in subdir_movies.items():
+                        if identifier in all_movie_files:
+                            all_movie_files[identifier]['unsorted_files'].extend(group['unsorted_files'])
+                            all_movie_files[identifier]['primary_count'] += group['primary_count']
+                        else:
+                            all_movie_files[identifier] = group
+                    all_leftovers.extend(subdir_leftovers)
+                    for k, v in subdir_stats.items():
+                        total_stats[k] = total_stats.get(k, 0) + v
+                except Exception:
+                    log.error('Error scanning subdir %s: %s', (os.path.basename(subdir), traceback.format_exc()))
+                dirs_done[0] += 1
+                if on_walk_progress:
+                    on_walk_progress(dirs_done[0])
+
+        if total_stats['accepted'] == 0:
+            total_files = sum(total_stats.values())
+            log.info('Scanner file disposition: %d total, %d sample, %d ignored, %d too-small (<200MB), 0 accepted as movie' %
+                     (total_files, total_stats['sample'], total_stats['ignored'], total_stats['toosmall']))
+
+        return all_movie_files, all_leftovers
+
+    def _categorize_files(self, files, folder):
+        """Categorize a list of provided files into movie groups and leftovers.
+        Used when scanner is called with specific files (e.g. from renamer)."""
+        movie_files = {}
+        leftovers = []
+
+        for file_path in files:
+            if not os.path.exists(file_path):
+                continue
+
+            # Remove ignored files
+            if self.isSampleFile(file_path):
+                leftovers.append(file_path)
+                continue
+            elif not self.keepFile(file_path):
+                continue
+
+            is_dvd_file = self.isDVDFile(file_path)
+            if self.filesizeBetween(file_path, self.file_sizes['movie']) or is_dvd_file:
+
+                # Normal identifier
+                identifier = self.createStringIdentifier(file_path, folder, exclude_filename = is_dvd_file)
+                identifiers = [identifier]
+
+                # Identifier with quality
+                quality = fireEvent('quality.guess', files = [file_path], size = self.getFileSize(file_path), single = True) if not is_dvd_file else {'identifier':'dvdr'}
+                if quality:
+                    identifier_with_quality = '%s %s' % (identifier, quality.get('identifier', ''))
+                    identifiers = [identifier_with_quality, identifier]
+
+                if not movie_files.get(identifier):
+                    movie_files[identifier] = {
+                        'unsorted_files': [],
+                        'identifiers': identifiers,
+                        'is_dvd': is_dvd_file,
+                        'primary_count': 0,
+                    }
+
+                movie_files[identifier]['unsorted_files'].append(file_path)
+                movie_files[identifier]['primary_count'] += 1
+            else:
+                leftovers.append(file_path)
+
+            # Break if CP wants to shut down
+            if self.shuttingDown():
+                break
+
+        return movie_files, leftovers
+
+    def _process_single_group(self, identifier, group, folder, release_download, simple,
+                               return_ignored, ignored_identifiers):
+        """Process a single movie group: classify files, get metadata, determine media.
+        Called from worker threads with idle I/O priority.
+        Returns (identifier, group) or None if group should be skipped."""
+        _set_thread_io_idle()
+
+        if self.shuttingDown():
+            return None
+
+        if return_ignored is False and identifier in ignored_identifiers:
+            ignore_files = ignored_identifiers[identifier]
+            for f in ignore_files:
+                # Filename format: <name>.<tag>.ignore — extract the tag
+                parts = os.path.basename(f).rsplit('.', 2)
+                tag = parts[-2] if len(parts) >= 3 else 'unknown'
+                # Read the file for the reason line
+                reason = ''
+                try:
+                    with open(f, 'r') as fh:
+                        for line in fh:
+                            if line.startswith('Reason:'):
+                                reason = line[len('Reason:'):].strip()
+                                break
+                except:
+                    pass
+                if reason:
+                    log.warning('Skipping release "%s": tagged "%s" — %s (file: %s)',
+                                (identifier, tag, reason, os.path.basename(f)))
+                else:
+                    log.warning('Skipping release "%s": tagged "%s" (file: %s)',
+                                (identifier, tag, os.path.basename(f)))
+            return None
+
+        # Group extra (and easy) files first
+        group['files'] = {
+            'movie_extra': self.getMovieExtras(group['unsorted_files']),
+            'subtitle': self.getSubtitles(group['unsorted_files']),
+            'subtitle_extra': self.getSubtitlesExtras(group['unsorted_files']),
+            'nfo': self.getNfo(group['unsorted_files']),
+            'trailer': self.getTrailers(group['unsorted_files']),
+            'leftover': set(group['unsorted_files']),
+        }
+
+        # Media files
+        if group['is_dvd']:
+            group['files']['movie'] = self.getDVDFiles(group['unsorted_files'])
+        else:
+            group['files']['movie'] = self.getMediaFiles(group['unsorted_files'])
+
+        if len(group['files']['movie']) == 0:
+            log.error('Couldn\'t find any movie files for %s', identifier)
+            return None
+
+        log.debug('Getting metadata for %s', identifier)
+        group['meta_data'] = self.getMetaData(group, folder = folder, release_download = release_download)
+
+        # Subtitle meta
+        group['subtitle_language'] = self.getSubtitleLanguage(group) if not simple else {}
+
+        # Get parent dir from movie files
+        for movie_file in group['files']['movie']:
+            group['parentdir'] = os.path.dirname(movie_file)
+            group['dirname'] = None
+
+            folder_names = group['parentdir'].replace(folder, '').split(os.path.sep)
+            folder_names.reverse()
+
+            # Try and get a proper dirname, so no "A", "Movie", "Download" etc
+            for folder_name in folder_names:
+                if folder_name.lower() not in self.ignore_names and len(folder_name) > 2:
+                    group['dirname'] = folder_name
+                    break
+
+            break
+
+        # Leftover "sorted" files
+        for file_type in group['files']:
+            if not file_type == 'leftover':
+                group['files']['leftover'] -= set(group['files'][file_type])
+                group['files'][file_type] = list(group['files'][file_type])
+        group['files']['leftover'] = list(group['files']['leftover'])
+
+        # Delete the unsorted list
+        del group['unsorted_files']
+
+        # Determine movie
+        group['media'] = self.determineMedia(group, release_download = release_download)
+        if not group['media']:
+            log.error('Unable to determine media: %s', group['identifiers'])
+        else:
+            group['identifier'] = getIdentifier(group['media']) or group['media']['info'].get('imdb')
+
+        return (identifier, group)
+
+    def _parallel_process_groups(self, valid_files, folder, release_download, simple,
+                                  return_ignored, ignored_identifiers, on_found, total_found):
+        """Process movie groups in parallel using PROCESS_WORKERS threads.
+        Each worker: classify files -> enzyme metadata -> subtitle scan ->
+        TMDB lookup -> on_found callback. Returns processed_movies dict."""
+        processed_movies = {}
+
+        if total_found == 0:
+            return processed_movies
+
+        remaining = [total_found]
+        lock = threading.Lock()
+
+        def process_and_notify(identifier, group):
+            result = self._process_single_group(
+                identifier, group, folder, release_download, simple,
+                return_ignored, ignored_identifiers)
+
+            if result is None:
+                with lock:
+                    remaining[0] -= 1
+                return None
+
+            ident, grp = result
+
+            with lock:
+                remaining[0] -= 1
+                to_go = remaining[0]
+                processed_movies[ident] = grp
+
+            # Notify parent & progress (on_found calls release.add + movie.update)
+            if on_found:
+                on_found(grp, total_found, to_go)
+
+            return result
+
+        try:
+            with ThreadPoolExecutor(max_workers=PROCESS_WORKERS) as pool:
+                futures = []
+                while not self.shuttingDown():
+                    try:
+                        identifier, group = valid_files.popitem()
+                    except KeyError:
+                        break
+                    futures.append(pool.submit(process_and_notify, identifier, group))
+
+                # Wait for all to complete
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception:
+                        log.error('Error processing movie group: %s', traceback.format_exc())
+
+        except RuntimeError:
+            # Thread pool shut down — fall back to serial
+            log.warning('Thread pool unavailable, processing groups serially')
+            while not self.shuttingDown():
+                try:
+                    identifier, group = valid_files.popitem()
+                except KeyError:
+                    break
+                try:
+                    process_and_notify(identifier, group)
+                except Exception:
+                    log.error('Error processing movie group: %s', traceback.format_exc())
+
+        return processed_movies
+
+    # ---- Existing methods below (unchanged except filesizeBetween) ----
 
     def getMetaData(self, group, folder = '', release_download = None):
 
@@ -857,11 +1131,12 @@ class Scanner(Plugin):
         if is_sample: log.debug('Is sample file: %s', filename)
         return is_sample
 
-    def filesizeBetween(self, file, file_size = None):
+    def filesizeBetween(self, file, file_size = None, cached_size_mb = None):
         if not file_size: file_size = []
 
         try:
-            return file_size.get('min', 0) < self.getFileSize(file) < file_size.get('max', 100000)
+            sz = cached_size_mb if cached_size_mb is not None else self.getFileSize(file)
+            return file_size.get('min', 0) < sz < file_size.get('max', 100000)
         except:
             log.error('Couldn\'t get filesize of %s.', file)
 
