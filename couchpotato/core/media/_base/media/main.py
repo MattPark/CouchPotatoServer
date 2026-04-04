@@ -1196,8 +1196,12 @@ class MediaPlugin(MediaBase):
         # Get the library root (e.g. /movies/)
         library_dirs = []
         try:
-            library_str = self.conf('library', section='manage') or ''
-            library_dirs = [d.strip() for d in library_str.split('::') if d.strip()]
+            library_conf = self.conf('library', section='manage') or ''
+            # conf() may return a list or a '::'-delimited string
+            if isinstance(library_conf, list):
+                library_dirs = [d.strip() for d in library_conf if d and d.strip()]
+            else:
+                library_dirs = [d.strip() for d in str(library_conf).split('::') if d.strip()]
         except:
             pass
         if not library_dirs:
@@ -1205,9 +1209,12 @@ class MediaPlugin(MediaBase):
         log.info('Library directories: %s', str(library_dirs))
 
         # Find all releases with UNKNOWN in file paths
-        all_releases = db.all('release')
+        # NOTE: db.all('release') returns stub dicts {_id, key} without full docs.
+        # We need with_doc=True and extract the 'doc' field to get file paths.
+        all_release_stubs = db.all('release', with_doc=True)
         unknown_releases = []
-        for rel in all_releases:
+        for stub in all_release_stubs:
+            rel = stub.get('doc', stub) if isinstance(stub, dict) and 'doc' in stub else stub
             files = rel.get('files', {})
             for ftype, fpaths in files.items():
                 if isinstance(fpaths, list):
