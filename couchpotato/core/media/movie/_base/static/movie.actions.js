@@ -374,8 +374,7 @@ MA.Trailer = new Class({
 	label: 'Trailer',
 
 	getDetails: function(){
-		var self = this,
-			data_url = 'https://www.googleapis.com/youtube/v3/search?q="{title}" {year} trailer&maxResults=1&type=video&videoDefinition=high&videoEmbeddable=true&part=snippet&key=AIzaSyAT3li1KjfLidaL6Vt8T92MRU7n4VOrjYk';
+		var self = this;
 
 		if(!self.player_container){
 			self.id = 'trailer-'+randomString();
@@ -394,26 +393,18 @@ MA.Trailer = new Class({
 
 			requestTimeout(function(){
 
-				var url = data_url.substitute({
-					'title': encodeURI(self.getTitle()),
-					'year': self.get('year')
-				});
+				// Use trailer key from TMDB data (fetched server-side)
+				var trailer_key = self.get('trailer_key');
+				if(trailer_key){
+					self.video_id = trailer_key;
+					self.background.setStyle('background-image', 'url(https://img.youtube.com/vi/'+trailer_key+'/hqdefault.jpg)');
+					self.background.addClass('visible');
+				}
+				else {
+					self.container.getParent('.section').addClass('no_trailer');
+				}
 
-				new Request.JSONP({
-					'url': url,
-					'onComplete': function(json){
-						if(json.items.length > 0){
-							self.video_id = json.items[0].id.videoId;
-							self.background.setStyle('background-image', 'url('+json.items[0].snippet.thumbnails.high.url+')');
-							self.background.addClass('visible');
-						}
-						else {
-							self.container.getParent('.section').addClass('no_trailer');
-						}
-					}
-				}).send();
-
-			}, 1000);
+			}, 200);
 		}
 
 		return self.container;

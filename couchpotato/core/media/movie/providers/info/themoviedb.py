@@ -284,7 +284,7 @@ class TheMovieDb(MovieProvider):
 
         # Do request, append other items
         movie = self.request('movie/%s' % movie.get('id'), {
-            'append_to_response': 'alternative_titles' + (',images,casts' if extended else ''),
+            'append_to_response': 'alternative_titles,videos' + (',images,casts' if extended else ''),
             'language': 'en'
         })
         if not movie:
@@ -342,6 +342,26 @@ class TheMovieDb(MovieProvider):
                 except:
                     log.debug('Error getting cast info for %s: %s', (cast_item, traceback.format_exc()))
 
+        # Extract YouTube trailer key from TMDB videos response
+        trailer_key = None
+        try:
+            videos = movie.get('videos', {}).get('results', [])
+            # Prefer official trailers, then teasers, then any YouTube video
+            for preferred_type in ['Trailer', 'Teaser']:
+                for v in videos:
+                    if v.get('site') == 'YouTube' and v.get('type') == preferred_type:
+                        trailer_key = v.get('key')
+                        break
+                if trailer_key:
+                    break
+            if not trailer_key:
+                for v in videos:
+                    if v.get('site') == 'YouTube':
+                        trailer_key = v.get('key')
+                        break
+        except:
+            pass
+
         movie_data = {
             'type': 'movie',
             'via_tmdb': True,
@@ -358,7 +378,8 @@ class TheMovieDb(MovieProvider):
             'votes': tryInt(movie.get('vote_count', 0)),
             'genres': genres,
             'collection': getattr(movie.get('belongs_to_collection'), 'name', None),
-            'actor_roles': actors
+            'actor_roles': actors,
+            'trailer_key': trailer_key
         }
 
         movie_data = dict((k, v) for k, v in movie_data.items() if v)
