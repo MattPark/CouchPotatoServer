@@ -9,8 +9,11 @@ from couchpotato.core.logger import CPLog
 log = CPLog(__name__)
 events = {}
 
-# Shared pool for concurrent handler execution
-_pool = ThreadPoolExecutor(max_workers=10)
+# Shared pool for concurrent handler execution.
+# Must be large enough to avoid starvation when scanner's 8 worker threads
+# each fire events that submit handlers here, and those handlers fire
+# nested events (e.g. movie.update -> TMDB info -> poster download).
+_pool = ThreadPoolExecutor(max_workers=20)
 
 
 def runHandler(name, handler, *args, **kwargs):

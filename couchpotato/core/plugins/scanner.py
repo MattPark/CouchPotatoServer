@@ -1,4 +1,5 @@
 import os
+import queue
 import re
 import sys
 import platform
@@ -731,8 +732,10 @@ class Scanner(Plugin):
     def _parallel_process_groups(self, valid_files, folder, release_download, simple,
                                   return_ignored, ignored_identifiers, on_found, total_found):
         """Process movie groups in parallel using PROCESS_WORKERS threads.
-        Each worker: classify files -> enzyme metadata -> subtitle scan ->
-        TMDB lookup -> on_found callback. Returns processed_movies dict."""
+        Workers do the heavy lifting (classify + enzyme + TMDB) and push results
+        to a queue. A dedicated notifier thread drains the queue and calls on_found
+        (release.add + movie.update), so workers are freed immediately to process
+        the next group instead of blocking on DB/API updates."""
         processed_movies = {}
 
         if total_found == 0:
@@ -740,8 +743,27 @@ class Scanner(Plugin):
 
         remaining = [total_found]
         lock = threading.Lock()
+        notify_queue = queue.Queue()
 
-        def process_and_notify(identifier, group):
+        # --- Notifier thread: drains queue and calls on_found serially ---
+        def notifier():
+            while True:
+                item = notify_queue.get()
+                if item is None:
+                    # Sentinel — all workers are done
+                    break
+                grp, found, to_go = item
+                try:
+                    on_found(grp, found, to_go)
+                except Exception:
+                    log.error('Error in on_found callback: %s', traceback.format_exc())
+
+        notifier_thread = None
+        if on_found:
+            notifier_thread = threading.Thread(target=notifier, name='scan-notifier', daemon=True)
+            notifier_thread.start()
+
+        def process_one(identifier, group):
             result = self._process_single_group(
                 identifier, group, folder, release_download, simple,
                 return_ignored, ignored_identifiers)
@@ -758,9 +780,9 @@ class Scanner(Plugin):
                 to_go = remaining[0]
                 processed_movies[ident] = grp
 
-            # Notify parent & progress (on_found calls release.add + movie.update)
+            # Push to notifier queue instead of calling on_found directly
             if on_found:
-                on_found(grp, total_found, to_go)
+                notify_queue.put((grp, total_found, to_go))
 
             return result
 
@@ -772,9 +794,9 @@ class Scanner(Plugin):
                         identifier, group = valid_files.popitem()
                     except KeyError:
                         break
-                    futures.append(pool.submit(process_and_notify, identifier, group))
+                    futures.append(pool.submit(process_one, identifier, group))
 
-                # Wait for all to complete
+                # Wait for all workers to complete
                 for future in as_completed(futures):
                     try:
                         future.result()
@@ -790,9 +812,16 @@ class Scanner(Plugin):
                 except KeyError:
                     break
                 try:
-                    process_and_notify(identifier, group)
+                    process_one(identifier, group)
                 except Exception:
                     log.error('Error processing movie group: %s', traceback.format_exc())
+
+        # Signal notifier to stop and wait for it to drain
+        if notifier_thread:
+            notify_queue.put(None)
+            notifier_thread.join(timeout=300)
+            if notifier_thread.is_alive():
+                log.warning('Notifier thread did not finish within 5 minutes')
 
         return processed_movies
 

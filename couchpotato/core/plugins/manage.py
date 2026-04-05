@@ -263,6 +263,8 @@ class Manage(Plugin):
     def createAddToLibrary(self, folder, added_identifiers = []):
 
         def addToLibrary(group, total_found, to_go):
+            # Called from the scanner's dedicated notifier thread (single-threaded),
+            # so counter increments are safe without a lock.
             # Once the directory walk is done, switch progress tracking to
             # group processing so the progress bar reflects actual work remaining
             # instead of showing 100% while thousands of groups still need processing.
