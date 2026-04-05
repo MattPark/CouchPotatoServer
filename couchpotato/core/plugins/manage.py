@@ -86,7 +86,7 @@ class Manage(Plugin):
 
     def updateLibraryView(self, full = 1, **kwargs):
 
-        fireEventAsync('manage.update', full = True if full == '1' else False)
+        fireEventAsync('manage.update', full = True if str(full) == '1' else False)
 
         return {
             'progress': self.in_progress,
@@ -99,6 +99,10 @@ class Manage(Plugin):
     def updateLibrary(self, full = True):
         last_update_key = 'manage.last_update%s' % ('_full' if full else '')
         last_update = float(Env.prop(last_update_key, default = 0))
+        # Quick scan fallback: if quick-scan timestamp was never set, use full-scan
+        # timestamp so we don't accidentally process the entire library
+        if not full and last_update == 0:
+            last_update = float(Env.prop('manage.last_update_full', default = 0))
 
         if self.in_progress:
             log.info('Already updating library: %s', self.in_progress)
