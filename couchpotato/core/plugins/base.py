@@ -447,10 +447,13 @@ class Plugin(object):
         return False, None
 
     def getFileTimes(self, file_path):
-        # On POSIX, getctime() returns inode change time (updated on move/rename/chmod).
-        # Previously hardcoded to 0 on POSIX, which caused quick scans to miss files
-        # that were moved into the library with old mtimes.
-        return [os.path.getmtime(file_path), os.path.getctime(file_path)]
+        # On POSIX, getctime() returns inode change time — it updates on chmod,
+        # chown, ACL changes, and any inode metadata modification.  This causes
+        # false positives: a bulk permission change (or NAS maintenance) updates
+        # ctime on every file, making quick scan think everything changed.
+        # We only use mtime (content modification time) for newer_than checks.
+        # The renamer already does os.utime() after moves to update mtime.
+        return [os.path.getmtime(file_path), 0]
 
     def isDisabled(self):
         return not self.isEnabled()

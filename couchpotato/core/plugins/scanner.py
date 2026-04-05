@@ -304,9 +304,15 @@ class Scanner(Plugin):
                 del path_identifiers[identifier]
         del delete_identifiers
 
-        # Phase C: Filter still-unpacking files (check_file_date)
-        # newer_than is already handled in Phase A (parallel walk workers)
+        # Phase C: Filter still-unpacking files (check_file_date) and
+        # apply newer_than as a safety net.  Phase A (parallel walk) already
+        # skips unchanged directories, but this second filter catches any
+        # groups that slipped through (e.g. dir mtime was updated by a
+        # non-content change).  This is the same approach the original
+        # pre-parallelization code used — filter AFTER grouping but BEFORE
+        # the expensive Phase D (TMDB lookups / metadata).
         valid_files = {}
+        skipped_by_newer = 0
         while True and not self.shuttingDown():
             try:
                 identifier, group = movie_files.popitem()
@@ -324,7 +330,27 @@ class Scanner(Plugin):
 
                     continue
 
+            # Only process movies newer than the last scan time.
+            # Check only primary movie files (not companion subs/nfos/images
+            # which may be updated by external media servers like Plex/Emby).
+            if newer_than and newer_than > 0:
+                has_new_files = False
+                primary_count = group.get('primary_count', len(group['unsorted_files']))
+                for cur_file in group['unsorted_files'][:primary_count]:
+                    file_time = self.getFileTimes(cur_file)
+                    if file_time[0] > newer_than:
+                        has_new_files = True
+                        break
+
+                if not has_new_files:
+                    del group['unsorted_files']
+                    skipped_by_newer += 1
+                    continue
+
             valid_files[identifier] = group
+
+        if skipped_by_newer > 0:
+            log.info('Quick scan Phase C: skipped %d groups with no files newer than %s' % (skipped_by_newer, time.ctime(newer_than)))
 
         del movie_files
 
@@ -395,7 +421,9 @@ class Scanner(Plugin):
             for file_path, st in self._scandir_recursive(subdir_path):
                 all_files.append((sp(file_path), st))
                 if not has_new and st.st_size >= min_movie_bytes:
-                    if st.st_mtime > newer_than or st.st_ctime > newer_than:
+                    # Only check mtime — ctime changes on chmod/chown/ACL which
+                    # are irrelevant and cause false positives on NAS volumes.
+                    if st.st_mtime > newer_than:
                         has_new = True
             if not has_new:
                 return movie_files, leftovers, stats
@@ -536,7 +564,11 @@ class Scanner(Plugin):
                     if newer_than and newer_than > 0:
                         try:
                             dir_st = os.stat(subdir)
-                            if dir_st.st_mtime < newer_than and dir_st.st_ctime < newer_than:
+                            # Only check mtime — ctime (inode change time) updates on
+                            # chmod/chown/ACL changes which are irrelevant for content.
+                            # A bulk permission change would make ctime recent on every
+                            # directory, defeating the quick-scan skip entirely.
+                            if dir_st.st_mtime < newer_than:
                                 dirs_skipped += 1
                                 with progress_lock:
                                     dirs_done[0] += 1
@@ -594,7 +626,7 @@ class Scanner(Plugin):
                 if newer_than and newer_than > 0:
                     try:
                         dir_st = os.stat(subdir)
-                        if dir_st.st_mtime < newer_than and dir_st.st_ctime < newer_than:
+                        if dir_st.st_mtime < newer_than:
                             dirs_done[0] += 1
                             if on_walk_progress:
                                 on_walk_progress(dirs_done[0])
