@@ -1,5 +1,6 @@
 import json
 import re
+import sys
 import time
 import traceback
 
@@ -115,6 +116,28 @@ class OMDBAPI(MovieProvider):
             pass
         return False
 
+    def _checkExceptionRateLimit(self):
+        """Check if the current exception is an HTTP 401 from OMDB (rate limit delivered as 401).
+        OMDB returns HTTP 401 with body {"Response":"False","Error":"Request limit reached!"}
+        when the daily limit is exceeded.  Since base.urlopen raises before we can parse the body,
+        detect 401 from omdbapi.com and treat it as a rate limit."""
+        try:
+            exc = sys.exc_info()[1]
+            if exc is None:
+                return False
+            exc_str = str(exc)
+            if '401' in exc_str and 'omdbapi.com' in exc_str:
+                if not self._rate_limited_today:
+                    self._rate_limited_today = True
+                    hard_cap = self._getHardCap()
+                    key = self._todayKey()
+                    self._daily_calls[key] = max(self._daily_calls.get(key, 0), hard_cap)
+                    log.warning('OMDB rate limit detected from HTTP 401 — disabling further calls today')
+                return True
+        except:
+            pass
+        return False
+
     # --- stats ---------------------------------------------------------------
 
     def getStats(self):
@@ -170,6 +193,7 @@ class OMDBAPI(MovieProvider):
             data = self.urlopen(url, timeout = 3, headers = {'User-Agent': Env.getIdentifier()})
             self._incrementDaily()
         except:
+            self._checkExceptionRateLimit()
             log.info('OMDB search request failed for: %s', q)
             self._incrementDaily()
             self.setCache(cache_key, '', timeout = CACHE_FAILURE)
@@ -217,6 +241,7 @@ class OMDBAPI(MovieProvider):
             data = self.urlopen(url, timeout = 3, headers = {'User-Agent': Env.getIdentifier()})
             self._incrementDaily()
         except:
+            self._checkExceptionRateLimit()
             log.info('OMDB info request failed for: %s', identifier)
             self._incrementDaily()
             self.setCache(cache_key, '', timeout = CACHE_FAILURE)
