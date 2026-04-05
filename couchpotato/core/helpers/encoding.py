@@ -128,6 +128,8 @@ def stripAccents(s):
 
 def tryUrlencode(s):
     if isinstance(s, dict):
-        return urlencode({k: tryUrlencode(v) for k, v in s.items()})
+        # urlencode handles value encoding itself — do NOT pre-encode values
+        # with quote_plus or commas in append_to_response etc. get double-encoded
+        return urlencode({k: toUnicode(v) for k, v in s.items()})
     else:
         return quote_plus(toUnicode(s))
