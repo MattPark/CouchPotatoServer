@@ -25,10 +25,6 @@ log = CPLog(__name__)
 
 autoload = 'Scanner'
 
-# Thread pool sizes for parallel scanning
-WALK_WORKERS = 16    # Parallel directory walkers (I/O-bound stat calls on NAS)
-PROCESS_WORKERS = 8  # Parallel group processors (enzyme + TMDB API calls)
-
 # --- I/O priority helper (Linux ionice via ioprio_set syscall) ---
 _ionice_set = threading.local()
 _ioprio_syscall_nr = None
@@ -181,6 +177,11 @@ class Scanner(Plugin):
         addEvent('scanner.name_year', self.getReleaseNameYear)
         addEvent('scanner.partnumber', self.getPartNumber)
 
+        # Thread pool sizes (configurable via Settings > Manage > Scanner Threading)
+        self.walk_workers = tryInt(self.conf('walk_workers', default=16))
+        self.process_workers = tryInt(self.conf('process_workers', default=8))
+        self.notify_workers = tryInt(self.conf('notify_workers', default=4))
+
     def scan(self, folder = None, files = None, release_download = None, simple = False, newer_than = 0, return_ignored = True, check_file_date = True, on_found = None, on_walk_progress = None):
 
         folder = sp(folder)
@@ -191,7 +192,7 @@ class Scanner(Plugin):
 
         # Phase A: Collect and categorize files
         if not files:
-            log.info('Walking folder with %d parallel workers: %s' % (WALK_WORKERS, folder))
+            log.info('Walking folder with %d parallel workers: %s' % (self.walk_workers, folder))
             movie_files, leftovers = self._parallel_walk_and_categorize(
                 folder, newer_than, on_walk_progress)
             log.info('Walk complete: %d movie groups, %d leftover files' % (len(movie_files), len(leftovers)))
@@ -484,7 +485,7 @@ class Scanner(Plugin):
 
     def _parallel_walk_and_categorize(self, folder, newer_than, on_walk_progress):
         """Walk library folder in parallel, categorize files into movie groups.
-        Splits top-level subdirectories across WALK_WORKERS threads, each with
+        Splits top-level subdirectories across walk_workers threads, each with
         idle I/O priority. Returns (all_movie_files, all_leftovers)."""
         folder_path = folder.rstrip(os.sep)
 
@@ -509,7 +510,7 @@ class Scanner(Plugin):
         if on_walk_progress:
             on_walk_progress(0, total_dirs)
 
-        log.info('Scanning %d top-level folders in %s with %d workers' % (total_dirs, folder, WALK_WORKERS))
+        log.info('Scanning %d top-level folders in %s with %d workers' % (total_dirs, folder, self.walk_workers))
 
         # Accumulators (only touched from main thread during merge)
         all_movie_files = {}
@@ -549,7 +550,7 @@ class Scanner(Plugin):
         progress_lock = threading.Lock()
 
         try:
-            with ThreadPoolExecutor(max_workers=WALK_WORKERS) as pool:
+            with ThreadPoolExecutor(max_workers=self.walk_workers) as pool:
                 future_to_subdir = {}
                 dirs_skipped = 0
                 for subdir in top_level_subdirs:
@@ -801,17 +802,11 @@ class Scanner(Plugin):
 
         return (identifier, group)
 
-    # Number of threads draining the on_found notification queue.
-    # on_found does release.add + movie.update (DB writes + TMDB API) which is
-    # the heaviest part of scanning. Using fewer notifiers than PROCESS_WORKERS
-    # reduces DB/API contention while still allowing parallel updates.
-    NOTIFY_WORKERS = 4
-
     def _parallel_process_groups(self, valid_files, folder, release_download, simple,
                                   return_ignored, ignored_identifiers, on_found, total_found):
-        """Process movie groups in parallel using PROCESS_WORKERS threads.
+        """Process movie groups in parallel using self.process_workers threads.
         Workers do the heavy lifting (classify + enzyme + TMDB) and push results
-        to a queue. NOTIFY_WORKERS threads drain the queue and call on_found
+        to a queue. self.notify_workers threads drain the queue and call on_found
         (release.add + movie.update) in parallel, decoupled from the workers."""
         processed_movies = {}
 
@@ -837,7 +832,7 @@ class Scanner(Plugin):
 
         notifier_threads = []
         if on_found:
-            for i in range(self.NOTIFY_WORKERS):
+            for i in range(self.notify_workers):
                 t = threading.Thread(target=notifier, name='scan-notifier-%d' % i, daemon=True)
                 t.start()
                 notifier_threads.append(t)
@@ -866,7 +861,7 @@ class Scanner(Plugin):
             return result
 
         try:
-            with ThreadPoolExecutor(max_workers=PROCESS_WORKERS) as pool:
+            with ThreadPoolExecutor(max_workers=self.process_workers) as pool:
                 futures = []
                 while not self.shuttingDown():
                     try:
@@ -1473,3 +1468,42 @@ class Scanner(Plugin):
 
         guess['other'] = cp_guess
         return guess
+
+
+config = [{
+    'name': 'scanner',
+    'groups': [
+        {
+            'tab': 'manage',
+            'name': 'scanner',
+            'label': 'Scanner Threading',
+            'description': 'Thread pool sizes for library scanning.',
+            'options': [
+                {
+                    'name': 'walk_workers',
+                    'label': 'Walk Workers',
+                    'type': 'int',
+                    'default': 16,
+                    'advanced': True,
+                    'description': 'Parallel threads for directory walking (I/O-bound). Higher values speed up initial file discovery on NAS.',
+                },
+                {
+                    'name': 'process_workers',
+                    'label': 'Process Workers',
+                    'type': 'int',
+                    'default': 8,
+                    'advanced': True,
+                    'description': 'Parallel threads for movie identification (enzyme metadata + TMDB lookups).',
+                },
+                {
+                    'name': 'notify_workers',
+                    'label': 'Notify Workers',
+                    'type': 'int',
+                    'default': 4,
+                    'advanced': True,
+                    'description': 'Parallel threads for DB writes and API updates after identification.',
+                },
+            ],
+        },
+    ],
+}]
