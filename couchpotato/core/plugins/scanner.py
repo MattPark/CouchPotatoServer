@@ -381,27 +381,33 @@ class Scanner(Plugin):
         leftovers = []
         stats = {'sample': 0, 'ignored': 0, 'toosmall': 0, 'accepted': 0}
 
-        # Collect all files via scandir (one stat per file instead of 4-5)
-        all_files = []
-        for file_path, stat_result in self._scandir_recursive(subdir_path):
-            all_files.append((sp(file_path), stat_result))
-
-        if self.shuttingDown() or not all_files:
-            return movie_files, leftovers, stats
-
-        # Quick scan optimization: if newer_than is set, check if ANY movie-sized
-        # file has mtime or ctime newer than threshold. If none do, skip the entire
-        # subdirectory — avoids expensive quality.guess calls for unchanged movies.
+        # Quick scan fast-path: when newer_than is set, do a lightweight scan
+        # to check if ANY movie-sized file is newer BEFORE collecting full stat data.
+        # This avoids the expensive quality.guess / categorize work for 99%+ of
+        # unchanged folders.  The scandir walk itself is still needed (we must stat
+        # each file to check timestamps), but we bail out of the _categorize_ phase
+        # if nothing qualifies — which is the real saving since quality.guess fires
+        # events and does regex work.
         if newer_than and newer_than > 0:
             min_movie_bytes = self.file_sizes['movie'].get('min', 0) * 1024 * 1024
             has_new = False
-            for file_path, st in all_files:
-                if st.st_size >= min_movie_bytes:
+            all_files = []
+            for file_path, st in self._scandir_recursive(subdir_path):
+                all_files.append((sp(file_path), st))
+                if not has_new and st.st_size >= min_movie_bytes:
                     if st.st_mtime > newer_than or st.st_ctime > newer_than:
                         has_new = True
-                        break
             if not has_new:
                 return movie_files, leftovers, stats
+            # Fall through to categorize using already-collected all_files
+        else:
+            # Full scan — collect all files via scandir
+            all_files = []
+            for file_path, stat_result in self._scandir_recursive(subdir_path):
+                all_files.append((sp(file_path), stat_result))
+
+        if self.shuttingDown() or not all_files:
+            return movie_files, leftovers, stats
 
         # Categorize files
         for file_path, st in all_files:
@@ -517,11 +523,34 @@ class Scanner(Plugin):
         try:
             with ThreadPoolExecutor(max_workers=WALK_WORKERS) as pool:
                 future_to_subdir = {}
+                dirs_skipped = 0
                 for subdir in top_level_subdirs:
                     if self.shuttingDown():
                         break
+
+                    # Quick scan optimization: check directory mtime/ctime before
+                    # submitting to the thread pool.  A directory's mtime updates when
+                    # files are added, removed, or renamed inside it — which covers all
+                    # relevant changes in a movie library.  This avoids the expensive
+                    # recursive scandir+stat of every file inside unchanged directories.
+                    if newer_than and newer_than > 0:
+                        try:
+                            dir_st = os.stat(subdir)
+                            if dir_st.st_mtime < newer_than and dir_st.st_ctime < newer_than:
+                                dirs_skipped += 1
+                                with progress_lock:
+                                    dirs_done[0] += 1
+                                    if on_walk_progress:
+                                        on_walk_progress(dirs_done[0])
+                                continue
+                        except OSError:
+                            pass  # Can't stat — let the worker handle it
+
                     future = pool.submit(self._walk_and_categorize_subdir, subdir, folder, newer_than)
                     future_to_subdir[future] = subdir
+
+                if dirs_skipped > 0:
+                    log.info('Quick scan: skipped %d/%d unchanged directories' % (dirs_skipped, total_dirs))
 
                 for future in as_completed(future_to_subdir):
                     subdir = future_to_subdir[future]
@@ -561,6 +590,17 @@ class Scanner(Plugin):
             for subdir in top_level_subdirs:
                 if self.shuttingDown():
                     break
+                # Same quick-scan dir-level skip as the parallel path
+                if newer_than and newer_than > 0:
+                    try:
+                        dir_st = os.stat(subdir)
+                        if dir_st.st_mtime < newer_than and dir_st.st_ctime < newer_than:
+                            dirs_done[0] += 1
+                            if on_walk_progress:
+                                on_walk_progress(dirs_done[0])
+                            continue
+                    except OSError:
+                        pass
                 try:
                     subdir_movies, subdir_leftovers, subdir_stats = self._walk_and_categorize_subdir(subdir, folder, newer_than)
                     for identifier, group in subdir_movies.items():
