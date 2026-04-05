@@ -19,7 +19,24 @@ def toSafeString(original):
 
 
 def simplifyString(original):
-    string = stripAccents(original.lower())
+    string = original.lower()
+
+    # Replace problematic Unicode before ASCII flattening:
+    # Vulgar fractions: insert space before so '1½' doesn't become '112'
+    _vulgar_fractions = {
+        '\u00bc': ' 1/4', '\u00bd': ' 1/2', '\u00be': ' 3/4',
+        '\u2153': ' 1/3', '\u2154': ' 2/3', '\u2155': ' 1/5',
+        '\u2156': ' 2/5', '\u2157': ' 3/5', '\u2158': ' 4/5',
+        '\u2159': ' 1/6', '\u215a': ' 5/6', '\u215b': ' 1/8',
+        '\u215c': ' 3/8', '\u215d': ' 5/8', '\u215e': ' 7/8',
+    }
+    for frac, repl in _vulgar_fractions.items():
+        string = string.replace(frac, repl)
+    # Middle dot (U+00B7, as in WALL·E): replace with space so it becomes two tokens
+    # rather than being silently dropped by ASCII encoding
+    string = string.replace('\u00b7', ' ')
+
+    string = stripAccents(string)
     string = toSafeString(' '.join(re.split(r'\W+', string)))
     split = re.split(r'\W+|_', string.lower())
     return toUnicode(' '.join(split))

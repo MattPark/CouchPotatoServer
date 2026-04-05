@@ -821,7 +821,7 @@ class Scanner(Plugin):
                     else:
                         data.update(self.getResolution(cur_file))
                 except:
-                    log.debug('Error parsing metadata: %s %s', (cur_file, traceback.format_exc()))
+                    log.info('Error parsing metadata: %s', cur_file)
                     pass
 
             data['size'] = data.get('size', 0) + self.getFileSize(cur_file)
@@ -906,11 +906,11 @@ class Scanner(Plugin):
                 'audio_channels': p.audio[0].channels,
             }
         except enzyme.exceptions.ParseError:
-            log.debug('Failed to parse meta for %s', filename)
+            log.info('Failed to parse MKV metadata (EBML): %s', filename)
         except enzyme.exceptions.NoParserError:
             log.debug('No parser found for %s', filename)
         except:
-            log.debug('Failed parsing %s', filename)
+            log.info('Failed parsing metadata: %s', filename)
 
         return {}
 
@@ -1005,19 +1005,57 @@ class Scanner(Plugin):
 
                     name_year = self.getReleaseNameYear(identifier, file_name = filename if not group['is_dvd'] else None)
                     if name_year.get('name') and name_year.get('year'):
-                        search_q = '%(name)s %(year)s' % name_year
-                        movie = fireEvent('movie.search', q = search_q, merge = True, limit = 1)
 
-                        # Try with other
-                        if len(movie) == 0 and name_year.get('other') and name_year['other'].get('name') and name_year['other'].get('year'):
-                            search_q2 = '%(name)s %(year)s' % name_year.get('other')
-                            if search_q2 != search_q:
-                                movie = fireEvent('movie.search', q = search_q2, merge = True, limit = 1)
+                        movie_name = name_year['name']
+                        movie_year = name_year['year']
 
-                        if len(movie) > 0:
-                            imdb_id = movie[0].get('imdb')
-                            log.debug('Found movie via search: %s', identifier)
-                            if imdb_id: break
+                        # Split CamelCase words (e.g. MetallicaSlayerMegadeth -> Metallica Slayer Megadeth)
+                        if re.search(r'[a-z][A-Z]', movie_name):
+                            movie_name = re.sub(r'([a-z])([A-Z])', r'\1 \2', movie_name)
+
+                        # Strip leftover source/quality words that survived self.clean
+                        _junk_words = {'rip', 'dvd', 'br', 'bd', 'web', 'dl', 'hd', 'sd'}
+                        name_words = [w for w in movie_name.split() if w.lower() not in _junk_words]
+                        if name_words:
+                            movie_name = ' '.join(name_words)
+
+                        # Build search queries in order of specificity
+                        search_attempts = []
+
+                        # 1. Name + year (strict phrase search)
+                        if movie_year and int(movie_year) > 0:
+                            search_attempts.append(('%s %s' % (movie_name, movie_year), 1))
+
+                        # 2. Name-only with wider limit (ngram search, year=0 or strict failed)
+                        search_attempts.append((movie_name, 5))
+
+                        # 3. Guessit alternative if available and different
+                        if name_year.get('other') and name_year['other'].get('name') and name_year['other'].get('year'):
+                            alt_q = '%(name)s %(year)s' % name_year.get('other')
+                            search_attempts.append((alt_q, 1))
+
+                        for search_q, limit in search_attempts:
+                            if not search_q.strip():
+                                continue
+                            movie = fireEvent('movie.search', q = search_q, merge = True, limit = limit)
+
+                            if limit > 1 and len(movie) > 1 and movie_year and int(movie_year) > 0:
+                                # Multiple results: prefer one matching year ±1
+                                yr = int(movie_year)
+                                for m in movie:
+                                    m_year = m.get('year', 0)
+                                    if m_year and abs(m_year - yr) <= 1 and m.get('imdb'):
+                                        imdb_id = m.get('imdb')
+                                        break
+
+                            if not imdb_id and len(movie) > 0:
+                                imdb_id = movie[0].get('imdb')
+
+                            if imdb_id:
+                                log.debug('Found movie via search: %s', identifier)
+                                break
+
+                        if imdb_id: break
                 else:
                     log.debug('Identifier to short to use for search: %s', identifier)
 
