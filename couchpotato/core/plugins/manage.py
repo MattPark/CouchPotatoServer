@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 import traceback
 
@@ -262,9 +263,11 @@ class Manage(Plugin):
     # noinspection PyDefaultArgument
     def createAddToLibrary(self, folder, added_identifiers = []):
 
+        _counter_lock = threading.Lock()
+
         def addToLibrary(group, total_found, to_go):
-            # Called from the scanner's dedicated notifier thread (single-threaded),
-            # so counter increments are safe without a lock.
+            # Called from scanner's notifier threads (multiple threads),
+            # so counter increments need a lock to avoid lost updates.
             # Once the directory walk is done, switch progress tracking to
             # group processing so the progress bar reflects actual work remaining
             # instead of showing 100% while thousands of groups still need processing.
@@ -274,15 +277,17 @@ class Manage(Plugin):
                 self.in_progress[folder]['phase'] = 'processing'
                 self.updateProgress(folder)
 
-            # Track scan results
-            if self.last_scan_results:
-                self.last_scan_results['movies_found'] += 1
+            # Track scan results (locked — called from multiple notifier threads)
+            with _counter_lock:
+                if self.last_scan_results:
+                    self.last_scan_results['movies_found'] += 1
 
             if group['media'] and group['identifier']:
                 added_identifiers.append(group['identifier'])
 
-                if self.last_scan_results:
-                    self.last_scan_results['movies_added'] += 1
+                with _counter_lock:
+                    if self.last_scan_results:
+                        self.last_scan_results['movies_added'] += 1
 
                 # Add it to release and update the info
                 fireEvent('release.add', group = group, update_info = False)

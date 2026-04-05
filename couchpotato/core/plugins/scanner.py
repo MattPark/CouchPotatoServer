@@ -729,13 +729,18 @@ class Scanner(Plugin):
 
         return (identifier, group)
 
+    # Number of threads draining the on_found notification queue.
+    # on_found does release.add + movie.update (DB writes + TMDB API) which is
+    # the heaviest part of scanning. Using fewer notifiers than PROCESS_WORKERS
+    # reduces DB/API contention while still allowing parallel updates.
+    NOTIFY_WORKERS = 4
+
     def _parallel_process_groups(self, valid_files, folder, release_download, simple,
                                   return_ignored, ignored_identifiers, on_found, total_found):
         """Process movie groups in parallel using PROCESS_WORKERS threads.
         Workers do the heavy lifting (classify + enzyme + TMDB) and push results
-        to a queue. A dedicated notifier thread drains the queue and calls on_found
-        (release.add + movie.update), so workers are freed immediately to process
-        the next group instead of blocking on DB/API updates."""
+        to a queue. NOTIFY_WORKERS threads drain the queue and call on_found
+        (release.add + movie.update) in parallel, decoupled from the workers."""
         processed_movies = {}
 
         if total_found == 0:
@@ -745,12 +750,12 @@ class Scanner(Plugin):
         lock = threading.Lock()
         notify_queue = queue.Queue()
 
-        # --- Notifier thread: drains queue and calls on_found serially ---
+        # --- Notifier threads: drain queue and call on_found in parallel ---
         def notifier():
             while True:
                 item = notify_queue.get()
                 if item is None:
-                    # Sentinel — all workers are done
+                    # Sentinel — this notifier thread should exit
                     break
                 grp, found, to_go = item
                 try:
@@ -758,10 +763,12 @@ class Scanner(Plugin):
                 except Exception:
                     log.error('Error in on_found callback: %s', traceback.format_exc())
 
-        notifier_thread = None
+        notifier_threads = []
         if on_found:
-            notifier_thread = threading.Thread(target=notifier, name='scan-notifier', daemon=True)
-            notifier_thread.start()
+            for i in range(self.NOTIFY_WORKERS):
+                t = threading.Thread(target=notifier, name='scan-notifier-%d' % i, daemon=True)
+                t.start()
+                notifier_threads.append(t)
 
         def process_one(identifier, group):
             result = self._process_single_group(
@@ -816,12 +823,13 @@ class Scanner(Plugin):
                 except Exception:
                     log.error('Error processing movie group: %s', traceback.format_exc())
 
-        # Signal notifier to stop and wait for it to drain
-        if notifier_thread:
+        # Signal all notifier threads to stop and wait for queue to drain
+        for _ in notifier_threads:
             notify_queue.put(None)
-            notifier_thread.join(timeout=300)
-            if notifier_thread.is_alive():
-                log.warning('Notifier thread did not finish within 5 minutes')
+        for t in notifier_threads:
+            t.join(timeout=300)
+            if t.is_alive():
+                log.warning('Notifier thread %s did not finish within 5 minutes' % t.name)
 
         return processed_movies
 
