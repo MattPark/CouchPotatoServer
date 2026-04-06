@@ -328,6 +328,12 @@ class Settings(object):
         option = kwargs.get('name')
         value = kwargs.get('value')
 
+        if not section or not option:
+            self.log.warning('Missing section or name parameter in save request')
+            return {
+                'success': False,
+            }
+
         if not self.isOptionWritable(section, option):
             self.log.warning('Option "%s.%s" isn\'t writable', (section, option))
             return {
