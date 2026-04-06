@@ -944,6 +944,7 @@ input[type=text],textarea{-webkit-appearance:none}
 .page.settings .combined_table .api_key,.page.settings .combined_table .name,.page.settings .combined_table .pass_key{width:150px}
 .page.settings .combined_table .extra_score,.page.settings .combined_table .seed_ratio,.page.settings .combined_table .seed_time{width:70px;text-align:center}
 .page.settings .combined_table .custom_tag{width:120px;text-align:center}
+.page.settings .combined_table .custom_categories{width:90px;text-align:center}
 .page.settings .combined_table .ctrlHolder{margin:0 0 0 20px;padding-left:0}
 .page.settings .combined_table .ctrlHolder .delete{display:none;font-size:20px;width:22px;height:22px;line-height:20px;text-align:center;vertical-align:middle}
 .page.settings .combined_table .ctrlHolder:hover .delete{display:inline-block}
