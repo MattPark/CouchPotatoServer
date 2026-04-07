@@ -161,9 +161,13 @@ class Plex(Notification):
 
         Returns: {success, auth_url, pin_id}
         """
+        # Regenerate client_id if it was wiped (e.g. user X-deleted the
+        # provider then re-enabled it — removeInstance clears all config).
+        self._ensureClientId()
         client_id = self.conf('client_id')
         if not client_id:
-            return {'success': False, 'message': 'No client ID — restart CouchPotato'}
+            log.error('Plex: failed to generate client_id')
+            return {'success': False, 'message': 'Failed to generate client ID'}
 
         headers = self._plexHeaders()
         headers['Content-Type'] = 'application/x-www-form-urlencoded'

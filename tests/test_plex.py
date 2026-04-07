@@ -212,11 +212,37 @@ class TestServerRequest:
 # ---------------------------------------------------------------------------
 
 class TestStartAuth:
-    def test_no_client_id(self, plex_provider):
+    def test_regenerates_client_id_when_empty(self, plex_provider):
+        """If client_id was wiped (e.g. X-delete then re-enable), startAuth
+        regenerates it on the fly instead of erroring."""
         plex_provider._conf_values['client_id'] = ''
+
+        # Mock _ensureClientId to simulate successful generation
+        def mock_ensure():
+            plex_provider._conf_values['client_id'] = 'newly-generated-uuid'
+        plex_provider._ensureClientId = mock_ensure
+
+        with patch('couchpotato.core.notifications.plex.fireEvent') as mock_fire, \
+             patch('couchpotato.core.notifications.plex.req_lib') as mock_req:
+            mock_fire.return_value = '4.3.0'
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {'id': 99, 'code': 'XYZ'}
+            mock_resp.raise_for_status.return_value = None
+            mock_req.post.return_value = mock_resp
+            mock_req.exceptions = req_lib.exceptions
+
+            result = plex_provider.startAuth()
+            assert result['success'] is True
+            assert result['pin_id'] == 99
+
+    def test_error_if_ensure_fails(self, plex_provider):
+        """If _ensureClientId can't generate an ID (broken settings), error."""
+        plex_provider._conf_values['client_id'] = ''
+        plex_provider._ensureClientId = lambda: None  # no-op, doesn't fix it
+
         result = plex_provider.startAuth()
         assert result['success'] is False
-        assert 'client ID' in result['message']
+        assert 'client id' in result['message'].lower()
 
     @patch('couchpotato.core.notifications.plex.fireEvent')
     @patch('couchpotato.core.notifications.plex.req_lib')
