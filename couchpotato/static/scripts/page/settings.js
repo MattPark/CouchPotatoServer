@@ -1735,11 +1735,11 @@ Option.Apprise_urls = new Class({
 		service_wrapper.adopt(service_input, dropdown_list);
 
 		// Column 2: URL builder link
-		var builder_link = new Element('a.apprise-builder-link', {
+		var builder_link = new Element('a.button.apprise-builder-link', {
 			'href': self._getBuilderUrl(schema),
 			'target': '_blank',
 			'title': 'Open URL Builder',
-			'text': 'Build'
+			'text': 'Wizard'
 		});
 
 		// Column 3: URL input
