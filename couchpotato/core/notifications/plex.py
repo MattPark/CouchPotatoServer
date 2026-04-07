@@ -16,7 +16,7 @@ import requests as req_lib
 import xml.etree.ElementTree as etree
 
 from couchpotato.api import addApiView
-from couchpotato.core.event import addEvent
+from couchpotato.core.event import addEvent, fireEvent
 from couchpotato.core.helpers.variable import cleanHost
 from couchpotato.core.logger import CPLog
 from couchpotato.core.notifications.base import Notification
@@ -46,12 +46,15 @@ class Plex(Notification):
     def __init__(self):
         super().__init__()
 
+        # Instance-aware name for API views and config section
+        self._section = self.getName().lower()
+
         # Ensure we have a persistent client identifier
         addEvent('app.load', self._ensureClientId, priority=50)
 
-        # Register PIN auth API endpoints
-        addApiView('plex.start_auth', self.startAuth)
-        addApiView('plex.check_auth', self.checkAuth)
+        # Register PIN auth API endpoints (instance-aware names)
+        addApiView('%s.start_auth' % self._section, self.startAuth)
+        addApiView('%s.check_auth' % self._section, self.checkAuth)
 
         # Library refresh on renamer completion
         addEvent('renamer.after', self.addToLibrary)
@@ -61,16 +64,29 @@ class Plex(Notification):
         if not self.conf('client_id'):
             client_id = str(uuid.uuid4())
             settings = Env.get('settings')
-            settings.set('plex', 'client_id', client_id)
+            settings.set(self._section, 'client_id', client_id)
             settings.save()
             log.info('Plex: generated new client identifier')
+
+    def _getVersion(self):
+        """Get CouchPotato version safely.
+
+        Env.get() does NOT support default values — the second param is as_unicode,
+        not a fallback. Use fireEvent('app.version') which is how the rest of the
+        codebase does it.
+        """
+        try:
+            version = fireEvent('app.version', single=True)
+            return str(version) if version else '4.0'
+        except Exception:
+            return '4.0'
 
     def _plexHeaders(self):
         """Standard headers required by plex.tv API."""
         return {
             'X-Plex-Client-Identifier': self.conf('client_id') or 'couchpotato-unknown',
             'X-Plex-Product': 'CouchPotato',
-            'X-Plex-Version': Env.get('version', '4.0'),
+            'X-Plex-Version': self._getVersion(),
             'Accept': 'application/json',
         }
 
@@ -78,8 +94,9 @@ class Plex(Notification):
         """Build base URL for the local Plex Media Server."""
         host = self.conf('media_server') or 'localhost'
         port = self.conf('media_server_port') or '32400'
+        use_ssl = self.conf('use_https')
 
-        h = cleanHost(host, True, False)
+        h = cleanHost(host, True, ssl=bool(use_ssl))
         h = h.rstrip('/')
         # Add port if not already present
         if ':' not in h.split('//')[-1]:
@@ -214,7 +231,7 @@ class Plex(Notification):
         if auth_token:
             # Save token to config
             settings = Env.get('settings')
-            settings.set('plex', 'auth_token', auth_token)
+            settings.set(self._section, 'auth_token', auth_token)
             settings.save()
             log.info('Plex: successfully authenticated with plex.tv')
             return {'success': True, 'authenticated': True}
@@ -322,7 +339,7 @@ config = [{
             'list': 'notification_providers',
             'name': 'plex',
             'label': 'Plex',
-            'description': 'Refresh Plex library when movies are processed.',
+            'description': 'Refresh <a href="https://plex.tv" target="_blank">Plex</a> library when movies are processed.',
             'options': [
                 {
                     'name': 'enabled',
@@ -333,20 +350,31 @@ config = [{
                     'name': 'media_server',
                     'label': 'Server Host',
                     'default': 'localhost',
-                    'description': 'Hostname or IP of your Plex Media Server.',
+                    'description': 'Your <strong>local</strong> Plex Media Server IP or hostname '
+                                   '(e.g. <code>192.168.1.40</code>). This is NOT plex.tv.',
                 },
                 {
                     'name': 'media_server_port',
                     'label': 'Port',
                     'default': '32400',
                     'type': 'int',
+                    'description': 'Default Plex port is 32400. Only change if you customized it.',
+                },
+                {
+                    'name': 'use_https',
+                    'label': 'Use HTTPS',
+                    'default': 0,
+                    'type': 'bool',
+                    'description': 'Connect to Plex over HTTPS. Only enable if your server requires it.',
                 },
                 {
                     'name': 'auth_token',
                     'label': 'Auth Token',
                     'default': '',
-                    'description': 'Automatically set when you link your Plex account using the button below.',
-                    'advanced': True,
+                    'description': 'Set automatically when you link your Plex account below, or '
+                                   'paste a token manually from '
+                                   '<a href="https://support.plex.tv/articles/204059436/" target="_blank">Plex docs</a>.',
+                    'type': 'plex_auth',
                 },
                 {
                     'name': 'client_id',

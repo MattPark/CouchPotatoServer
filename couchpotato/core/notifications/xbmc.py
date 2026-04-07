@@ -196,7 +196,8 @@ config = [{
             'list': 'notification_providers',
             'name': 'xbmc',
             'label': 'Kodi',
-            'description': 'Send notifications and trigger library scans on <a href="https://kodi.tv" target="_blank">Kodi</a> (v12+).',
+            'description': 'Send notifications and trigger library scans on <a href="https://kodi.tv" target="_blank">Kodi</a> (v12+). '
+                           'Enable HTTP control in Kodi: <em>Settings &gt; Services &gt; Control &gt; Allow remote control via HTTP</em>.',
             'options': [
                 {
                     'name': 'enabled',
@@ -206,23 +207,27 @@ config = [{
                 {
                     'name': 'host',
                     'default': 'localhost:8080',
-                    'description': 'Comma-separated host:port pairs for multiple Kodi instances.',
+                    'description': 'Kodi <code>host:port</code> (default web port is 8080). '
+                                   'For multiple instances, separate with commas: '
+                                   '<code>192.168.1.10:8080, 192.168.1.11:8080</code>',
                 },
                 {
                     'name': 'username',
                     'default': 'kodi',
+                    'description': 'Web server username (set in Kodi under Services &gt; Control).',
                 },
                 {
                     'name': 'password',
                     'default': '',
                     'type': 'password',
+                    'description': 'Web server password.',
                 },
                 {
                     'name': 'only_first',
                     'default': 0,
                     'type': 'bool',
                     'advanced': True,
-                    'description': 'Only scan library on the first host (useful for synced Kodi instances).',
+                    'description': 'Only scan library on the first host (useful when multiple Kodi instances share a database).',
                 },
                 {
                     'name': 'remote_dir_scan',
@@ -230,7 +235,7 @@ config = [{
                     'default': 0,
                     'type': 'bool',
                     'advanced': True,
-                    'description': 'Scan only the new movie folder on remote Kodi instances.',
+                    'description': 'Send the movie folder path to remote Kodi for a path-specific scan instead of a full scan.',
                 },
                 {
                     'name': 'force_full_scan',

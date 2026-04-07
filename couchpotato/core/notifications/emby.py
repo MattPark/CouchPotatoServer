@@ -193,19 +193,21 @@ config = [{
                     'default': 'emby',
                     'type': 'dropdown',
                     'values': [('Emby', 'emby'), ('Jellyfin', 'jellyfin')],
-                    'description': 'Select your media server type.',
+                    'description': 'Select your media server software. This controls the API URL format and auth header style.',
                 },
                 {
                     'name': 'host',
                     'default': 'localhost:8096',
-                    'description': 'Hostname:port of your media server.',
+                    'description': 'Server <code>host:port</code>. Default port is 8096 for Emby, '
+                                   '8096 for Jellyfin. Example: <code>192.168.1.50:8096</code>',
                 },
                 {
                     'name': 'apikey',
                     'label': 'API Key',
                     'default': '',
                     'type': 'password',
-                    'description': 'Found in your server dashboard under Advanced > API Keys.',
+                    'description': '<strong>Emby:</strong> Dashboard &gt; Advanced &gt; API Keys &gt; New API Key.<br>'
+                                   '<strong>Jellyfin:</strong> Dashboard &gt; API Keys &gt; Add.',
                 },
                 {
                     'name': 'force_full_scan',

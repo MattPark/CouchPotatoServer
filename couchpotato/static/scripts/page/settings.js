@@ -322,6 +322,7 @@ Page.Settings = new Class({
 	},
 
 	createList: function(content_container){
+		var self = this;
 		var list_el = new Element('div.option_list').inject(content_container);
 
 		// Build "Add a service" dropdown — populated after all groups are injected
@@ -334,43 +335,111 @@ Page.Settings = new Class({
 				'change': function(){
 					var val = this.get('value');
 					if(!val) return;
-					// Find the fieldset for this provider and enable it
-					var fieldsets = list_el.getElements('fieldset.enabler.disabled');
-					fieldsets.each(function(fs){
-						var label = fs.getElement('h2 .group_label');
-						if(label && label.get('text').trim() === val){
-							var toggle = fs.getElement('.switch input[type=checkbox]');
-							if(toggle){
-								toggle.set('checked', true);
-								toggle.fireEvent('change');
+
+					// Parse the value: "enable:group_label" or "duplicate:provider_type"
+					var parts = val.split(':');
+					var action = parts[0];
+					var target = parts.slice(1).join(':');
+
+					if(action === 'enable'){
+						// Find the fieldset for this provider and enable it
+						var fieldsets = list_el.getElements('fieldset.enabler.disabled');
+						fieldsets.each(function(fs){
+							var label = fs.getElement('h2 .group_label');
+							if(label && label.get('text').trim() === target){
+								var toggle = fs.getElement('.switch input[type=checkbox]');
+								if(toggle){
+									toggle.set('checked', true);
+									toggle.fireEvent('change');
+								}
+								fs.setStyle('display', 'block');
+								fs.removeClass('disabled');
 							}
-							fs.setStyle('display', 'block');
-							fs.removeClass('disabled');
-						}
-					});
+						});
+					}
+					else if(action === 'duplicate'){
+						// Call backend to create a new instance
+						Api.request('notification.add_instance', {
+							'data': {'provider_type': target},
+							'onComplete': function(json){
+								if(json.success){
+									// Reload settings to get the new section rendered
+									// This is the simplest reliable approach since
+									// the settings page Create logic handles all option types
+									self.getData(function(data){
+										self.data = data;
+										// Re-render the page
+										self.content.empty();
+										self.tabs = {};
+										self.lists = {};
+										self.create(data);
+									});
+								} else {
+									alert(json.message || 'Failed to add instance');
+								}
+							}
+						});
+					}
+
 					this.set('value', '');
 				}
 			}
 		}).inject(wrapper);
 
-		// Refresh helper — rebuilds dropdown options from currently-hidden fieldsets
+		// Refresh helper — rebuilds dropdown options
+		// Shows disabled providers to enable, plus all provider types to add duplicates
 		list_el.addEvent('refreshDropdown', function(){
 			dropdown.empty();
 			dropdown.adopt(new Element('option', {'value': '', 'text': 'Add a notification service...'}));
+
+			// Collect disabled providers (can be re-enabled)
 			var fieldsets = list_el.getElements('fieldset.enabler.disabled');
 			fieldsets.each(function(fs){
 				if(fs.getStyle('display') === 'none'){
 					var label = fs.getElement('h2 .group_label');
 					if(label){
+						var name = label.get('text').trim();
 						dropdown.adopt(new Element('option', {
-							'value': label.get('text').trim(),
-							'text': label.get('text').trim()
+							'value': 'enable:' + name,
+							'text': name
 						}));
 					}
 				}
 			});
-			// Hide the dropdown entirely if no disabled providers remain
-			wrapper.setStyle('display', dropdown.getElements('option').length > 1 ? 'block' : 'none');
+
+			// Collect enabled providers (can add duplicates)
+			var enabled_fieldsets = list_el.getElements('fieldset.enabler:not(.disabled)');
+			if(enabled_fieldsets.length > 0){
+				// Add a separator/group for duplicates
+				var optgroup = new Element('optgroup', {'label': 'Add another instance of...'});
+				var seen = {};
+				enabled_fieldsets.each(function(fs){
+					// Get the provider type from the section class
+					var section_class = '';
+					fs.get('class').split(' ').each(function(cls){
+						if(cls.indexOf('section_') === 0){
+							section_class = cls.replace('section_', '');
+						}
+					});
+					// Get base provider type (strip _N suffix for duplicates)
+					var base_type = section_class.replace(/_\d+$/, '');
+					if(base_type && !seen[base_type]){
+						seen[base_type] = true;
+						var label = fs.getElement('h2 .group_label');
+						var display_name = label ? label.get('text').trim().replace(/ #\d+$/, '') : base_type;
+						optgroup.adopt(new Element('option', {
+							'value': 'duplicate:' + base_type,
+							'text': display_name
+						}));
+					}
+				});
+				if(optgroup.getElements('option').length > 0){
+					dropdown.adopt(optgroup);
+				}
+			}
+
+			// Always show the dropdown (there's always something to add)
+			wrapper.setStyle('display', 'block');
 		});
 
 		// Trigger initial refresh after a short delay (fieldsets not yet injected)
@@ -717,6 +786,48 @@ Option.Enabler = new Class({
 		self.parentFieldset = self.el.getParent('fieldset').addClass('enabler');
 		self.parentList = self.parentFieldset.getParent('.option_list');
 		self.el.inject(self.parentFieldset, 'top');
+
+		// Add a visible remove button for providers inside option_list containers
+		if(self.parentList){
+			new Element('a.icon-cancel.remove_provider', {
+				'title': 'Remove this service',
+				'styles': {
+					'float': 'right',
+					'cursor': 'pointer',
+					'font-size': '16px',
+					'line-height': '30px',
+					'opacity': '0.5'
+				},
+				'events': {
+					'mouseenter': function(){ this.setStyle('opacity', '1'); },
+					'mouseleave': function(){ this.setStyle('opacity', '0.5'); },
+					'click': function(e){
+						e.preventDefault();
+						// Check if this is a duplicate instance (section_name ends with _N)
+						var is_duplicate = /_\d+$/.test(self.section);
+						if(is_duplicate){
+							// Remove the entire duplicate instance
+							Api.request('notification.remove_instance', {
+								'data': {'section_name': self.section},
+								'onComplete': function(json){
+									if(json.success){
+										self.parentFieldset.destroy();
+										if(self.parentList){
+											self.parentList.fireEvent('refreshDropdown');
+										}
+									}
+								}
+							});
+						} else {
+							// For base providers, just disable (uncheck toggle)
+							self.input.set('checked', false);
+							self.changed();
+						}
+					}
+				}
+			}).inject(self.parentFieldset.getElement('h2'));
+		}
+
 		self.checkState();
 	}
 
@@ -1398,6 +1509,117 @@ Option.Combined = new Class({
 		self.saveCombined();
 	}
 
+});
+
+Option.Plex_auth = new Class({
+	Extends: Option.String,
+
+	poll_timer: null,
+	poll_interval: 5000,
+	max_polls: 60,
+
+	create: function(){
+		var self = this;
+
+		self.el.adopt(
+			self.createLabel(),
+			self.input = new Element('input', {
+				'type': 'text',
+				'name': self.postName(),
+				'value': self.getSettingValue(),
+				'placeholder': 'Auth token (set automatically or paste manually)'
+			}),
+			self.auth_button = new Element('a.button.plex_auth_button', {
+				'text': 'Link Plex Account',
+				'events': {
+					'click': self.startPlexAuth.bind(self)
+				},
+				'styles': {
+					'display': 'inline-block',
+					'margin-top': '5px',
+					'cursor': 'pointer'
+				}
+			}),
+			self.auth_status = new Element('span.plex_auth_status', {
+				'styles': {
+					'margin-left': '10px',
+					'font-style': 'italic'
+				}
+			})
+		);
+	},
+
+	startPlexAuth: function(e){
+		if(e) e.preventDefault();
+		var self = this;
+
+		self.auth_button.set('text', 'Requesting PIN...');
+		self.auth_button.setStyle('opacity', '0.6');
+		self.auth_status.set('text', '');
+
+		Api.request(self.section + '.start_auth', {
+			'onComplete': function(json){
+				if(json.success){
+					// Open Plex auth page in new tab
+					window.open(json.auth_url, '_blank');
+					self.auth_button.set('text', 'Waiting for approval...');
+					self.auth_status.set('text', 'Complete sign-in in the new tab');
+					self.pollForAuth(json.pin_id, 0);
+				} else {
+					self.auth_button.set('text', 'Link Plex Account');
+					self.auth_button.setStyle('opacity', '1');
+					self.auth_status.set('text', json.message || 'Failed to start auth');
+				}
+			}
+		});
+	},
+
+	pollForAuth: function(pin_id, count){
+		var self = this;
+
+		if(count >= self.max_polls){
+			self.auth_button.set('text', 'Link Plex Account');
+			self.auth_button.setStyle('opacity', '1');
+			self.auth_status.set('text', 'Timed out — try again');
+			return;
+		}
+
+		self.poll_timer = requestTimeout(function(){
+			Api.request(self.section + '.check_auth', {
+				'data': {'pin_id': pin_id},
+				'onComplete': function(json){
+					if(json.success && json.authenticated){
+						// Success! Reload the token value from server
+						self.auth_button.set('text', 'Linked!');
+						self.auth_button.setStyle('opacity', '1');
+						self.auth_status.set('text', 'Plex account linked successfully');
+						self.auth_status.setStyle('color', '#4CAF50');
+						// Refresh the settings to get the new token
+						Api.request('settings', {
+							'onComplete': function(settings_json){
+								try {
+									var token = settings_json.values[self.section].auth_token;
+									self.input.set('value', token || '');
+									self.previous_value = token || '';
+								} catch(ex){}
+							}
+						});
+					} else if(json.success && json.expired){
+						self.auth_button.set('text', 'Link Plex Account');
+						self.auth_button.setStyle('opacity', '1');
+						self.auth_status.set('text', 'PIN expired — try again');
+					} else if(json.success){
+						// Not yet authenticated, keep polling
+						self.pollForAuth(pin_id, count + 1);
+					} else {
+						self.auth_button.set('text', 'Link Plex Account');
+						self.auth_button.setStyle('opacity', '1');
+						self.auth_status.set('text', json.message || 'Error checking auth');
+					}
+				}
+			});
+		}, self.poll_interval);
+	}
 });
 
 var createTooltip = function(description){

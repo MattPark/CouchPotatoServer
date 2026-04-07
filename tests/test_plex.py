@@ -29,8 +29,12 @@ def plex_provider():
             'auth_token': 'test-token-abc',
             'client_id': 'test-client-id-uuid',
             'on_snatch': False,
+            'use_https': 0,
         }
         provider.conf = lambda key, default='': provider._conf_values.get(key, default)
+
+        # Set the section name (normally set in __init__)
+        provider._section = 'plex'
 
         # Mock isDisabled
         provider.isDisabled = lambda: False
@@ -47,6 +51,7 @@ class TestServerUrl:
         url = plex_provider._serverUrl()
         assert 'localhost' in url
         assert '32400' in url
+        assert url.startswith('http://')
 
     def test_custom_host_port(self, plex_provider):
         plex_provider._conf_values['media_server'] = '192.168.1.10'
@@ -63,26 +68,58 @@ class TestServerUrl:
         # Should not have doubled ports
         assert url.count(':') == 2  # http:// + host:port
 
+    def test_use_https(self, plex_provider):
+        """use_https option should produce https:// URL."""
+        plex_provider._conf_values['use_https'] = 1
+        url = plex_provider._serverUrl()
+        assert url.startswith('https://')
+
+    def test_no_https_by_default(self, plex_provider):
+        """Default should be http://."""
+        plex_provider._conf_values['use_https'] = 0
+        url = plex_provider._serverUrl()
+        assert url.startswith('http://')
+
+    def test_host_with_explicit_https_prefix(self, plex_provider):
+        """If user puts https:// in host field, cleanHost preserves it."""
+        plex_provider._conf_values['media_server'] = 'https://secure.plex.local'
+        url = plex_provider._serverUrl()
+        assert 'https://' in url
+
 
 # ---------------------------------------------------------------------------
 # _plexHeaders
 # ---------------------------------------------------------------------------
 
 class TestPlexHeaders:
-    @patch('couchpotato.core.notifications.plex.Env')
-    def test_contains_client_id(self, mock_env, plex_provider):
-        mock_env.get.return_value = '4.3.0'
+    @patch('couchpotato.core.notifications.plex.fireEvent')
+    def test_contains_client_id(self, mock_fire, plex_provider):
+        mock_fire.return_value = '4.3.0'
         headers = plex_provider._plexHeaders()
         assert headers['X-Plex-Client-Identifier'] == 'test-client-id-uuid'
         assert headers['X-Plex-Product'] == 'CouchPotato'
         assert headers['X-Plex-Version'] == '4.3.0'
 
-    @patch('couchpotato.core.notifications.plex.Env')
-    def test_fallback_client_id(self, mock_env, plex_provider):
-        mock_env.get.return_value = '4.3.0'
+    @patch('couchpotato.core.notifications.plex.fireEvent')
+    def test_fallback_client_id(self, mock_fire, plex_provider):
+        mock_fire.return_value = '4.3.0'
         plex_provider._conf_values['client_id'] = ''
         headers = plex_provider._plexHeaders()
         assert headers['X-Plex-Client-Identifier'] == 'couchpotato-unknown'
+
+    @patch('couchpotato.core.notifications.plex.fireEvent')
+    def test_version_fallback_on_none(self, mock_fire, plex_provider):
+        """If fireEvent returns None, version should fall back to '4.0'."""
+        mock_fire.return_value = None
+        headers = plex_provider._plexHeaders()
+        assert headers['X-Plex-Version'] == '4.0'
+
+    @patch('couchpotato.core.notifications.plex.fireEvent')
+    def test_version_fallback_on_exception(self, mock_fire, plex_provider):
+        """If fireEvent raises, version should fall back to '4.0'."""
+        mock_fire.side_effect = Exception('no event handler')
+        headers = plex_provider._plexHeaders()
+        assert headers['X-Plex-Version'] == '4.0'
 
 
 # ---------------------------------------------------------------------------
@@ -95,10 +132,10 @@ class TestServerRequest:
         result = plex_provider._serverRequest('/library/sections')
         assert result is None
 
-    @patch('couchpotato.core.notifications.plex.Env')
+    @patch('couchpotato.core.notifications.plex.fireEvent')
     @patch('couchpotato.core.notifications.plex.req_lib')
-    def test_json_response(self, mock_req, mock_env, plex_provider):
-        mock_env.get.return_value = '4.3.0'
+    def test_json_response(self, mock_req, mock_fire, plex_provider):
+        mock_fire.return_value = '4.3.0'
         mock_resp = MagicMock()
         mock_resp.json.return_value = {'MediaContainer': {'Directory': []}}
         mock_resp.raise_for_status.return_value = None
@@ -108,10 +145,10 @@ class TestServerRequest:
         result = plex_provider._serverRequest('/library/sections')
         assert result == {'MediaContainer': {'Directory': []}}
 
-    @patch('couchpotato.core.notifications.plex.Env')
+    @patch('couchpotato.core.notifications.plex.fireEvent')
     @patch('couchpotato.core.notifications.plex.req_lib')
-    def test_xml_response(self, mock_req, mock_env, plex_provider):
-        mock_env.get.return_value = '4.3.0'
+    def test_xml_response(self, mock_req, mock_fire, plex_provider):
+        mock_fire.return_value = '4.3.0'
         xml_content = b'<MediaContainer><Directory type="movie" key="1" title="Movies"/></MediaContainer>'
         mock_resp = MagicMock()
         mock_resp.content = xml_content
@@ -123,30 +160,30 @@ class TestServerRequest:
         assert result is not None
         assert result.tag == 'MediaContainer'
 
-    @patch('couchpotato.core.notifications.plex.Env')
+    @patch('couchpotato.core.notifications.plex.fireEvent')
     @patch('couchpotato.core.notifications.plex.req_lib')
-    def test_connection_error(self, mock_req, mock_env, plex_provider):
-        mock_env.get.return_value = '4.3.0'
+    def test_connection_error(self, mock_req, mock_fire, plex_provider):
+        mock_fire.return_value = '4.3.0'
         mock_req.request.side_effect = req_lib.exceptions.ConnectionError('refused')
         mock_req.exceptions = req_lib.exceptions
 
         result = plex_provider._serverRequest('/library/sections')
         assert result is None
 
-    @patch('couchpotato.core.notifications.plex.Env')
+    @patch('couchpotato.core.notifications.plex.fireEvent')
     @patch('couchpotato.core.notifications.plex.req_lib')
-    def test_timeout_error(self, mock_req, mock_env, plex_provider):
-        mock_env.get.return_value = '4.3.0'
+    def test_timeout_error(self, mock_req, mock_fire, plex_provider):
+        mock_fire.return_value = '4.3.0'
         mock_req.request.side_effect = req_lib.exceptions.Timeout('timed out')
         mock_req.exceptions = req_lib.exceptions
 
         result = plex_provider._serverRequest('/library/sections')
         assert result is None
 
-    @patch('couchpotato.core.notifications.plex.Env')
+    @patch('couchpotato.core.notifications.plex.fireEvent')
     @patch('couchpotato.core.notifications.plex.req_lib')
-    def test_401_error(self, mock_req, mock_env, plex_provider):
-        mock_env.get.return_value = '4.3.0'
+    def test_401_error(self, mock_req, mock_fire, plex_provider):
+        mock_fire.return_value = '4.3.0'
         mock_response = MagicMock()
         mock_response.status_code = 401
         http_err = req_lib.exceptions.HTTPError(response=mock_response)
@@ -156,10 +193,10 @@ class TestServerRequest:
         result = plex_provider._serverRequest('/library/sections')
         assert result is None
 
-    @patch('couchpotato.core.notifications.plex.Env')
+    @patch('couchpotato.core.notifications.plex.fireEvent')
     @patch('couchpotato.core.notifications.plex.req_lib')
-    def test_text_response(self, mock_req, mock_env, plex_provider):
-        mock_env.get.return_value = '4.3.0'
+    def test_text_response(self, mock_req, mock_fire, plex_provider):
+        mock_fire.return_value = '4.3.0'
         mock_resp = MagicMock()
         mock_resp.text = 'OK'
         mock_resp.raise_for_status.return_value = None
@@ -181,10 +218,10 @@ class TestStartAuth:
         assert result['success'] is False
         assert 'client ID' in result['message']
 
-    @patch('couchpotato.core.notifications.plex.Env')
+    @patch('couchpotato.core.notifications.plex.fireEvent')
     @patch('couchpotato.core.notifications.plex.req_lib')
-    def test_success(self, mock_req, mock_env, plex_provider):
-        mock_env.get.return_value = '4.3.0'
+    def test_success(self, mock_req, mock_fire, plex_provider):
+        mock_fire.return_value = '4.3.0'
         mock_resp = MagicMock()
         mock_resp.json.return_value = {'id': 12345, 'code': 'ABCDE'}
         mock_resp.raise_for_status.return_value = None
@@ -198,20 +235,20 @@ class TestStartAuth:
         assert 'ABCDE' in result['auth_url']
         assert 'test-client-id-uuid' in result['auth_url']
 
-    @patch('couchpotato.core.notifications.plex.Env')
+    @patch('couchpotato.core.notifications.plex.fireEvent')
     @patch('couchpotato.core.notifications.plex.req_lib')
-    def test_pin_request_failure(self, mock_req, mock_env, plex_provider):
-        mock_env.get.return_value = '4.3.0'
+    def test_pin_request_failure(self, mock_req, mock_fire, plex_provider):
+        mock_fire.return_value = '4.3.0'
         mock_req.post.side_effect = req_lib.exceptions.RequestException('network error')
         mock_req.exceptions = req_lib.exceptions
 
         result = plex_provider.startAuth()
         assert result['success'] is False
 
-    @patch('couchpotato.core.notifications.plex.Env')
+    @patch('couchpotato.core.notifications.plex.fireEvent')
     @patch('couchpotato.core.notifications.plex.req_lib')
-    def test_unexpected_response(self, mock_req, mock_env, plex_provider):
-        mock_env.get.return_value = '4.3.0'
+    def test_unexpected_response(self, mock_req, mock_fire, plex_provider):
+        mock_fire.return_value = '4.3.0'
         mock_resp = MagicMock()
         mock_resp.json.return_value = {'unexpected': 'data'}
         mock_resp.raise_for_status.return_value = None
@@ -232,9 +269,10 @@ class TestCheckAuth:
         assert result['success'] is False
 
     @patch('couchpotato.core.notifications.plex.Env')
+    @patch('couchpotato.core.notifications.plex.fireEvent')
     @patch('couchpotato.core.notifications.plex.req_lib')
-    def test_approved(self, mock_req, mock_env, plex_provider):
-        mock_env.get.return_value = '4.3.0'
+    def test_approved(self, mock_req, mock_fire, mock_env, plex_provider):
+        mock_fire.return_value = '4.3.0'
         mock_resp = MagicMock()
         mock_resp.json.return_value = {'authToken': 'my-new-token'}
         mock_resp.raise_for_status.return_value = None
@@ -242,7 +280,7 @@ class TestCheckAuth:
         mock_req.exceptions = req_lib.exceptions
 
         mock_settings = MagicMock()
-        mock_env.get.side_effect = lambda key, *args: mock_settings if key == 'settings' else '4.3.0'
+        mock_env.get.return_value = mock_settings
 
         result = plex_provider.checkAuth(pin_id='12345')
         assert result['success'] is True
@@ -252,10 +290,10 @@ class TestCheckAuth:
         mock_settings.set.assert_called_once_with('plex', 'auth_token', 'my-new-token')
         mock_settings.save.assert_called_once()
 
-    @patch('couchpotato.core.notifications.plex.Env')
+    @patch('couchpotato.core.notifications.plex.fireEvent')
     @patch('couchpotato.core.notifications.plex.req_lib')
-    def test_pending(self, mock_req, mock_env, plex_provider):
-        mock_env.get.return_value = '4.3.0'
+    def test_pending(self, mock_req, mock_fire, plex_provider):
+        mock_fire.return_value = '4.3.0'
         mock_resp = MagicMock()
         mock_resp.json.return_value = {'authToken': None}
         mock_resp.raise_for_status.return_value = None
@@ -267,10 +305,10 @@ class TestCheckAuth:
         assert result['authenticated'] is False
         assert result['expired'] is False
 
-    @patch('couchpotato.core.notifications.plex.Env')
+    @patch('couchpotato.core.notifications.plex.fireEvent')
     @patch('couchpotato.core.notifications.plex.req_lib')
-    def test_expired_pin(self, mock_req, mock_env, plex_provider):
-        mock_env.get.return_value = '4.3.0'
+    def test_expired_pin(self, mock_req, mock_fire, plex_provider):
+        mock_fire.return_value = '4.3.0'
         mock_response = MagicMock()
         mock_response.status_code = 404
         http_err = req_lib.exceptions.HTTPError(response=mock_response)
@@ -282,10 +320,10 @@ class TestCheckAuth:
         assert result['authenticated'] is False
         assert result['expired'] is True
 
-    @patch('couchpotato.core.notifications.plex.Env')
+    @patch('couchpotato.core.notifications.plex.fireEvent')
     @patch('couchpotato.core.notifications.plex.req_lib')
-    def test_network_error(self, mock_req, mock_env, plex_provider):
-        mock_env.get.return_value = '4.3.0'
+    def test_network_error(self, mock_req, mock_fire, plex_provider):
+        mock_fire.return_value = '4.3.0'
         mock_req.get.side_effect = req_lib.exceptions.ConnectionError('refused')
         mock_req.exceptions = req_lib.exceptions
 
