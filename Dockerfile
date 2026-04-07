@@ -31,6 +31,7 @@ RUN \
     python-dateutil \
     "apscheduler>=3.10,<4" \
     html5lib \
+    apprise \
     pyopenssl && \
   echo "**** cleanup ****" && \
   rm -rf /tmp/*

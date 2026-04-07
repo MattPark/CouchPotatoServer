@@ -1,219 +1,191 @@
+"""Kodi (formerly XBMC) integration — notification popups + library scan.
+
+Uses Kodi's JSON-RPC API (v6+, stable since XBMC v12 Frodo, Jan 2013).
+All legacy xbmcHttp and JSON-RPC v2/v4 detection code has been removed —
+no Kodi version in the last 13 years uses those APIs.
+
+API docs: https://kodi.wiki/view/JSON-RPC_API
+"""
+
 import base64
 import json
 import socket
-import traceback
-from urllib.parse import quote as _urllib_quote
 
-from couchpotato.core.helpers.variable import splitString, getTitle
+import requests as req_lib
+
+from couchpotato.core.helpers.variable import splitString
 from couchpotato.core.logger import CPLog
 from couchpotato.core.notifications.base import Notification
-from requests.exceptions import ConnectionError, Timeout
-from requests.packages.urllib3.exceptions import MaxRetryError
-
 
 log = CPLog(__name__)
 
-autoload = 'XBMC'
+autoload = 'Kodi'
+
+# Timeout for all HTTP requests to Kodi (seconds)
+REQUEST_TIMEOUT = 10
 
 
-class XBMC(Notification):
+class Kodi(Notification):
 
     listen_to = ['renamer.after', 'movie.snatched']
-    use_json_notifications = {}
     http_time_between_calls = 0
 
-    def notify(self, message = '', data = None, listener = None):
-        if not data: data = {}
+    def notify(self, message='', data=None, listener=None):
+        if not data:
+            data = {}
 
         hosts = splitString(self.conf('host'))
+        if not hosts:
+            log.warning('Kodi: no hosts configured')
+            return False
 
-        successful = 0
-        max_successful = 0
+        total_success = True
+
         for host in hosts:
+            host = host.strip()
+            if not host:
+                continue
 
-            if self.use_json_notifications.get(host) is None:
-                self.getXBMCJSONversion(host, message = message)
+            # 1) Send notification popup
+            notif_ok = self._sendNotification(host, message)
+            if not notif_ok:
+                total_success = False
 
-            if self.use_json_notifications.get(host):
-                calls = [
-                    ('GUI.ShowNotification', None, {'title': self.default_title, 'message': message, 'image': self.getNotificationImage('small')}),
-                ]
+            # 2) Trigger library scan (if we have a destination directory)
+            if data.get('destination_dir') and (not self.conf('only_first') or hosts.index(host) == 0):
+                scan_params = {}
+                if not self.conf('force_full_scan') and (self.conf('remote_dir_scan') or self._isLocalHost(host)):
+                    scan_params = {'directory': data['destination_dir']}
 
-                if data and data.get('destination_dir') and (not self.conf('only_first') or hosts.index(host) == 0):
-                    param = {}
-                    if not self.conf('force_full_scan') and (self.conf('remote_dir_scan') or socket.getfqdn('localhost') == socket.getfqdn(host.split(':')[0])):
-                        param = {'directory': data['destination_dir']}
+                scan_ok = self._scanLibrary(host, scan_params)
+                if not scan_ok:
+                    total_success = False
 
-                    calls.append(('VideoLibrary.Scan', None, param))
+        return total_success
 
-                max_successful += len(calls)
-                response = self.request(host, calls)
-            else:
-                response = self.notifyXBMCnoJSON(host, {'title': self.default_title, 'message': message})
+    def _isLocalHost(self, host):
+        """Check if host appears to be localhost."""
+        hostname = host.split(':')[0]
+        try:
+            return socket.getfqdn('localhost') == socket.getfqdn(hostname)
+        except Exception:
+            return False
 
-                if data and data.get('destination_dir') and (not self.conf('only_first') or hosts.index(host) == 0):
-                    response += self.request(host, [('VideoLibrary.Scan', None, {})])
-                    max_successful += 1
+    def _buildAuth(self):
+        """Build Basic auth header if credentials are configured."""
+        username = self.conf('username')
+        password = self.conf('password')
+        if not password:
+            return None
+        user = username or 'kodi'
+        # base64.b64encode returns bytes, decode to str for the header
+        creds = base64.b64encode(('%s:%s' % (user, password)).encode('utf-8')).decode('utf-8')
+        return 'Basic %s' % creds
 
-                max_successful += 1
+    def _jsonrpc(self, host, method, params=None):
+        """Send a single JSON-RPC request to a Kodi host.
 
-            try:
-                for result in response:
-                    if result.get('result') and result['result'] == 'OK':
-                        successful += 1
-                    elif result.get('error'):
-                        log.error('Kodi error; %s: %s (%s)', (result['id'], result['error']['message'], result['error']['code']))
+        Args:
+            host: "hostname:port" string
+            method: JSON-RPC method name (e.g. "GUI.ShowNotification")
+            params: dict of method parameters
 
-            except:
-                log.error('Failed parsing results: %s', traceback.format_exc())
+        Returns:
+            dict with JSON-RPC response, or None on error
+        """
+        if params is None:
+            params = {}
 
-        return successful == max_successful
-
-    def getXBMCJSONversion(self, host, message = ''):
-
-        success = False
-
-        # Kodi JSON-RPC version request
-        response = self.request(host, [
-            ('JSONRPC.Version', None, {})
-        ])
-        for result in response:
-            if result.get('result') and type(result['result']['version']).__name__ == 'int':
-                # only v2 and v4 return an int object
-                # v6 (as of XBMC v12(Frodo)) is required to send notifications
-                xbmc_rpc_version = str(result['result']['version'])
-
-                log.debug('Kodi JSON-RPC Version: %s ; Notifications by JSON-RPC only supported for v6 [as of XBMC v12(Frodo)]', xbmc_rpc_version)
-
-                # disable JSON use
-                self.use_json_notifications[host] = False
-
-                # send the text message
-                resp = self.notifyXBMCnoJSON(host, {'title': self.default_title, 'message': message})
-                for r in resp:
-                    if r.get('result') and r['result'] == 'OK':
-                        log.debug('Message delivered successfully!')
-                        success = True
-                        break
-                    elif r.get('error'):
-                        log.error('Kodi error; %s: %s (%s)', (r['id'], r['error']['message'], r['error']['code']))
-                        break
-
-            elif result.get('result') and type(result['result']['version']).__name__ == 'dict':
-                # Kodi JSON-RPC v6 returns an array object containing
-                # major, minor and patch number
-                xbmc_rpc_version = str(result['result']['version']['major'])
-                xbmc_rpc_version += '.' + str(result['result']['version']['minor'])
-                xbmc_rpc_version += '.' + str(result['result']['version']['patch'])
-
-                log.debug('Kodi JSON-RPC Version: %s', xbmc_rpc_version)
-
-                # ok, Kodi version is supported
-                self.use_json_notifications[host] = True
-
-                # send the text message
-                resp = self.request(host, [('GUI.ShowNotification', None, {'title':self.default_title, 'message':message, 'image': self.getNotificationImage('small')})])
-                for r in resp:
-                    if r.get('result') and r['result'] == 'OK':
-                        log.debug('Message delivered successfully!')
-                        success = True
-                        break
-                    elif r.get('error'):
-                        log.error('Kodi error; %s: %s (%s)', (r['id'], r['error']['message'], r['error']['code']))
-                        break
-
-            # error getting version info (we do have contact with Kodi though)
-            elif result.get('error'):
-                log.error('Kodi error; %s: %s (%s)', (result['id'], result['error']['message'], result['error']['code']))
-
-        log.debug('Use JSON notifications: %s ', self.use_json_notifications)
-
-        return success
-
-    def notifyXBMCnoJSON(self, host, data):
-
-        server = 'http://%s/xbmcCmds/' % host
-
-        # Notification(title, message [, timeout , image])
-        cmd = "xbmcHttp?command=ExecBuiltIn(Notification(%s,%s,'',%s))" % (_urllib_quote(getTitle(data)), _urllib_quote(data['message']), _urllib_quote(self.getNotificationImage('medium')))
-        server += cmd
-
-        # I have no idea what to set to, just tried text/plain and seems to be working :)
-        headers = {
-            'Content-Type': 'text/plain',
+        url = 'http://%s/jsonrpc' % host
+        payload = {
+            'jsonrpc': '2.0',
+            'method': method,
+            'params': params,
+            'id': method,
         }
 
-        # authentication support
-        if self.conf('password'):
-            base64string = base64.encodestring('%s:%s' % (self.conf('username'), self.conf('password'))).replace('\n', '')
-            headers['Authorization'] = 'Basic %s' % base64string
+        headers = {'Content-Type': 'application/json'}
+        auth_header = self._buildAuth()
+        if auth_header:
+            headers['Authorization'] = auth_header
 
         try:
-            log.debug('Sending non-JSON-type request to %s: %s', (host, data))
-
-            # response wil either be 'OK':
-            # <html>
-            # <li>OK
-            # </html>
-            #
-            # or 'Error':
-            # <html>
-            # <li>Error:<message>
-            # </html>
-            #
-            response = self.urlopen(server, headers = headers, timeout = 3, show_error = False)
-
-            if 'OK' in response:
-                log.debug('Returned from non-JSON-type request %s: %s', (host, response))
-                # manually fake expected response array
-                return [{'result': 'OK'}]
+            log.debug('Kodi: %s -> %s' % (host, method))
+            resp = req_lib.post(
+                url,
+                headers=headers,
+                data=json.dumps(payload),
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            log.debug('Kodi: %s <- %s' % (host, result.get('result', result.get('error', 'unknown'))))
+            return result
+        except req_lib.exceptions.ConnectionError:
+            log.info('Kodi: cannot connect to %s — is it running?' % host)
+            return None
+        except req_lib.exceptions.Timeout:
+            log.info('Kodi: request timed out for %s' % host)
+            return None
+        except req_lib.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 'unknown'
+            if status == 401:
+                log.error('Kodi: authentication failed for %s — check username/password' % host)
             else:
-                log.error('Returned from non-JSON-type request %s: %s', (host, response))
-                # manually fake expected response array
-                return [{'result': 'Error'}]
+                log.error('Kodi: HTTP %s from %s' % (status, host))
+            return None
+        except ValueError:
+            log.error('Kodi: invalid JSON response from %s' % host)
+            return None
 
-        except (MaxRetryError, Timeout, ConnectionError):
-            log.info2('Couldn\'t send request to Kodi, assuming it\'s turned off')
-            return [{'result': 'Error'}]
-        except:
-            log.error('Failed sending non-JSON-type request to Kodi: %s', traceback.format_exc())
-            return [{'result': 'Error'}]
+    def _sendNotification(self, host, message):
+        """Send a GUI notification popup to a Kodi host."""
+        result = self._jsonrpc(host, 'GUI.ShowNotification', {
+            'title': self.default_title,
+            'message': message,
+            'image': self.getNotificationImage('small'),
+        })
+        if result and result.get('result') == 'OK':
+            log.info('Kodi: notification sent to %s' % host)
+            return True
+        elif result and result.get('error'):
+            err = result['error']
+            log.error('Kodi: notification error on %s: %s (code %s)' % (host, err.get('message', '?'), err.get('code', '?')))
+            return False
+        else:
+            # result is None (connection error already logged)
+            return False
 
-    def request(self, host, do_requests):
-        server = 'http://%s/jsonrpc' % host
+    def _scanLibrary(self, host, params=None):
+        """Trigger a video library scan on a Kodi host."""
+        if params is None:
+            params = {}
 
-        data = []
-        for req in do_requests:
-            method, id, kwargs = req
+        scan_type = 'path-specific' if params.get('directory') else 'full'
+        result = self._jsonrpc(host, 'VideoLibrary.Scan', params)
+        if result and result.get('result') == 'OK':
+            log.info('Kodi: %s library scan triggered on %s' % (scan_type, host))
+            return True
+        elif result and result.get('error'):
+            err = result['error']
+            log.error('Kodi: library scan error on %s: %s (code %s)' % (host, err.get('message', '?'), err.get('code', '?')))
+            return False
+        else:
+            return False
 
-            data.append({
-                'method': method,
-                'params': kwargs,
-                'jsonrpc': '2.0',
-                'id': id if id else method,
-            })
-        data = json.dumps(data)
+    def test(self, **kwargs):
+        """Test Kodi connectivity."""
+        hosts = splitString(self.conf('host'))
+        if not hosts:
+            return {'success': False, 'message': 'No Kodi hosts configured'}
 
-        headers = {
-            'Content-Type': 'application/json',
-        }
-
-        if self.conf('password'):
-            base64string = base64.encodestring('%s:%s' % (self.conf('username'), self.conf('password'))).replace('\n', '')
-            headers['Authorization'] = 'Basic %s' % base64string
-
-        try:
-            log.debug('Sending request to %s: %s', (host, data))
-            response = self.getJsonData(server, headers = headers, data = data, timeout = 3, show_error = False)
-            log.debug('Returned from request %s: %s', (host, response))
-
-            return response
-        except (MaxRetryError, Timeout, ConnectionError):
-            log.info2('Couldn\'t send request to Kodi, assuming it\'s turned off')
-            return []
-        except:
-            log.error('Failed sending request to Kodi: %s', traceback.format_exc())
-            return []
+        log.info('Kodi: running connectivity test')
+        success = self.notify(
+            message=self.test_message,
+            data={},
+            listener='test',
+        )
+        return {'success': success}
 
 
 config = [{
@@ -224,7 +196,7 @@ config = [{
             'list': 'notification_providers',
             'name': 'xbmc',
             'label': 'Kodi',
-            'description': 'v14 (Helix), v15 (Isengard)',
+            'description': 'Send notifications and trigger library scans on <a href="https://kodi.tv" target="_blank">Kodi</a> (v12+).',
             'options': [
                 {
                     'name': 'enabled',
@@ -234,10 +206,11 @@ config = [{
                 {
                     'name': 'host',
                     'default': 'localhost:8080',
+                    'description': 'Comma-separated host:port pairs for multiple Kodi instances.',
                 },
                 {
                     'name': 'username',
-                    'default': 'xbmc',
+                    'default': 'kodi',
                 },
                 {
                     'name': 'password',
@@ -249,7 +222,7 @@ config = [{
                     'default': 0,
                     'type': 'bool',
                     'advanced': True,
-                    'description': 'Only update the first host when movie snatched, useful for synced Kodi',
+                    'description': 'Only scan library on the first host (useful for synced Kodi instances).',
                 },
                 {
                     'name': 'remote_dir_scan',
@@ -257,22 +230,22 @@ config = [{
                     'default': 0,
                     'type': 'bool',
                     'advanced': True,
-                    'description': ('Only scan new movie folder at remote Kodi servers.', 'Useful if the Kodi path is different from the path CPS uses.'),
+                    'description': 'Scan only the new movie folder on remote Kodi instances.',
                 },
                 {
                     'name': 'force_full_scan',
-                    'label': 'Always do a full scan',
+                    'label': 'Full Library Scan',
                     'default': 0,
                     'type': 'bool',
                     'advanced': True,
-                    'description': ('Do a full scan instead of only the new movie.', 'Useful if the Kodi path is different from the path CPS uses.'),
+                    'description': 'Always do a full library scan instead of scanning only the new movie folder.',
                 },
                 {
                     'name': 'on_snatch',
-                    'default': False,
+                    'default': 0,
                     'type': 'bool',
                     'advanced': True,
-                    'description': 'Also send message when movie is snatched.',
+                    'description': 'Also send notification when a movie is snatched.',
                 },
             ],
         }

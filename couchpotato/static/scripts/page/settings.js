@@ -322,7 +322,61 @@ Page.Settings = new Class({
 	},
 
 	createList: function(content_container){
-		return new Element('div.option_list').inject(content_container);
+		var list_el = new Element('div.option_list').inject(content_container);
+
+		// Build "Add a service" dropdown — populated after all groups are injected
+		var wrapper = new Element('div.add_service_wrapper', {
+			'styles': {'padding': '10px 20px', 'border-bottom': '1px solid #ebebeb'}
+		}).inject(list_el, 'top');
+
+		var dropdown = new Element('select.add_service_dropdown', {
+			'events': {
+				'change': function(){
+					var val = this.get('value');
+					if(!val) return;
+					// Find the fieldset for this provider and enable it
+					var fieldsets = list_el.getElements('fieldset.enabler.disabled');
+					fieldsets.each(function(fs){
+						var label = fs.getElement('h2 .group_label');
+						if(label && label.get('text').trim() === val){
+							var toggle = fs.getElement('.switch input[type=checkbox]');
+							if(toggle){
+								toggle.set('checked', true);
+								toggle.fireEvent('change');
+							}
+							fs.setStyle('display', 'block');
+							fs.removeClass('disabled');
+						}
+					});
+					this.set('value', '');
+				}
+			}
+		}).inject(wrapper);
+
+		// Refresh helper — rebuilds dropdown options from currently-hidden fieldsets
+		list_el.addEvent('refreshDropdown', function(){
+			dropdown.empty();
+			dropdown.adopt(new Element('option', {'value': '', 'text': 'Add a notification service...'}));
+			var fieldsets = list_el.getElements('fieldset.enabler.disabled');
+			fieldsets.each(function(fs){
+				if(fs.getStyle('display') === 'none'){
+					var label = fs.getElement('h2 .group_label');
+					if(label){
+						dropdown.adopt(new Element('option', {
+							'value': label.get('text').trim(),
+							'text': label.get('text').trim()
+						}));
+					}
+				}
+			});
+			// Hide the dropdown entirely if no disabled providers remain
+			wrapper.setStyle('display', dropdown.getElements('option').length > 1 ? 'block' : 'none');
+		});
+
+		// Trigger initial refresh after a short delay (fieldsets not yet injected)
+		requestTimeout(function(){ list_el.fireEvent('refreshDropdown'); }, 100);
+
+		return list_el;
 	}
 
 });
@@ -645,8 +699,15 @@ Option.Enabler = new Class({
 
 		self.parentFieldset[ enabled ? 'removeClass' : 'addClass']('disabled');
 
-		//if(self.parentList)
-		//	self.parentFieldset.inject(self.parentList.getElement('h3'), enabled ? 'before' : 'after');
+		// In option_list containers (notifications, providers), completely
+		// hide disabled providers so the list stays clean.  When hidden,
+		// the provider can be re-enabled via the "Add a service" dropdown.
+		if(self.parentList){
+			self.parentFieldset.setStyle('display', enabled ? 'block' : 'none');
+			// Refresh the "add service" dropdown to include/exclude this entry
+			var addDropdown = self.parentList.getElement('.add_service_dropdown');
+			if(addDropdown) self.parentList.fireEvent('refreshDropdown');
+		}
 
 	},
 
