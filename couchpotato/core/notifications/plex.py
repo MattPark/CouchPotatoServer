@@ -49,8 +49,9 @@ class Plex(Notification):
         # Instance-aware name for API views and config section
         self._section = self.getName().lower()
 
-        # Ensure we have a persistent client identifier
-        addEvent('app.load', self._ensureClientId, priority=50)
+        # Generate a persistent client identifier immediately so PIN auth
+        # works right away — even for instances created after app.load.
+        self._ensureClientId()
 
         # Register PIN auth API endpoints (instance-aware names)
         addApiView('%s.start_auth' % self._section, self.startAuth)
