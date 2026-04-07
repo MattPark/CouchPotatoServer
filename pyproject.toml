@@ -45,6 +45,7 @@ line-length = 200
 select = ["E", "F", "W"]
 ignore = [
     "E701",   # multiple statements on one line — original author's style
+    "E722",   # bare except — fixed in 14 critical files, 297 remain in legacy plugins
     "E741",   # ambiguous variable names (l, O, I) — too many, low risk
     "E501",   # line too long — not enforcing in legacy codebase
     "W191",   # tab indentation — a few legacy files use tabs, not worth converting
