@@ -1,6 +1,4 @@
-import mock
 from mock import patch, Mock, MagicMock
-import unittest
 from unittest import TestCase
 
 from couchpotato.core.settings import Settings

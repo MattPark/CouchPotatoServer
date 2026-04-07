@@ -136,7 +136,7 @@ class Searcher(SearcherBase):
             return threed == guess.get('is_3d')
         # If no quality guess, assume not 3d
         else:
-            return threed == False
+            return not threed
 
     def correctYear(self, haystack, year, year_range):
 

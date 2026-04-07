@@ -6,7 +6,6 @@ import json
 import os
 import re
 from urllib import request as urllib2
-from urllib.error import HTTPError, URLError
 
 from couchpotato.core._base.downloader.main import DownloaderBase, ReleaseDownloadList
 from couchpotato.core.helpers.encoding import isInt, sp

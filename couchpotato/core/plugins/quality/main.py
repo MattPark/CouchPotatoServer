@@ -1,7 +1,5 @@
-from math import fabs, ceil
 import traceback
 import re
-import os
 
 from couchpotato.core.db import RecordNotFound
 from couchpotato import get_db

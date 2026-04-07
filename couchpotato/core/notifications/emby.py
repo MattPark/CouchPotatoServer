@@ -33,7 +33,7 @@ class Emby(Notification):
             response.close()
             return True
 
-        except (URLError, IOError) as e:
+        except (URLError, IOError):
             return False
 
     def test(self, **kwargs):
@@ -58,7 +58,7 @@ class Emby(Notification):
                 'success': True
             }
 
-        except (URLError, IOError) as e:
+        except (URLError, IOError):
             return False
 
 

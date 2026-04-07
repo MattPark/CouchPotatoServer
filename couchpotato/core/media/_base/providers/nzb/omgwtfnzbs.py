@@ -1,4 +1,3 @@
-from couchpotato.core.event import fireEvent
 from couchpotato.core.helpers.encoding import toUnicode, tryUrlencode
 from couchpotato.core.helpers.rss import RSS
 from couchpotato.core.helpers.variable import tryInt
@@ -34,7 +33,7 @@ class Base(NZBProvider, RSS):
             'user': self.conf('username', default = ''),
             'api': self.conf('api_key', default = ''),
         })
-        
+
         if len(self.conf('custom_tag')) > 0:
             params = '%s&%s' % (params, self.conf('custom_tag'))
 

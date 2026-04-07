@@ -5,7 +5,7 @@ import traceback
 from couchpotato import get_db
 from couchpotato.api import addApiView
 from couchpotato.core.event import addEvent, fireEvent
-from couchpotato.core.helpers.encoding import toUnicode, ss, sp
+from couchpotato.core.helpers.encoding import ss, sp
 from couchpotato.core.helpers.variable import md5, getExt, isSubFolder
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin

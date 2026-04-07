@@ -98,7 +98,7 @@ class HDTrailers(TrailerProvider):
                 if 'clips' in trtext:
                     break
 
-                if 'trailer' in trtext and not 'clip' in trtext and provider in trtext and not '3d' in trtext:
+                if 'trailer' in trtext and 'clip' not in trtext and provider in trtext and '3d' not in trtext:
                     if 'trailer' not in tr.find('span', 'standardTrailerName').text.lower():
                         continue
                     resolutions = tr.find_all('td', attrs = {'class':'bottomTableResolution'})

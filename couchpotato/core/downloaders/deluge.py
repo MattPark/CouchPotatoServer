@@ -146,7 +146,7 @@ class Deluge(DownloaderBase):
         for torrent_id in queue:
             torrent = queue[torrent_id]
 
-            if not 'hash' in torrent:
+            if 'hash' not in torrent:
                 # When given a list of ids, deluge will return an empty item for a non-existant torrent.
                 continue
 

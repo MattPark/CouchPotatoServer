@@ -1,6 +1,5 @@
 
 import re
-import json
 import traceback
 
 from couchpotato.core.helpers.variable import tryInt, getIdentifier

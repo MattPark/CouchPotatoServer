@@ -15,7 +15,7 @@ class AlloCine(UserscriptBase):
 
     def getMovie(self, url):
 
-        if not 'fichefilm_gen_cfilm' in url:
+        if 'fichefilm_gen_cfilm' not in url:
             return 'Url isn\'t from a movie'
 
         try:

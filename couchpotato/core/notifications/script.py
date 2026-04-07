@@ -1,9 +1,6 @@
-import traceback
 import subprocess
 import os
 
-from couchpotato.core.helpers.encoding import toUnicode
-from couchpotato.core.helpers.variable import getIdentifier
 from couchpotato.api import addApiView
 from couchpotato.core.event import addEvent
 from couchpotato.core.logger import CPLog

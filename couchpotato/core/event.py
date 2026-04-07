@@ -3,7 +3,7 @@ import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from couchpotato.core.helpers.variable import mergeDicts, natsortKey
+from couchpotato.core.helpers.variable import mergeDicts
 from couchpotato.core.logger import CPLog
 
 log = CPLog(__name__)

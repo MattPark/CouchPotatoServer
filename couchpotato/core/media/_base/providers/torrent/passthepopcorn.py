@@ -43,14 +43,14 @@ class Base(TorrentProvider):
         res = self.getJsonData(url)
 
         try:
-            if not 'Movies' in res:
+            if 'Movies' not in res:
                 return
 
             authkey = res['AuthKey']
             passkey = res['PassKey']
 
             for ptpmovie in res['Movies']:
-                if not 'Torrents' in ptpmovie:
+                if 'Torrents' not in ptpmovie:
                     log.debug('Movie %s (%s) has NO torrents', (ptpmovie['Title'], ptpmovie['Year']))
                     continue
 
@@ -103,7 +103,7 @@ class Base(TorrentProvider):
 
     def torrentMeetsQualitySpec(self, torrent, quality):
 
-        if not quality in self.post_search_filters:
+        if quality not in self.post_search_filters:
             return True
 
         reqs = self.post_search_filters[quality].copy()
@@ -116,7 +116,7 @@ class Base(TorrentProvider):
             matches_one = False
             seen_one = False
 
-            if not field in torrent:
+            if field not in torrent:
                 log.debug('Torrent with ID %s has no field "%s"; cannot apply post-search-filter for quality "%s"', (torrent['id'], field, quality))
                 continue
 

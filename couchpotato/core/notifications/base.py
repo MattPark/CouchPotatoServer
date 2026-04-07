@@ -29,7 +29,7 @@ class Notification(Provider):
 
         # Attach listeners
         for listener in self.listen_to:
-            if not listener in self.dont_listen_to:
+            if listener not in self.dont_listen_to:
                 addEvent(listener, self.createNotifyHandler(listener))
 
     def createNotifyHandler(self, listener):

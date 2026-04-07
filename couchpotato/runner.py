@@ -25,7 +25,7 @@ from tornado.httpserver import HTTPServer
 from tornado.web import Application, StaticFileHandler, RedirectHandler
 from couchpotato.core.softchroot import SoftChrootInitError
 try: from tornado.netutil import bind_unix_socket
-except: pass
+except ImportError: pass
 
 def getOptions(args):
 
@@ -132,7 +132,7 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
                     # Delete non zip files
                     if len(ints) != 1:
                         try: os.remove(os.path.join(root, backup_file))
-                        except: pass
+                        except Exception: pass
                     else:
                         existing_backups.append((int(ints[0]), backup_file))
             else:
@@ -226,7 +226,6 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
 
     # Start logging & enable colors
     # noinspection PyUnresolvedReferences
-    import color_logs
     from couchpotato.core.logger import CPLog
     log = CPLog(__name__)
     log.debug('Started with options %s', options)
@@ -240,7 +239,7 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
     except SoftChrootInitError as exc:
         log.error(exc)
         return
-    except:
+    except Exception:
         log.error('Unable to check whether SOFT-CHROOT is defined')
         return
 
@@ -250,7 +249,7 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
         if available_space < 100:
             log.error('Shutting down as CP needs some space to work. You\'ll get corrupted data otherwise. Only %sMB left', available_space)
             return
-    except:
+    except Exception:
         log.error('Failed getting diskspace: %s', traceback.format_exc())
 
     def customwarn(message, category, filename, lineno, file = None, line = None):
@@ -347,7 +346,7 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
 
     # Some logging and fire load event
     try: log.info('Starting server on port %(port)s', config)
-    except: pass
+    except Exception: pass
     fireEventAsync('app.load')
 
     ssl_options = None
@@ -371,7 +370,7 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
 
                 if Env.setting('ipv6', default = False):
                     try: server.listen(config['port'], config['host6'])
-                    except: log.info2('Tried to bind to IPV6 but failed')
+                    except Exception: log.info2('Tried to bind to IPV6 but failed')
 
             loop.start()
             server.stop()
@@ -391,7 +390,7 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
                         return
             except ValueError:
                 return
-            except:
+            except Exception:
                 pass
 
             raise

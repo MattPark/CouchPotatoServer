@@ -108,7 +108,7 @@ class XBMC(MovieMetaData):
             except:
                 pass
 
-        # Release date 
+        # Release date
         try:
             if movie_info.get('released'):
                 el = SubElement(nfoxml, 'premiered')

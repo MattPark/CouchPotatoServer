@@ -80,7 +80,7 @@ class CPLog(object):
                 api_key = self.Env.setting('api_key')
                 if api_key:
                     msg = msg.replace(api_key, 'API_KEY')
-            except:
+            except Exception:
                 pass
 
         return toUnicode(msg)

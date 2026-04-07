@@ -60,7 +60,7 @@ class PlexServer(object):
 
                 try:
                     response = urlopen(req)
-                except URLError as e:
+                except URLError:
                     log.info('Error fetching token from plex.tv: %s', traceback.format_exc())
 
                 try:
@@ -69,7 +69,7 @@ class PlexServer(object):
                     self.plex.conf('auth_token', token)
 
                 except (ValueError, IndexError) as e:
-                    log.info("Error parsing plex.tv response: " + ex(e))
+                    log.info("Error parsing plex.tv response: %s" % str(e))
 
             #Add X-Plex-Token header for myPlex support workaround
             data = self.plex.urlopen('%s/%s?X-Plex-Token=%s' % (

@@ -287,7 +287,7 @@ class Release(Plugin):
                 fireEvent('notify.frontend', type = 'release.manual_download', data = True, message = 'Successfully snatched "%s"' % item['name'])
 
             return {
-                'success': success == True
+                'success': success
             }
 
         except:

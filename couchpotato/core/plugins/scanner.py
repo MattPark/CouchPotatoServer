@@ -334,7 +334,7 @@ class Scanner(Plugin):
         while True and not self.shuttingDown():
             try:
                 identifier, group = movie_files.popitem()
-            except:
+            except KeyError:
                 break
 
             # Check if movie is fresh and maybe still unpacking, ignore files newer than 1 minute
@@ -748,7 +748,7 @@ class Scanner(Plugin):
                             if line.startswith('Reason:'):
                                 reason = line[len('Reason:'):].strip()
                                 break
-                except:
+                except Exception:
                     pass
                 if reason:
                     log.warning('Skipping release "%s": tagged "%s" — %s (file: %s)',
@@ -941,7 +941,7 @@ class Scanner(Plugin):
                         data['aspect'] = round(float(meta.get('resolution_width')) / meta.get('resolution_height', 1), 2)
                     else:
                         data.update(self.getResolution(cur_file))
-                except:
+                except Exception:
                     log.info('Error parsing metadata: %s', cur_file)
                     pass
 
@@ -1060,7 +1060,7 @@ class Scanner(Plugin):
             # Audio codec
             ac = p.audio[0].codec
             try: ac = self.audio_codec_map.get(p.audio[0].codec)
-            except: pass
+            except Exception: pass
 
             # Find title in video headers
             titles = []
@@ -1068,14 +1068,14 @@ class Scanner(Plugin):
             try:
                 if p.title and self.findYear(p.title):
                     titles.append(ss(p.title))
-            except:
+            except Exception:
                 log.error('Failed getting title from meta: %s', traceback.format_exc())
 
             for video in p.video:
                 try:
                     if video.title and self.findYear(video.title):
                         titles.append(ss(video.title))
-                except:
+                except Exception:
                     log.error('Failed getting title from meta: %s', traceback.format_exc())
 
             return {
@@ -1090,7 +1090,7 @@ class Scanner(Plugin):
             log.info('Failed to parse MKV metadata (EBML): %s', filename)
         except enzyme.exceptions.NoParserError:
             log.debug('No parser found for %s', filename)
-        except:
+        except Exception:
             log.info('Failed parsing metadata: %s', filename)
 
         return {}
@@ -1113,7 +1113,7 @@ class Scanner(Plugin):
                 for s in detected_subtitles:
                     if s.language and s.path not in paths:
                         detected_languages[s.path] = [s.language]
-        except:
+        except Exception:
             log.debug('Failed parsing subtitle languages for %s: %s', (paths, traceback.format_exc()))
 
         # IDX
@@ -1129,7 +1129,7 @@ class Scanner(Plugin):
                     sub_file = '%s.sub' % os.path.splitext(extra)[0]
                     if len(idx_langs) > 0 and os.path.isfile(sub_file):
                         detected_languages[sub_file] = idx_langs
-            except:
+            except Exception:
                 log.error('Failed parsing subtitle idx for %s: %s', (extra, traceback.format_exc()))
 
         return detected_languages
@@ -1161,7 +1161,7 @@ class Scanner(Plugin):
                         log.debug('Found movie via nfo file: %s', nf)
                         nfo_file = nf
                         break
-            except:
+            except Exception:
                 pass
 
         # Check and see if filenames contains the imdb-id
@@ -1173,7 +1173,7 @@ class Scanner(Plugin):
                         if imdb_id:
                             log.debug('Found movie via imdb in filename: %s', nfo_file)
                             break
-            except:
+            except Exception:
                 pass
 
         # Search based on identifiers
@@ -1182,7 +1182,7 @@ class Scanner(Plugin):
 
                 if len(identifier) > 2:
                     try: filename = list(group['files'].get('movie'))[0]
-                    except: filename = None
+                    except (TypeError, IndexError): filename = None
 
                     name_year = self.getReleaseNameYear(identifier, file_name = filename if not group['is_dvd'] else None)
                     if name_year.get('name') and name_year.get('year'):
@@ -1244,7 +1244,7 @@ class Scanner(Plugin):
             try:
                 db = get_db()
                 return db.get('media', 'imdb-%s' % imdb_id, with_doc = True)['doc']
-            except:
+            except Exception:
                 log.debug('Movie "%s" not in library, just getting info', imdb_id)
                 return {
                     'identifier': imdb_id,
@@ -1268,7 +1268,7 @@ class Scanner(Plugin):
     def removeCPTag(self, name):
         try:
             return re.sub(self.cp_imdb, '', name).strip()
-        except:
+        except Exception:
             pass
         return name
 
@@ -1356,7 +1356,7 @@ class Scanner(Plugin):
         try:
             sz = cached_size_mb if cached_size_mb is not None else self.getFileSize(file)
             return file_size.get('min', 0) < sz < file_size.get('max', 100000)
-        except:
+        except Exception:
             log.error('Couldn\'t get filesize of %s.', file)
 
         return False
@@ -1364,7 +1364,7 @@ class Scanner(Plugin):
     def getFileSize(self, file):
         try:
             return os.path.getsize(file) / 1024 / 1024
-        except:
+        except OSError:
             return None
 
     def createStringIdentifier(self, file_path, folder = '', exclude_filename = False):
@@ -1382,7 +1382,7 @@ class Scanner(Plugin):
         try:
             path_split = splitString(identifier, os.path.sep)
             identifier = path_split[-2] if len(path_split) > 1 and len(path_split[-2]) > len(path_split[-1]) else path_split[-1] # Only get filename
-        except: pass
+        except Exception: pass
 
         # multipart
         identifier = self.removeMultipart(identifier)
@@ -1408,7 +1408,7 @@ class Scanner(Plugin):
         # Remove duplicates
         out = []
         for word in identifier.split():
-            if not word in out:
+            if word not in out:
                 out.append(word)
 
         identifier = ' '.join(out)
@@ -1422,7 +1422,7 @@ class Scanner(Plugin):
                 found = re.sub(regex, '', name)
                 if found != name:
                     name = found
-            except:
+            except Exception:
                 pass
         return name
 
@@ -1433,7 +1433,7 @@ class Scanner(Plugin):
                 if found:
                     return found.group(1)
                 return 1
-            except:
+            except Exception:
                 pass
         return 1
 
@@ -1442,7 +1442,7 @@ class Scanner(Plugin):
         try:
             codec = re.search('[^A-Z0-9](?P<codec>' + '|'.join(codecs) + ')[^A-Z0-9]', filename, re.I)
             return (codec and codec.group('codec')) or ''
-        except:
+        except Exception:
             return ''
 
     def getResolution(self, filename):
@@ -1450,7 +1450,7 @@ class Scanner(Plugin):
             for key in self.resolutions:
                 if key in filename.lower() and key != 'default':
                     return self.resolutions[key]
-        except:
+        except Exception:
             pass
 
         return self.resolutions['default']
@@ -1459,7 +1459,7 @@ class Scanner(Plugin):
         try:
             match = re.findall(r'\-([A-Z0-9]+)[\.\/]', file, re.I)
             return match[-1] or ''
-        except:
+        except Exception:
             return ''
 
     def getSourceMedia(self, file):
@@ -1498,7 +1498,7 @@ class Scanner(Plugin):
                         'name': guessit.get('title'),
                         'year': guessit.get('year'),
                     }
-            except:
+            except Exception:
                 log.debug('Could not detect via guessit "%s": %s', (file_name, traceback.format_exc()))
 
         # Backup to simple
@@ -1523,7 +1523,7 @@ class Scanner(Plugin):
                         'name': movie_name,
                         'year': int(year),
                     }
-            except:
+            except Exception:
                 pass
 
         if not cp_guess:  # Split name on multiple spaces
@@ -1533,7 +1533,7 @@ class Scanner(Plugin):
                     'name': movie_name,
                     'year': int(year) if movie_name[:4] != year else 0,
                 }
-            except:
+            except Exception:
                 pass
 
         if cp_guess.get('year') == guess.get('year') and len(cp_guess.get('name', '')) > len(guess.get('name', '')):

@@ -1,6 +1,6 @@
 import traceback
 
-from couchpotato.core.event import fireEvent, addEvent
+from couchpotato.core.event import addEvent
 from couchpotato.core.logger import CPLog
 from couchpotato.core.notifications.base import Notification
 from couchpotato.environment import Env

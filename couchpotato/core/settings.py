@@ -1,7 +1,5 @@
-from __future__ import with_statement
 import configparser
 import traceback
-from hashlib import md5
 
 from couchpotato.api import addApiView
 from couchpotato.core.event import addEvent, fireEvent
@@ -141,7 +139,7 @@ class Settings(object):
             else:
                 return self.getUnicode(section, option)
 
-        except:
+        except Exception:
             return default
 
     def delete(self, option = '', section = 'core'):
@@ -162,19 +160,19 @@ class Settings(object):
     def getBool(self, section, option):
         try:
             return self.p.getboolean(section, option)
-        except:
+        except ValueError:
             return self.p.get(section, option) == 1
 
     def getInt(self, section, option):
         try:
             return self.p.getint(section, option)
-        except:
+        except ValueError:
             return tryInt(self.p.get(section, option))
 
     def getFloat(self, section, option):
         try:
             return self.p.getfloat(section, option)
-        except:
+        except ValueError:
             return tryFloat(self.p.get(section, option))
 
     def getDirectories(self, section, option):
@@ -226,13 +224,13 @@ class Settings(object):
                 # chrootify directory before sending to UI:
                 if (self.getType(section, option_name) == 'directory') and value:
                     try: value = soft_chroot.abs2chroot(value)
-                    except: value = ""
+                    except Exception: value = ""
                 # chrootify directories before sending to UI:
                 if (self.getType(section, option_name) == 'directories'):
                     if (not value):
                         value = []
                     try : value = list(map(soft_chroot.abs2chroot, value))
-                    except : value = []
+                    except Exception: value = []
 
                 values[section][option_name] = value
 
@@ -259,7 +257,7 @@ class Settings(object):
     def getType(self, section, option):
         tp = None
         try: tp = self.types[section][option]
-        except: tp = 'str' if not tp else tp
+        except KeyError: tp = 'str' if not tp else tp
         return tp
 
     def addOptions(self, section_name, options):
@@ -372,7 +370,7 @@ class Settings(object):
         meta = 'section_hidden' + self.optionMetaSuffix()
         try:
             return not self.p.getboolean(section, meta)
-        except: pass
+        except Exception: pass
 
         # by default - every section is readable:
         return True
@@ -426,7 +424,7 @@ class Settings(object):
         except ValueError:
             propert = db.get('property', identifier)
             fireEvent('database.delete_corrupted', propert.get('_id'))
-        except:
+        except Exception:
             self.log.debug('Property "%s" doesn\'t exist: %s', (identifier, traceback.format_exc(0)))
 
         return prop
@@ -443,7 +441,7 @@ class Settings(object):
                 'value': toUnicode(value),
             })
             db.update(p['doc'])
-        except:
+        except Exception:
             db.insert({
                 '_t': 'property',
                 'identifier': identifier,

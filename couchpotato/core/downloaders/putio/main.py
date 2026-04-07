@@ -1,7 +1,6 @@
 from couchpotato.api import addApiView
 from couchpotato.core.event import addEvent, fireEventAsync
 from couchpotato.core._base.downloader.main import DownloaderBase, ReleaseDownloadList
-from couchpotato.core.helpers.variable import cleanHost
 from couchpotato.core.logger import CPLog
 from couchpotato.environment import Env
 from pio import api as pio
@@ -98,7 +97,7 @@ class PutIO(DownloaderBase):
         except:
             return 'redirect', Env.get('web_base') + 'settings/downloaders/'
         log.debug('oauth_token is: %s', oauth_token)
-        self.conf('oauth_token', value = oauth_token);
+        self.conf('oauth_token', value = oauth_token)
         return 'redirect', Env.get('web_base') + 'settings/downloaders/'
 
     def getAllDownloadStatus(self, ids):
@@ -108,17 +107,17 @@ class PutIO(DownloaderBase):
 
         transfers = client.Transfer.list()
 
-        log.debug(transfers);
+        log.debug(transfers)
         release_downloads = ReleaseDownloadList(self)
         for t in transfers:
             if t.id in ids:
 
                 log.debug('downloading list is %s', self.downloading_list)
-                if t.status == "COMPLETED" and self.conf('download') == False :
+                if t.status == "COMPLETED" and not self.conf('download') :
                     status = 'completed'
 
                 # So check if we are trying to download something
-                elif t.status == "COMPLETED" and self.conf('download') == True:
+                elif t.status == "COMPLETED" and self.conf('download'):
                       # Assume we are done
                       status = 'completed'
                       if not self.downloading_list:

@@ -1,4 +1,4 @@
-from couchpotato.core.helpers.variable import getTitle, getIdentifier
+from couchpotato.core.helpers.variable import getIdentifier
 from couchpotato.core.logger import CPLog
 from couchpotato.core.media.movie.providers.automation.trakt.main import TraktBase
 from couchpotato.core.notifications.base import Notification

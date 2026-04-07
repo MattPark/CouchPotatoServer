@@ -2,11 +2,9 @@ import ctypes
 import os
 import string
 import traceback
-import time
 
 from couchpotato import CPLog
 from couchpotato.api import addApiView
-from couchpotato.core.event import addEvent
 from couchpotato.core.helpers.encoding import sp, ss, toUnicode
 from couchpotato.core.helpers.variable import getUserDir
 from couchpotato.core.plugins.base import Plugin
@@ -79,7 +77,7 @@ class FileBrowser(Plugin):
     def view(self, path = '/', show_hidden = True, **kwargs):
 
         soft_chroot = Env.get('softchroot')
-        
+
         home = getUserDir()
         if soft_chroot.enabled:
             if not soft_chroot.is_subdir(home):

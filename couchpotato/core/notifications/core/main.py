@@ -11,7 +11,6 @@ from couchpotato.core.helpers.encoding import toUnicode
 from couchpotato.core.helpers.variable import tryInt, splitString
 from couchpotato.core.logger import CPLog
 from couchpotato.core.notifications.base import Notification
-from couchpotato.environment import Env
 from tornado.ioloop import IOLoop
 
 
@@ -251,7 +250,7 @@ class CoreNotifier(Notification):
                     doc = db.get('id', n.get('_id'))
                     if doc.get('time') > (time.time() - 604800):
                         messages.append(doc)
-                except RecordDeleted:
+                except Exception:
                     pass
 
         return {

@@ -7,7 +7,6 @@ from urllib.parse import unquote as _urllib_unquote
 
 from couchpotato.core.helpers.request import getParams
 from couchpotato.core.logger import CPLog
-from tornado.ioloop import IOLoop
 from tornado.web import RequestHandler
 
 

@@ -28,7 +28,7 @@ class Discord(Notification):
         try:
             r = requests.post(self.conf('webhook_url'), data=json.dumps(dict(content=message, username=self.conf('bot_name'), avatar_url=self.conf('avatar_url'), tts=self.conf('discord_tts'))), headers=headers)
             r.status_code
-        except Exception as e:
+        except Exception:
             log.warning('Error Sending Discord response error code: {0}'.format(r.status_code))
             return False
         return True

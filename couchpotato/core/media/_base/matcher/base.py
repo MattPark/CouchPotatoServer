@@ -58,7 +58,7 @@ class MatcherBase(Plugin):
         if not value:
             return value
 
-        if isinstance(value, basestring):
+        if isinstance(value, str):
             return simplifyString(value)
 
         if isinstance(value, list):

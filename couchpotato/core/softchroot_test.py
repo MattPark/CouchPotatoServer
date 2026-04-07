@@ -1,7 +1,4 @@
-import sys
 import os
-import logging
-import unittest
 from unittest import TestCase
 
 from couchpotato.core.softchroot import SoftChroot

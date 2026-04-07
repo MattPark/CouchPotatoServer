@@ -51,7 +51,7 @@ class Goodfilms(Automation):
                     'year': movie['data-film-year']
                 })
 
-            if not 'next page' in data.lower():
+            if 'next page' not in data.lower():
                 break
 
             page += 1

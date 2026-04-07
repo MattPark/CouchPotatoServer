@@ -1,7 +1,7 @@
 import traceback
 
 from couchpotato.core.helpers.encoding import toUnicode
-from couchpotato.core.helpers.variable import getIdentifier, getTitle
+from couchpotato.core.helpers.variable import getTitle
 from couchpotato.core.logger import CPLog
 from couchpotato.core.notifications.base import Notification
 

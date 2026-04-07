@@ -2,7 +2,6 @@
 import os
 
 import mock
-import unittest
 from unittest import TestCase
 
 
@@ -12,7 +11,7 @@ from couchpotato.core.softchroot import SoftChroot
 
 CHROOT_DIR = '/tmp/'
 
-# 'couchpotato.core.plugins.browser.Env', 
+# 'couchpotato.core.plugins.browser.Env',
 @mock.patch('couchpotato.core.plugins.browser.Env', name='EnvMock')
 class FileBrowserChrootedTest(TestCase):
 

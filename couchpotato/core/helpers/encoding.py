@@ -53,18 +53,18 @@ def toUnicode(original, *args):
                 try:
                     from couchpotato.environment import Env
                     return original.decode(Env.get("encoding"))
-                except:
+                except (UnicodeDecodeError, ImportError):
                     try:
                         from chardet import detect
                         detected = detect(original)
                         if detected.get('confidence', 0) > 0.8:
                             return original.decode(detected.get('encoding'))
-                    except:
+                    except Exception:
                         pass
                     return original.decode('utf-8', 'replace')
         else:
             return str(original)
-    except:
+    except Exception:
         log.error('Unable to decode value "%s..." : %s ', (repr(original)[:20], traceback.format_exc()))
         return 'ERROR DECODING STRING'
 
@@ -109,7 +109,7 @@ def ek(original, *args):
         try:
             from couchpotato.environment import Env
             return original.decode(Env.get('encoding'), 'ignore')
-        except:
+        except (UnicodeDecodeError, ImportError):
             return original.decode('utf-8', 'ignore')
     return str(original) if not isinstance(original, str) else original
 

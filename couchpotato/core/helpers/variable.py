@@ -41,7 +41,7 @@ def getUserDir():
         import pwd
         if not os.environ['HOME']:
             os.environ['HOME'] = sp(pwd.getpwuid(os.geteuid()).pw_dir)
-    except:
+    except ImportError:
         pass
 
     return sp(os.path.expanduser('~'))
@@ -158,7 +158,7 @@ def cleanHost(host, protocol = True, ssl = False, username = None, password = No
     'localhost:80'
     """
 
-    if not '://' in host and protocol:
+    if '://' not in host and protocol:
         host = ('https://' if ssl else 'http://') + host
 
     if not protocol:
@@ -171,7 +171,7 @@ def cleanHost(host, protocol = True, ssl = False, username = None, password = No
                 log.error('Cleanhost error: auth already defined in url: %s, please remove BasicAuth from url.', host)
             else:
                 host = host.replace('://', '://%s:%s@' % (username, password), 1)
-        except:
+        except Exception:
             pass
 
     host = host.rstrip('/ ')
@@ -222,7 +222,7 @@ def nativeImdbId(imdb_id):
 
 def tryInt(s, default = 0):
     try: return int(s)
-    except: return default
+    except ValueError: return default
 
 
 def tryFloat(s):
@@ -231,7 +231,7 @@ def tryFloat(s):
             return float(s) if '.' in s else tryInt(s)
         else:
             return float(s)
-    except: return 0
+    except ValueError: return 0
 
 
 def natsortKey(string_):
@@ -267,7 +267,7 @@ def getTitle(media_dict):
             return media_info['titles'][0]
         log.error('Could not get title for %s', getIdentifier(media_dict))
         return None
-    except:
+    except Exception:
         log.error('Could not get title for library item: %s', media_dict)
         return None
 
@@ -354,7 +354,7 @@ def removePyc(folder, only_excess = True, show_logs = True):
             if show_logs: log.debug('Removing old PYC file: %s', full_path)
             try:
                 os.remove(full_path)
-            except:
+            except OSError:
                 log.error('Couldn\'t remove %s: %s', (full_path, traceback.format_exc()))
 
         for dir_name in dirs:
@@ -362,7 +362,7 @@ def removePyc(folder, only_excess = True, show_logs = True):
             if len(os.listdir(full_path)) == 0:
                 try:
                     os.rmdir(full_path)
-                except:
+                except OSError:
                     log.error('Couldn\'t remove empty directory %s: %s', (full_path, traceback.format_exc()))
 
 

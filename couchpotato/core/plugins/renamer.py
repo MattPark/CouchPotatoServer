@@ -12,7 +12,7 @@ from couchpotato.api import addApiView
 from couchpotato.core.event import addEvent, fireEvent, fireEventAsync
 from couchpotato.core.helpers.encoding import toUnicode, ss, sp
 from couchpotato.core.helpers.variable import getExt, mergeDicts, getTitle, \
-    getImdb, link, symlink, tryInt, splitString, fnEscape, isSubFolder, \
+    getImdb, link, symlink, splitString, fnEscape, isSubFolder, \
     getIdentifier, randomString, getFreeSpace, getSize
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
@@ -155,9 +155,9 @@ class Renamer(Plugin):
                 log.info('Processing queued scan request (remaining in queue: %d)' % len(self._scan_queue))
                 try:
                     self._doScan(q_base, q_release, q_to)
-                except:
+                except Exception:
                     log.error('Queued renamer scan failed: %s', traceback.format_exc())
-        except:
+        except Exception:
             log.error('Renamer scan failed: %s', traceback.format_exc())
         finally:
             self.renaming_started = False
@@ -255,7 +255,7 @@ class Renamer(Plugin):
                 try:
                     for root, folders, names in os.walk(media_folder):
                         files.extend([sp(os.path.join(root, name)) for name in names])
-                except:
+                except Exception:
                     log.error('Failed getting files from %s: %s', (media_folder, traceback.format_exc()))
 
                 if not files:
@@ -265,7 +265,7 @@ class Renamer(Plugin):
                     try:
                         contents = os.listdir(media_folder) if os.path.isdir(media_folder) else []
                         log.warning('Directory contents (%d items): %s', (len(contents), contents[:20]))
-                    except:
+                    except Exception:
                         log.warning('Could not list directory: %s' % traceback.format_exc())
                 else:
                     log.info('Found %d file(s) in media folder' % len(files))
@@ -405,7 +405,7 @@ class Renamer(Plugin):
                             log.debug('Setting category destination for "%s": %s' % (media_title, destination))
                         else:
                             log.debug('No category destination found for "%s"' % media_title)
-                    except:
+                    except Exception:
                         log.error('Failed getting category label: %s', traceback.format_exc())
 
 
@@ -467,7 +467,7 @@ class Renamer(Plugin):
                 if self.conf('use_tab_threed') and replacements['3d_type_short']:
                     if 'OU' in replacements['3d_type_short']:
                         replacements['3d_type_short'] = replacements['3d_type_short'].replace('OU','TAB')
-                    
+
 
                 for file_type in group['files']:
 
@@ -599,7 +599,7 @@ class Renamer(Plugin):
                 if media.get('profile_id'):
                     try:
                         profile = db.get('id', media['profile_id'])
-                    except:
+                    except Exception:
                         # Set profile to None as it does not exist anymore
                         mdia = db.get('id', media['_id'])
                         mdia['profile_id'] = None
@@ -723,7 +723,7 @@ class Renamer(Plugin):
 
                             delete_folders.append(parent_dir)
 
-                except:
+                except Exception:
                     log.error('Failed removing %s: %s', (src, traceback.format_exc()))
                     self.tagRelease(group = group, tag = 'failed_remove',
                                     reason = 'Failed removing %s: %s' % (src, traceback.format_exc().strip().split('\n')[-1]))
@@ -755,7 +755,7 @@ class Renamer(Plugin):
                     try:
                         self.moveFile(src, dst, use_default = not is_torrent or self.fileIsAdded(src, group))
                         group['renamed_files'].append(dst)
-                    except:
+                    except Exception:
                         log.error('Failed renaming the file "%s" : %s', (os.path.basename(src), traceback.format_exc()))
                         failed_rename = True
                         rename_error = 'Failed renaming "%s" to "%s": %s' % (src, dst, traceback.format_exc().strip().split('\n')[-1])
@@ -785,7 +785,7 @@ class Renamer(Plugin):
                 log.debug('Removing release %s', release.get('identifier'))
                 try:
                     db.delete(release)
-                except:
+                except Exception:
                     log.error('Failed removing %s: %s', (release, traceback.format_exc()))
 
             if group['dirname'] and group['parentdir'] and not keep_original:
@@ -800,7 +800,7 @@ class Renamer(Plugin):
                     if self.conf('cleanup') or self.conf('move_leftover'):
                         log.info('Deleting folder: %s', group_folder)
                         self.deleteEmptyFolder(group_folder)
-                except:
+                except Exception:
                     log.error('Failed removing %s: %s', (group_folder, traceback.format_exc()))
 
             # Notify on download, search for trailers etc
@@ -808,7 +808,7 @@ class Renamer(Plugin):
             log.info('Renamer complete: %s — %d file(s) renamed successfully', (download_message, len(group['renamed_files'])))
             try:
                 fireEvent('renamer.after', message = download_message, group = group, in_order = True)
-            except:
+            except Exception:
                 log.error('Failed firing (some) of the renamer.after events: %s', traceback.format_exc())
 
             # Break if CP wants to shut down
@@ -918,7 +918,7 @@ Remove it if you want it to be renamed (again, or at least let it try again)
             for filename in ignore_file:
                 try:
                     os.remove(filename)
-                except:
+                except OSError:
                     log.debug('Unable to remove ignore file: %s. Error: %s.' % (filename, traceback.format_exc()))
 
     def hastagRelease(self, release_download, tag = ''):
@@ -968,7 +968,7 @@ Remove it if you want it to be renamed (again, or at least let it try again)
                 try:
                     log.info('Moving "%s" to "%s"', (old, dest))
                     shutil.move(old, dest)
-                except:
+                except Exception:
                     exists = os.path.exists(dest)
                     if exists and os.path.getsize(old) == os.path.getsize(dest):
                         log.error('Successfully moved file "%s", but something went wrong: %s', (dest, traceback.format_exc()))
@@ -985,11 +985,11 @@ Remove it if you want it to be renamed (again, or at least let it try again)
                 log.info('Reverse symlink "%s" to "%s"', (old, dest))
                 try:
                     shutil.move(old, dest)
-                except:
+                except Exception:
                     log.error('Moving "%s" to "%s" went wrong: %s', (old, dest, traceback.format_exc()))
                 try:
                     symlink(dest, old)
-                except:
+                except Exception:
                     log.error('Error while linking "%s" back to "%s": %s', (dest, old, traceback.format_exc()))
             else:
                 log.info('Linking "%s" to "%s"', (old, dest))
@@ -997,7 +997,7 @@ Remove it if you want it to be renamed (again, or at least let it try again)
                 try:
                     log.debug('Hardlinking file "%s" to "%s"...', (old, dest))
                     link(old, dest)
-                except:
+                except OSError:
                     # Try to symlink next
                     log.debug('Couldn\'t hardlink file "%s" to "%s". Symlinking instead. Error: %s.', (old, dest, traceback.format_exc()))
                     shutil.copy(old, dest)
@@ -1006,14 +1006,14 @@ Remove it if you want it to be renamed (again, or at least let it try again)
                         symlink(dest, old_link)
                         os.unlink(old)
                         os.rename(old_link, old)
-                    except:
+                    except OSError:
                         log.error('Couldn\'t symlink file "%s" to "%s". Copied instead. Error: %s. ', (old, dest, traceback.format_exc()))
 
             try:
                 os.chmod(dest, Env.getPermission('file'))
                 if os.name == 'nt' and self.conf('ntfs_permission'):
                     os.popen('icacls "' + dest + '"* /reset /T')
-            except:
+            except OSError:
                 log.debug('Failed setting permissions for file: %s, %s', (dest, traceback.format_exc(1)))
 
             # Touch mtime so quick scans (newer_than filter) will see this file
@@ -1022,9 +1022,9 @@ Remove it if you want it to be renamed (again, or at least let it try again)
             # the next quick scan will still discover the file.
             try:
                 os.utime(dest, None)
-            except:
+            except OSError:
                 log.debug('Failed touching mtime for file: %s, %s', (dest, traceback.format_exc(1)))
-        except:
+        except Exception:
             log.error('Couldn\'t move file "%s" to "%s": %s', (old, dest, traceback.format_exc()))
             raise
 
@@ -1105,7 +1105,7 @@ Remove it if you want it to be renamed (again, or at least let it try again)
                     ds = rel['download_info'].get('status_support')
                     if ds is False or ds == 'False':
                         no_status_support.append(ss(rel['download_info'].get('downloader')))
-            except:
+            except Exception:
                 log.error('Error getting download IDs from database')
                 return False
 
@@ -1249,7 +1249,7 @@ Remove it if you want it to be renamed (again, or at least let it try again)
                         else:
                             scan_required = True
 
-            except:
+            except Exception:
                 log.error('Failed checking for release in downloader: %s', traceback.format_exc())
 
             # The following can either be done here, or inside the scanner if we pass it scan_items in one go
@@ -1273,7 +1273,7 @@ Remove it if you want it to be renamed (again, or at least let it try again)
                 self.scan()
 
             return True
-        except:
+        except Exception:
             log.error('Failed checking snatched: %s', traceback.format_exc())
             return False
         finally:
@@ -1288,7 +1288,7 @@ Remove it if you want it to be renamed (again, or at least let it try again)
         if release_download and release_download.get('id'):
             try:
                 rls = db.get('release_download', '%s-%s' % (release_download.get('downloader'), release_download.get('id')), with_doc = True)['doc']
-            except:
+            except Exception:
                 log.error('Download ID %s from downloader %s not found in releases', (release_download.get('id'), release_download.get('downloader')))
 
         if rls:
@@ -1403,7 +1403,7 @@ Remove it if you want it to be renamed (again, or at least let it try again)
                         if self.conf('unrar_modify_date'):
                             try:
                                 os.utime(extr_file_path, (os.path.getatime(archive['file']), os.path.getmtime(archive['file'])))
-                            except:
+                            except OSError:
                                 log.error('Rar modify date enabled, but failed: %s', traceback.format_exc())
                         extr_files.append(extr_file_path)
                 del rar_handle

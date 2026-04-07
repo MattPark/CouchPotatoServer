@@ -353,8 +353,6 @@ class MediaPlugin(MediaBase):
         """Delete UNKNOWN-titled media that are not real movies.
         Entries with files on disk are SKIPPED — use media.repair_unknown for those.
         Also removes associated files and empty parent directories from disk for fileless entries."""
-        import os
-        import shutil
 
         delete_types = splitString(kwargs.get('delete_types', 'tvEpisode,tvSeries,tvMiniSeries,tvSpecial,tvMovie,short,video,videoGame,deleted,no_imdb,error'))
         dry_run_val = kwargs.get('dry_run', False)
@@ -853,7 +851,7 @@ class MediaPlugin(MediaBase):
                         # Remove profile (no use for in manage)
                         if new_media_status == 'done':
                             media['profile_id'] = None
-                        
+
                         db.update(media)
 
                         fireEvent('media.untag', media['_id'], 'recent', single = True)

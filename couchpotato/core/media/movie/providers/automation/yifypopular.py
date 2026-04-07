@@ -1,11 +1,8 @@
-import traceback
 
 from html.parser import HTMLParser
-from bs4 import BeautifulSoup
 from couchpotato import fireEvent
 from couchpotato.core.logger import CPLog
 from couchpotato.core.helpers.rss import RSS
-from couchpotato.core.helpers.variable import tryInt
 from couchpotato.core.media.movie.providers.automation.base import Automation
 
 log = CPLog(__name__)
@@ -66,7 +63,7 @@ class YTSPopular(Automation, RSS):
                 imdb_id = imdb.get('imdb')
                 if imdb_id:
                     movies.append(imdb_id)
-        
+
         return movies
     def getChartList(self):
         cache_key = 'yts.charts'

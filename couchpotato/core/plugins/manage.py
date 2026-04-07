@@ -7,7 +7,7 @@ from couchpotato import get_db
 from couchpotato.api import addApiView
 from couchpotato.core.event import fireEvent, addEvent, fireEventAsync
 from couchpotato.core.helpers.encoding import sp
-from couchpotato.core.helpers.variable import splitString, getTitle, tryInt, getIdentifier, getFreeSpace
+from couchpotato.core.helpers.variable import getTitle, tryInt, getIdentifier, getFreeSpace
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
 from couchpotato.environment import Env

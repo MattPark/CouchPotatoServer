@@ -1,14 +1,10 @@
 import atexit
 import json
-import os
-import time
 import traceback
 
 from couchpotato import CPLog
 from couchpotato.api import addApiView
-from couchpotato.core.db import RecordNotFound
-from couchpotato.core.event import addEvent, fireEvent
-from couchpotato.core.helpers.encoding import sp
+from couchpotato.core.event import addEvent
 
 
 log = CPLog(__name__)

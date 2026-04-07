@@ -113,10 +113,10 @@ class Plugin(object):
 
                 try:
                     os.chmod(path, Env.getPermission('file'))
-                except:
+                except OSError:
                     log.error('Failed writing permission to file "%s": %s', (path, traceback.format_exc()))
 
-            except:
+            except Exception:
                 log.error('Unable to write file "%s": %s', (path, traceback.format_exc()))
                 if os.path.isfile(path):
                     os.remove(path)
@@ -145,13 +145,13 @@ class Plugin(object):
 
                     try:
                         os.rmdir(subfolder)
-                    except:
+                    except OSError:
                         if show_error:
                             log.info2('Couldn\'t remove directory %s: %s', (subfolder, traceback.format_exc()))
 
         try:
             os.rmdir(folder)
-        except:
+        except OSError:
             if show_error:
                 log.error('Couldn\'t remove empty directory %s: %s', (folder, traceback.format_exc()))
 
@@ -250,7 +250,7 @@ class Plugin(object):
                     if self.http_failed_request[host] > 5 and not isLocalIP(host):
                         self.http_failed_disabled[host] = time.time()
 
-            except:
+            except Exception:
                 log.debug('Failed logging failed requests for %s: %s', (url, traceback.format_exc()))
 
             raise
@@ -285,7 +285,7 @@ class Plugin(object):
                     self.http_last_use_queue[host] = self.http_last_use_queue[host][1:]
                     self.http_last_use[host] = time.time()
                     break
-        except:
+        except Exception:
             log.error('Failed handling waiting call: %s', traceback.format_exc())
             time.sleep(self.http_time_between_calls)
 
@@ -336,7 +336,7 @@ class Plugin(object):
         else:
             try:
                 self._running.remove(value)
-            except:
+            except ValueError:
                 log.error("Something went wrong when finishing the plugin function. Could not find the 'is_running' key")
 
     def getCache(self, cache_key, url = None, **kwargs):
@@ -362,7 +362,7 @@ class Plugin(object):
                 if data and cache_timeout > 0 and use_cache:
                     self.setCache(cache_key, data, timeout = cache_timeout)
                 return data
-            except:
+            except Exception:
                 if not kwargs.get('show_error', True):
                     raise
 
@@ -436,10 +436,10 @@ class Plugin(object):
         if file_too_new:
             try:
                 time_string = time.ctime(file_time[0])
-            except:
+            except (ValueError, OverflowError, IndexError):
                 try:
                     time_string = time.ctime(file_time[1])
-                except:
+                except (ValueError, OverflowError, IndexError):
                     time_string = 'unknown'
 
             return file_too_new, time_string

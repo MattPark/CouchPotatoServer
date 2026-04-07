@@ -395,7 +395,7 @@ class MovieSearcher(SearcherBase, MovieTypeBase):
                 self.single(media, manual = manual, force_download = force_download)
 
                 return True
-            
+
             return False
         except:
             log.error('Failed searching for next release: %s', traceback.format_exc())

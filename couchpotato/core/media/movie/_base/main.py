@@ -5,7 +5,6 @@ from couchpotato.core.db import RecordNotFound
 from couchpotato import get_db
 from couchpotato.api import addApiView
 from couchpotato.core.event import fireEvent, fireEventAsync, addEvent
-from couchpotato.core.helpers.encoding import toUnicode
 from couchpotato.core.helpers.variable import splitString, getTitle, getImdb, getIdentifier
 from couchpotato.core.logger import CPLog
 from couchpotato.core.media.movie import MovieTypeBase
