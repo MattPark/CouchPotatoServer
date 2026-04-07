@@ -990,20 +990,62 @@ class Scanner(Plugin):
 
         return ''
 
+    # Words that should not be treated as edition names when followed by Cut/Edition
+    _edition_exclude = {
+        'blu', 'ray', 'web', 'hd', 'sd', 'uhd', 'dvd', 'bd', 'hdr', 'tax',
+        'pay', 'price', 'budget', 'the', 'a', 'an', 'no', 'rough', 'first',
+        'clean',
+    }
+
     def getEdition(self, filename):
-        """Detect edition/cut info from filename (e.g. Director's Cut, Extended, IMAX)."""
+        """Detect edition/cut info from filename (e.g. Director's Cut, Extended, IMAX).
+
+        Only searches AFTER the year in the filename to avoid false positives
+        when edition words appear in the movie title (e.g. "Redux Redux (2024)").
+        """
         filename = ss(filename)
         words = re.split(r'\W+', filename.lower())
 
+        # Find year position — editions only appear after the year in release names
+        year_idx = 0
+        for i, w in enumerate(words):
+            if re.match(r'^(19|20)\d{2}$', w):
+                year_idx = i
+                break
+
+        # Restrict search to words at/after year position
+        search_words = words[year_idx:]
+        search_joined = '.'.join(search_words)
+
+        # Check known editions first
         for key in self.edition_map:
             tags = self.edition_map.get(key, [])
             for tag in tags:
-                if isinstance(tag, tuple) and '.'.join(tag) in '.'.join(words):
+                if isinstance(tag, tuple) and '.'.join(tag) in search_joined:
                     log.debug('Found edition %s in %s', (key, filename))
                     return key
-                elif isinstance(tag, str) and tag.lower() in words:
+                elif isinstance(tag, str) and tag.lower() in search_words:
                     log.debug('Found edition %s in %s', (key, filename))
                     return key
+
+        # Fallback: catch arbitrary "<Word(s)> Cut" or "<Word(s)> Edition" patterns
+        basename = os.path.basename(filename)
+        # Restrict fallback to after the year too
+        year_match = re.search(r'[\.\s_\-]((?:19|20)\d{2})[\.\s_\-]', basename)
+        search_basename = basename[year_match.start():] if year_match else basename
+        m = re.search(
+            r'[\.\s_\-]((?:[a-z]+[\.\s_\-]){0,2}(?:[a-z]+))[\.\s_\-](cut|edition)(?=[\.\s_\-]|$)',
+            search_basename, re.IGNORECASE
+        )
+        if m:
+            name_part = re.sub(r'[\._\-]', ' ', m.group(1)).strip()
+            kind = m.group(2)
+            # Reject if the word right before Cut/Edition is a known non-edition word
+            last_word = name_part.split()[-1].lower() if name_part else ''
+            if last_word and last_word not in self._edition_exclude:
+                edition = '%s %s' % (name_part.title(), kind.title())
+                log.debug('Found edition (fallback) %s in %s', (edition, filename))
+                return edition
 
         return ''
 
