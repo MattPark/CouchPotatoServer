@@ -198,10 +198,27 @@ class TestRemoveInstanceView:
         assert result['success'] is False
         assert 'required' in result['message']
 
-    def test_cannot_remove_base_provider(self, manager):
-        result = manager.removeInstanceView(section_name='plex')
-        assert result['success'] is False
-        assert 'Cannot remove base' in result['message']
+    def test_remove_base_provider_resets_config(self, manager):
+        """Removing a base provider clears all options and sets enabled=0."""
+        mock_settings = _make_mock_settings(sections=['plex'])
+        # Add some user-configured values to the parser
+        parser = mock_settings.parser()
+        parser.set('plex', 'enabled', '1')
+        parser.set('plex', 'auth_token', 'secret123')
+        parser.set('plex', 'media_server', '192.168.1.40')
+
+        with patch('couchpotato.core.notifications.Env') as mock_env:
+            mock_env.get.return_value = mock_settings
+            result = manager.removeInstanceView(section_name='plex')
+
+        assert result['success'] is True
+        # Section should still exist (not deleted)
+        assert parser.has_section('plex')
+        # All user values should be cleared, only enabled=0 remains
+        assert parser.get('plex', 'enabled') == '0'
+        assert not parser.has_option('plex', 'auth_token')
+        assert not parser.has_option('plex', 'media_server')
+        mock_settings.save.assert_called_once()
 
     @patch('couchpotato.core.notifications.Env')
     def test_successful_removal(self, mock_env, manager):

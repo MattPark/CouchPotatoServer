@@ -356,6 +356,9 @@ Page.Settings = new Class({
 								fs.removeClass('disabled');
 							}
 						});
+						// Refresh dropdown after the fieldset is visible
+						// (checkState's refresh ran before display was set)
+						list_el.fireEvent('refreshDropdown');
 					}
 					else if(action === 'duplicate'){
 						// Call backend to create a new instance
@@ -387,9 +390,10 @@ Page.Settings = new Class({
 		}).inject(wrapper);
 
 		// Refresh helper — rebuilds dropdown options as a single flat list.
-		// Each provider type appears once: if not yet enabled, selecting it
-		// enables the base instance; if already enabled, selecting it creates
-		// a new duplicate instance.
+		// Each provider type appears once: if it has any visible card on the
+		// page (enabled OR disabled-but-toggled-off), selecting it adds a new
+		// duplicate instance.  If all cards for that type are hidden (deleted
+		// or never configured), selecting it re-enables the base instance.
 		list_el.addEvent('refreshDropdown', function(){
 			dropdown.empty();
 			dropdown.adopt(new Element('option', {'value': '', 'text': 'Add a notification service...'}));
@@ -411,23 +415,25 @@ Page.Settings = new Class({
 				var label = fs.getElement('h2 .group_label');
 				var display_name = label ? label.get('text').trim().replace(/ #\d+$/, '') : base_type;
 
-				// Check if this provider type has any enabled instance
-				var has_enabled = all_fieldsets.some(function(fs2){
+				// Check if this provider type has any visible card on the page.
+				// Visible = user can see it (enabled or disabled-via-toggle).
+				// Hidden (display:none) = deleted or never configured.
+				var has_visible = all_fieldsets.some(function(fs2){
 					var sc = '';
 					fs2.get('class').split(' ').each(function(cls){
 						if(cls.indexOf('section_') === 0) sc = cls.replace('section_', '');
 					});
-					return sc.replace(/_\d+$/, '') === base_type && !fs2.hasClass('disabled');
+					return sc.replace(/_\d+$/, '') === base_type && fs2.getStyle('display') !== 'none';
 				});
 
-				if(has_enabled){
-					// Already enabled — selecting adds a duplicate
+				if(has_visible){
+					// At least one visible card — selecting adds another instance
 					dropdown.adopt(new Element('option', {
 						'value': 'duplicate:' + base_type,
 						'text': display_name
 					}));
 				} else {
-					// Not enabled — selecting enables the base instance
+					// All cards hidden/deleted — selecting re-enables the base
 					dropdown.adopt(new Element('option', {
 						'value': 'enable:' + display_name,
 						'text': display_name
@@ -764,14 +770,16 @@ Option.Enabler = new Class({
 
 		self.parentFieldset[ enabled ? 'removeClass' : 'addClass']('disabled');
 
-		// In option_list containers (notifications, providers), completely
-		// hide disabled providers so the list stays clean.  When hidden,
-		// the provider can be re-enabled via the "Add a service" dropdown.
+		// In option_list containers (notifications, providers):
+		// On initial render, hide disabled providers so the list starts clean.
+		// On user toggle, do NOT change visibility — the card stays visible
+		// so the user can easily toggle it back on.
 		if(self.parentList){
-			self.parentFieldset.setStyle('display', enabled ? 'block' : 'none');
+			if(self._initialRender){
+				self.parentFieldset.setStyle('display', enabled ? 'block' : 'none');
+			}
 			// Refresh the "add service" dropdown to include/exclude this entry
-			var addDropdown = self.parentList.getElement('.add_service_dropdown');
-			if(addDropdown) self.parentList.fireEvent('refreshDropdown');
+			self.parentList.fireEvent('refreshDropdown');
 		}
 
 	},
@@ -799,32 +807,32 @@ Option.Enabler = new Class({
 					'mouseleave': function(){ this.setStyle('opacity', '0.5'); },
 					'click': function(e){
 						e.preventDefault();
-						// Check if this is a duplicate instance (section_name ends with _N)
-						var is_duplicate = /_\d+$/.test(self.section);
-						if(is_duplicate){
-							// Remove the entire duplicate instance
-							Api.request('notification.remove_instance', {
-								'data': {'section_name': self.section},
-								'onComplete': function(json){
-									if(json.success){
-										self.parentFieldset.destroy();
-										if(self.parentList){
-											self.parentList.fireEvent('refreshDropdown');
-										}
-									}
+						// Delete this provider instance (works for both base and duplicates)
+						Api.request('notification.remove_instance', {
+							'data': {'section_name': self.section},
+							'onComplete': function(json){
+								if(json.success){
+									// Reload the settings page from the server so
+									// all fieldsets, dropdowns, and values are fresh.
+									var setting_page = App.getPage('Settings');
+									setting_page.getData(function(data){
+										setting_page.data = data;
+										setting_page.content.empty();
+										setting_page.tabs = {};
+										setting_page.lists = {};
+										setting_page.create(data);
+									});
 								}
-							});
-						} else {
-							// For base providers, just disable (uncheck toggle)
-							self.input.set('checked', false);
-							self.changed();
-						}
+							}
+						});
 					}
 				}
 			}).inject(self.parentFieldset.getElement('h2'));
 		}
 
+		self._initialRender = true;
 		self.checkState();
+		delete self._initialRender;
 	}
 
 });

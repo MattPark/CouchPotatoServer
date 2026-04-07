@@ -244,10 +244,15 @@ class NotificationInstanceManager(Plugin):
         }
 
     def removeInstanceView(self, **kwargs):
-        """API endpoint: remove a duplicate notification provider instance.
+        """API endpoint: remove a notification provider instance.
+
+        Works for both base providers (e.g., 'plex') and duplicate instances
+        (e.g., 'plex_2').  Base providers have their config reset to defaults
+        with enabled=0 (the section is kept because the loader recreates it on
+        restart).  Duplicates are fully deleted from config.ini.
 
         Params:
-            section_name: the config.ini section name to remove (e.g., 'plex_2')
+            section_name: the config.ini section name to remove
 
         Returns:
             {success}
@@ -256,27 +261,33 @@ class NotificationInstanceManager(Plugin):
         if not section_name:
             return {'success': False, 'message': 'section_name is required'}
 
-        # Don't allow removing base provider sections (only _N suffixed ones)
-        match = re.match(r'^(.+?)_(\d+)$', section_name)
-        if not match:
-            return {'success': False, 'message': 'Cannot remove base provider: %s' % section_name}
-
-        # Remove from config.ini
         settings = Env.get('settings')
         parser = settings.parser()
-        if parser.has_section(section_name):
-            parser.remove_section(section_name)
-            settings.save()
+        is_duplicate = bool(re.match(r'^(.+?)_(\d+)$', section_name))
 
-        # Remove options metadata
-        if section_name in settings.options:
-            del settings.options[section_name]
+        if is_duplicate:
+            # Duplicate instance: delete section entirely
+            if parser.has_section(section_name):
+                parser.remove_section(section_name)
+                settings.save()
 
-        # Clean up the instance (note: we can't easily unregister events/API views
-        # in the current architecture, but the instance will be disabled since
-        # its config section is gone, so isEnabled() will return False)
-        if section_name in self._instances:
-            del self._instances[section_name]
+            # Remove options metadata so the settings API no longer returns it
+            if section_name in settings.options:
+                del settings.options[section_name]
+
+            # Clean up the runtime instance (events/API views stay registered
+            # but isEnabled() returns False since the config section is gone)
+            if section_name in self._instances:
+                del self._instances[section_name]
+        else:
+            # Base provider: clear all user-configured values, set enabled=0.
+            # The section is kept alive so the loader doesn't crash on restart;
+            # registerDefaults will repopulate defaults on next boot.
+            if parser.has_section(section_name):
+                for option in list(parser.options(section_name)):
+                    parser.remove_option(section_name, option)
+                parser.set(section_name, 'enabled', '0')
+                settings.save()
 
         log.info('Removed notification instance: %s' % section_name)
 
