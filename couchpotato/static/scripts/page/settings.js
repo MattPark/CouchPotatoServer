@@ -1658,7 +1658,7 @@ Option.Apprise_urls = new Class({
 			'events': {
 				'click': function(e){
 					e.preventDefault();
-					self._createRow('', '', true);
+					self._createRow('', '', true, true);
 					self._saveAll();
 				}
 			}
@@ -1697,14 +1697,14 @@ Option.Apprise_urls = new Class({
 				} catch(e){}
 				if(entries && entries.length){
 					entries.each(function(entry){
-						self._createRow(entry.schema || '', entry.url || '', entry.enabled !== false);
+						self._createRow(entry.schema || '', entry.url || '', entry.enabled !== false, entry.on_snatch !== false);
 					});
 				}
 			}
 		});
 	},
 
-	_createRow: function(schema, url, enabled){
+	_createRow: function(schema, url, enabled, on_snatch){
 		var self = this;
 		var row = new Element('div.apprise-row');
 
@@ -1753,7 +1753,20 @@ Option.Apprise_urls = new Class({
 			'keyup': function(){ self._saveAll(); }
 		});
 
-		// Column 4: Test button + result icon
+		// Column 4: On-snatch toggle
+		var snatch_wrapper = new Element('div.apprise-snatch-wrapper', {
+			'title': 'Also notify when a movie is snatched'
+		});
+		var snatch_check = new Element('input', {
+			'type': 'checkbox',
+			'checked': on_snatch !== false,
+			'events': {
+				'change': function(){ self._saveAll(); }
+			}
+		});
+		snatch_wrapper.adopt(snatch_check, new Element('span.apprise-snatch-label', {'text': 'Snatch'}));
+
+		// Column 5: Test button + result icon
 		var test_wrapper = new Element('div.apprise-test-wrapper');
 		var test_result = new Element('span.apprise-test-result');
 		var test_btn = new Element('a.button.apprise-test-btn', {
@@ -1767,7 +1780,7 @@ Option.Apprise_urls = new Class({
 		});
 		test_wrapper.adopt(test_btn, test_result);
 
-		// Column 5: Delete button
+		// Column 6: Delete button
 		var delete_btn = new Element('a.icon-cancel.apprise-delete', {
 			'title': 'Remove',
 			'events': {
@@ -1780,7 +1793,7 @@ Option.Apprise_urls = new Class({
 			}
 		});
 
-		// Column 6: Enable/disable toggle
+		// Column 7: Enable/disable toggle
 		var toggle_wrapper = new Element('label.switch.apprise-toggle');
 		var toggle_input = new Element('input', {
 			'type': 'checkbox',
@@ -1794,7 +1807,7 @@ Option.Apprise_urls = new Class({
 		});
 		toggle_wrapper.adopt(toggle_input, new Element('div.toggle'));
 
-		row.adopt(service_wrapper, builder_link, url_input, test_wrapper, delete_btn, toggle_wrapper);
+		row.adopt(service_wrapper, builder_link, url_input, snatch_wrapper, test_wrapper, delete_btn, toggle_wrapper);
 
 		if(!enabled) row.addClass('apprise-disabled');
 
@@ -1802,6 +1815,7 @@ Option.Apprise_urls = new Class({
 		row.store('schema', schema);
 		row.store('url_input', url_input);
 		row.store('toggle_input', toggle_input);
+		row.store('snatch_input', snatch_check);
 		row.store('service_input', service_input);
 		row.store('builder_link', builder_link);
 
@@ -1902,11 +1916,13 @@ Option.Apprise_urls = new Class({
 		self._rows.each(function(row){
 			var url_input = row.retrieve('url_input');
 			var toggle_input = row.retrieve('toggle_input');
+			var snatch_input = row.retrieve('snatch_input');
 			var schema = row.retrieve('schema') || '';
 			entries.push({
 				'schema': schema,
 				'url': url_input ? url_input.get('value').trim() : '',
-				'enabled': toggle_input ? !!toggle_input.checked : true
+				'enabled': toggle_input ? !!toggle_input.checked : true,
+				'on_snatch': snatch_input ? !!snatch_input.checked : true
 			});
 		});
 		self.input.set('value', JSON.stringify(entries));

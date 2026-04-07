@@ -956,7 +956,7 @@ input[type=text],textarea{-webkit-appearance:none}
 .page.settings .disabled .combined_table,.page.settings .multi_directory.is_empty .delete{display:none}
 .page.settings .combined_table .ctrlHolder.is_empty .delete,.page.settings .combined_table .ctrlHolder.is_empty input[type=checkbox]{visibility:hidden}
 .page.settings .ctrlHolder.apprise_urls{display:block!important;padding:0;border:none}
-.page.settings .apprise-rows{max-height:400px;overflow-y:auto}
+.page.settings .apprise-rows{}
 .page.settings .apprise-row{display:flex;align-items:center;padding:8px 20px;border-bottom:1px solid #ebebeb;gap:8px}
 .dark .page.settings .apprise-row{border-color:#4e4e4e}
 .page.settings .apprise-row.apprise-disabled{opacity:.45}
@@ -971,8 +971,8 @@ input[type=text],textarea{-webkit-appearance:none}
 .dark .page.settings .apprise-dropdown-item{color:#eee}
 .page.settings .apprise-dropdown-item:hover{background:#ebebeb}
 .dark .page.settings .apprise-dropdown-item:hover{background:#4e4e4e}
-.page.settings .apprise-builder-link{flex-shrink:0;font-size:.8em;color:#ac0000;text-decoration:none;white-space:nowrap}
-.dark .page.settings .apprise-builder-link{color:#f85c22}
+.page.settings .apprise-builder-link{flex-shrink:0;font-size:.8em;color:#ac0000;text-decoration:none;white-space:nowrap;padding:4px 6px;border:1px solid #ebebeb;border-radius:3px}
+.dark .page.settings .apprise-builder-link{color:#f85c22;border-color:#4e4e4e}
 .page.settings .apprise-builder-link:hover{text-decoration:underline}
 .page.settings .apprise-url-input{flex:1;min-width:180px;padding:5px 8px;border:1px solid #ebebeb;border-radius:3px;font-size:.85em;font-family:monospace;background:#fff;color:#666;box-sizing:border-box}
 .dark .page.settings .apprise-url-input{border-color:#4e4e4e;background:#2d2d2d;color:#eee}
@@ -984,6 +984,9 @@ input[type=text],textarea{-webkit-appearance:none}
 .page.settings .apprise-delete{cursor:pointer;opacity:.4;font-size:14px;flex-shrink:0}
 .page.settings .apprise-delete:hover{opacity:1}
 .page.settings .apprise-toggle{flex-shrink:0}
+.page.settings .apprise-snatch-wrapper{display:flex;align-items:center;flex-shrink:0;gap:3px;font-size:.75em;white-space:nowrap;color:#666;opacity:.7}
+.dark .page.settings .apprise-snatch-wrapper{color:#eee}
+.page.settings .apprise-snatch-label{cursor:default}
 .page.settings .apprise-footer{padding:8px 20px}
 .page.settings .apprise-add-btn{font-size:.8em!important;padding:4px 12px!important}
 .page.settings .disabled .apprise-rows,.page.settings .disabled .apprise-footer{display:none}

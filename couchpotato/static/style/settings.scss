@@ -531,8 +531,7 @@
 	}
 
 	.apprise-rows {
-		max-height: 400px;
-		overflow-y: auto;
+		/* no overflow — dropdown must escape the container */
 	}
 
 	.apprise-row {
@@ -608,6 +607,10 @@
 		@include theme(color, primary);
 		text-decoration: none;
 		white-space: nowrap;
+		padding: 4px 6px;
+		border: 1px solid transparent;
+		@include theme(border-color, off);
+		border-radius: $border_radius;
 
 		&:hover {
 			text-decoration: underline;
@@ -670,6 +673,21 @@
 
 	.apprise-toggle {
 		flex-shrink: 0;
+	}
+
+	.apprise-snatch-wrapper {
+		display: flex;
+		align-items: center;
+		flex-shrink: 0;
+		gap: 3px;
+		font-size: .75em;
+		white-space: nowrap;
+		@include theme(color, text);
+		opacity: 0.7;
+	}
+
+	.apprise-snatch-label {
+		cursor: default;
 	}
 
 	.apprise-footer {

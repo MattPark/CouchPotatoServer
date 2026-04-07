@@ -146,7 +146,7 @@ def apprise_provider():
     with patch.object(AppriseNotifier, '__init__', lambda self: None):
         provider = AppriseNotifier.__new__(AppriseNotifier)
         provider.default_title = 'CouchPotato'
-        provider._conf_values = {'urls': '', 'on_snatch': False}
+        provider._conf_values = {'urls': ''}
         provider.conf = lambda key, default='': provider._conf_values.get(key, default)
         return provider
 
@@ -444,3 +444,160 @@ class TestAppriseNotify:
             result = apprise_provider.notify(message='test')
             assert result is True
             assert mock_ap.add.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# notify() — per-URL on_snatch filtering
+# ---------------------------------------------------------------------------
+
+class TestAppriseOnSnatch:
+
+    @patch('couchpotato.core.notifications.apprise_notify.AppriseLib')
+    def test_snatch_listener_skips_on_snatch_false(self, mock_apprise_cls, apprise_provider):
+        """When listener is movie.snatched, entries with on_snatch=false are skipped."""
+        apprise_provider._conf_values['urls'] = json.dumps([
+            {'url': 'json://localhost', 'schema': 'json', 'enabled': True, 'on_snatch': True},
+            {'url': 'pover://user@token', 'schema': 'pover', 'enabled': True, 'on_snatch': False},
+            {'url': 'slack://a/b/c', 'schema': 'slack', 'enabled': True, 'on_snatch': True},
+        ])
+
+        mock_ap = MagicMock()
+        mock_ap.add.return_value = True
+        mock_ap.notify.return_value = True
+        mock_apprise_cls.return_value = mock_ap
+
+        result = apprise_provider.notify(message='Snatched!', listener='movie.snatched')
+        assert result is True
+        # Only 2 URLs (json + slack) should be added; pover has on_snatch=False
+        assert mock_ap.add.call_count == 2
+
+    @patch('couchpotato.core.notifications.apprise_notify.AppriseLib')
+    def test_non_snatch_listener_ignores_on_snatch_false(self, mock_apprise_cls, apprise_provider):
+        """For non-snatch listeners, on_snatch=false entries are NOT skipped."""
+        apprise_provider._conf_values['urls'] = json.dumps([
+            {'url': 'json://localhost', 'schema': 'json', 'enabled': True, 'on_snatch': True},
+            {'url': 'pover://user@token', 'schema': 'pover', 'enabled': True, 'on_snatch': False},
+            {'url': 'slack://a/b/c', 'schema': 'slack', 'enabled': True, 'on_snatch': False},
+        ])
+
+        mock_ap = MagicMock()
+        mock_ap.add.return_value = True
+        mock_ap.notify.return_value = True
+        mock_apprise_cls.return_value = mock_ap
+
+        result = apprise_provider.notify(message='Available!', listener='media.available')
+        assert result is True
+        # All 3 URLs should be added — on_snatch is irrelevant for non-snatch listeners
+        assert mock_ap.add.call_count == 3
+
+    @patch('couchpotato.core.notifications.apprise_notify.AppriseLib')
+    def test_snatch_all_on_snatch_false_returns_false(self, mock_apprise_cls, apprise_provider):
+        """If all entries have on_snatch=false and listener is snatch, no URLs -> False."""
+        apprise_provider._conf_values['urls'] = json.dumps([
+            {'url': 'json://localhost', 'schema': 'json', 'enabled': True, 'on_snatch': False},
+            {'url': 'pover://user@token', 'schema': 'pover', 'enabled': True, 'on_snatch': False},
+        ])
+
+        result = apprise_provider.notify(message='Snatched!', listener='movie.snatched')
+        assert result is False
+
+    @patch('couchpotato.core.notifications.apprise_notify.AppriseLib')
+    def test_on_snatch_defaults_to_true(self, mock_apprise_cls, apprise_provider):
+        """Entries without an on_snatch key default to on_snatch=true."""
+        apprise_provider._conf_values['urls'] = json.dumps([
+            {'url': 'json://localhost', 'schema': 'json', 'enabled': True},
+            {'url': 'pover://user@token', 'schema': 'pover', 'enabled': True, 'on_snatch': False},
+        ])
+
+        mock_ap = MagicMock()
+        mock_ap.add.return_value = True
+        mock_ap.notify.return_value = True
+        mock_apprise_cls.return_value = mock_ap
+
+        result = apprise_provider.notify(message='Snatched!', listener='movie.snatched')
+        assert result is True
+        # json entry has no on_snatch key -> defaults to True, pover has on_snatch=False -> skipped
+        assert mock_ap.add.call_count == 1
+
+    @patch('couchpotato.core.notifications.apprise_notify.AppriseLib')
+    def test_on_snatch_combined_with_enabled(self, mock_apprise_cls, apprise_provider):
+        """Both enabled and on_snatch filters apply for snatch listener."""
+        apprise_provider._conf_values['urls'] = json.dumps([
+            {'url': 'json://localhost', 'schema': 'json', 'enabled': True, 'on_snatch': True},
+            {'url': 'pover://user@token', 'schema': 'pover', 'enabled': False, 'on_snatch': True},
+            {'url': 'slack://a/b/c', 'schema': 'slack', 'enabled': True, 'on_snatch': False},
+            {'url': 'tgram://bot@chat', 'schema': 'tgram', 'enabled': False, 'on_snatch': False},
+        ])
+
+        mock_ap = MagicMock()
+        mock_ap.add.return_value = True
+        mock_ap.notify.return_value = True
+        mock_apprise_cls.return_value = mock_ap
+
+        result = apprise_provider.notify(message='Snatched!', listener='movie.snatched')
+        assert result is True
+        # Only json: enabled=True + on_snatch=True passes both filters
+        assert mock_ap.add.call_count == 1
+
+    @patch('couchpotato.core.notifications.apprise_notify.AppriseLib')
+    def test_none_listener_ignores_on_snatch(self, mock_apprise_cls, apprise_provider):
+        """When listener is None (e.g., direct notify call), on_snatch is irrelevant."""
+        apprise_provider._conf_values['urls'] = json.dumps([
+            {'url': 'json://localhost', 'schema': 'json', 'enabled': True, 'on_snatch': False},
+        ])
+
+        mock_ap = MagicMock()
+        mock_ap.add.return_value = True
+        mock_ap.notify.return_value = True
+        mock_apprise_cls.return_value = mock_ap
+
+        result = apprise_provider.notify(message='test', listener=None)
+        assert result is True
+        assert mock_ap.add.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# createNotifyHandler override
+# ---------------------------------------------------------------------------
+
+class TestCreateNotifyHandler:
+
+    def test_handler_always_calls_notify_for_snatch(self, apprise_provider):
+        """The Apprise createNotifyHandler does NOT gate on global on_snatch;
+        it always delegates to _notify, letting notify() handle per-URL filtering."""
+        apprise_provider._notify = MagicMock(return_value=True)
+
+        handler = apprise_provider.createNotifyHandler('movie.snatched')
+        handler(message='Snatched!', group={'identifier': 'tt1234567'})
+
+        apprise_provider._notify.assert_called_once_with(
+            message='Snatched!',
+            data={'identifier': 'tt1234567'},
+            listener='movie.snatched',
+        )
+
+    def test_handler_passes_data_over_group(self, apprise_provider):
+        """When both data and group are provided, data takes precedence."""
+        apprise_provider._notify = MagicMock(return_value=True)
+
+        handler = apprise_provider.createNotifyHandler('media.available')
+        handler(message='Available!', group={'g': 1}, data={'d': 2})
+
+        apprise_provider._notify.assert_called_once_with(
+            message='Available!',
+            data={'d': 2},
+            listener='media.available',
+        )
+
+    def test_handler_defaults_group_to_empty_dict(self, apprise_provider):
+        """When group is None/empty, an empty dict is used."""
+        apprise_provider._notify = MagicMock(return_value=True)
+
+        handler = apprise_provider.createNotifyHandler('media.available')
+        handler(message='Test')
+
+        apprise_provider._notify.assert_called_once_with(
+            message='Test',
+            data={},
+            listener='media.available',
+        )

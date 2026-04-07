@@ -117,6 +117,14 @@ class Apprise(Notification):
         addApiView('apprise.schemas', self.schemasView)
         addApiView('apprise.test_url', self.testUrlView)
 
+    def createNotifyHandler(self, listener):
+        """Override base: don't check global on_snatch — per-URL on_snatch is handled in notify()."""
+        def notify(message=None, group=None, data=None):
+            if not group:
+                group = {}
+            return self._notify(message=message, data=data if data else group, listener=listener)
+        return notify
+
     def schemasView(self, **kwargs):
         """API endpoint: return all available Apprise notification service schemas."""
         try:
@@ -172,12 +180,16 @@ class Apprise(Notification):
             log.warning('Apprise: no notification URLs configured — skipping')
             return False
 
-        # Collect only enabled URLs
+        is_snatch = (listener == 'movie.snatched')
+
+        # Collect only enabled URLs (and respect per-URL on_snatch)
         active_urls = []
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
             if not entry.get('enabled', True):
+                continue
+            if is_snatch and not entry.get('on_snatch', True):
                 continue
             url = entry.get('url', '').strip()
             if url:
@@ -253,13 +265,6 @@ config = [{
                     'label': 'Notification Services',
                     'default': '',
                     'type': 'apprise_urls',
-                },
-                {
-                    'name': 'on_snatch',
-                    'default': 0,
-                    'type': 'bool',
-                    'advanced': True,
-                    'description': 'Also send notification when a movie is snatched.',
                 },
             ],
         }
