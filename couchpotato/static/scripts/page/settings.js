@@ -1658,7 +1658,7 @@ Option.Apprise_urls = new Class({
 			'events': {
 				'click': function(e){
 					e.preventDefault();
-					self._createRow('', '', true, true);
+					self._createRow('', '', true, false);
 					self._saveAll();
 				}
 			}
@@ -1697,7 +1697,7 @@ Option.Apprise_urls = new Class({
 				} catch(e){}
 				if(entries && entries.length){
 					entries.each(function(entry){
-						self._createRow(entry.schema || '', entry.url || '', entry.enabled !== false, entry.on_snatch !== false);
+						self._createRow(entry.schema || '', entry.url || '', entry.enabled !== false, !!entry.on_snatch);
 					});
 				}
 			}
@@ -1754,17 +1754,17 @@ Option.Apprise_urls = new Class({
 		});
 
 		// Column 4: On-snatch toggle
-		var snatch_wrapper = new Element('div.apprise-snatch-wrapper', {
+		var snatch_wrapper = new Element('div.apprise-snatch-wrapper.advanced', {
 			'title': 'Also notify when a movie is snatched'
 		});
 		var snatch_check = new Element('input', {
 			'type': 'checkbox',
-			'checked': on_snatch !== false,
+			'checked': !!on_snatch,
 			'events': {
 				'change': function(){ self._saveAll(); }
 			}
 		});
-		snatch_wrapper.adopt(snatch_check, new Element('span.apprise-snatch-label', {'text': 'Snatch'}));
+		snatch_wrapper.adopt(snatch_check, new Element('span.apprise-snatch-label', {'text': 'On Snatch'}));
 
 		// Column 5: Test button + result icon
 		var test_wrapper = new Element('div.apprise-test-wrapper');
@@ -1922,7 +1922,7 @@ Option.Apprise_urls = new Class({
 				'schema': schema,
 				'url': url_input ? url_input.get('value').trim() : '',
 				'enabled': toggle_input ? !!toggle_input.checked : true,
-				'on_snatch': snatch_input ? !!snatch_input.checked : true
+				'on_snatch': snatch_input ? !!snatch_input.checked : false
 			});
 		});
 		self.input.set('value', JSON.stringify(entries));

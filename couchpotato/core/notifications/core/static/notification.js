@@ -220,6 +220,7 @@ var NotificationBase = new Class({
 			button_name = self.testButtonName(fieldset);
 
 		if(button_name.contains('Notifications')) return;
+		if(button_name.contains('Apprise')) return;
 
 		new Element('.ctrlHolder.test_button').grab(
 			new Element('a.button', {

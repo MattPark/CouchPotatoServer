@@ -189,7 +189,7 @@ class Apprise(Notification):
                 continue
             if not entry.get('enabled', True):
                 continue
-            if is_snatch and not entry.get('on_snatch', True):
+            if is_snatch and not entry.get('on_snatch', False):
                 continue
             url = entry.get('url', '').strip()
             if url:

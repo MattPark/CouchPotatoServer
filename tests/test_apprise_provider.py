@@ -502,11 +502,11 @@ class TestAppriseOnSnatch:
         assert result is False
 
     @patch('couchpotato.core.notifications.apprise_notify.AppriseLib')
-    def test_on_snatch_defaults_to_true(self, mock_apprise_cls, apprise_provider):
-        """Entries without an on_snatch key default to on_snatch=true."""
+    def test_on_snatch_defaults_to_false(self, mock_apprise_cls, apprise_provider):
+        """Entries without an on_snatch key default to on_snatch=false (skipped on snatch)."""
         apprise_provider._conf_values['urls'] = json.dumps([
             {'url': 'json://localhost', 'schema': 'json', 'enabled': True},
-            {'url': 'pover://user@token', 'schema': 'pover', 'enabled': True, 'on_snatch': False},
+            {'url': 'pover://user@token', 'schema': 'pover', 'enabled': True, 'on_snatch': True},
         ])
 
         mock_ap = MagicMock()
@@ -516,7 +516,7 @@ class TestAppriseOnSnatch:
 
         result = apprise_provider.notify(message='Snatched!', listener='movie.snatched')
         assert result is True
-        # json entry has no on_snatch key -> defaults to True, pover has on_snatch=False -> skipped
+        # json entry has no on_snatch key -> defaults to False -> skipped, pover has on_snatch=True -> included
         assert mock_ap.add.call_count == 1
 
     @patch('couchpotato.core.notifications.apprise_notify.AppriseLib')
