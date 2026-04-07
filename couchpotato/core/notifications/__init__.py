@@ -222,6 +222,14 @@ class NotificationInstanceManager(Plugin):
         if provider_type not in registry:
             return {'success': False, 'message': 'Unknown provider type: %s' % provider_type}
 
+        # Check if provider disallows multi-instance
+        entry = registry[provider_type]
+        provider_config = entry.get('config', [])
+        if provider_config:
+            for group in provider_config[0].get('groups', []):
+                if group.get('multi_instance') is False:
+                    return {'success': False, 'message': '%s does not support multiple instances' % provider_type}
+
         section_name = self._nextSectionName(provider_type)
         instance = self._createInstance(provider_type, section_name)
         if not instance:

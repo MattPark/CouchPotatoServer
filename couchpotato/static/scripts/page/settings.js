@@ -182,11 +182,15 @@ Page.Settings = new Class({
 					self.lists[group.list] = self.createList(content_container);
 				}
 
-				// Create the group
-				if(!self.tabs[group.tab].groups[group.name])
-					self.tabs[group.tab].groups[group.name] = self.createGroup(group)
-						.inject(group.list ? self.lists[group.list] : content_container)
-						.addClass('section_'+section_name);
+			// Create the group
+			if(!self.tabs[group.tab].groups[group.name]){
+				var group_el = self.createGroup(group)
+					.inject(group.list ? self.lists[group.list] : content_container)
+					.addClass('section_'+section_name);
+				if(group.multi_instance === false)
+					group_el.set('data-no-duplicate', '1');
+				self.tabs[group.tab].groups[group.name] = group_el;
+			}
 
 				// Create list if needed
 				if(group.type && group.type == 'list'){
@@ -427,11 +431,15 @@ Page.Settings = new Class({
 				});
 
 				if(has_visible){
-					// At least one visible card — selecting adds another instance
-					dropdown.adopt(new Element('option', {
-						'value': 'duplicate:' + base_type,
-						'text': display_name
-					}));
+					// Check if this provider type disallows multi-instance
+					var no_dup = fs.get('data-no-duplicate') === '1';
+					if(!no_dup){
+						// At least one visible card — selecting adds another instance
+						dropdown.adopt(new Element('option', {
+							'value': 'duplicate:' + base_type,
+							'text': display_name
+						}));
+					}
 				} else {
 					// All cards hidden/deleted — selecting re-enables the base
 					dropdown.adopt(new Element('option', {
@@ -1624,6 +1632,291 @@ Option.Plex_auth = new Class({
 			});
 		}, self.poll_interval);
 	}
+});
+
+Option.Apprise_urls = new Class({
+
+	Extends: OptionBase,
+
+	_schemas: null,
+	_rows: [],
+
+	create: function(){
+		var self = this;
+		self.el.addClass('apprise_urls');
+
+		// Hidden input stores the JSON value
+		self.input = new Element('input', {
+			'type': 'hidden',
+			'name': self.postName(),
+			'value': self.getSettingValue() || '[]'
+		});
+
+		self.rows_el = new Element('div.apprise-rows');
+		self.add_btn = new Element('a.button.apprise-add-btn', {
+			'text': '+ Add Service',
+			'events': {
+				'click': function(e){
+					e.preventDefault();
+					self._createRow('', '', true);
+					self._saveAll();
+				}
+			}
+		});
+
+		self.el.adopt(
+			self.input,
+			self.rows_el,
+			new Element('div.apprise-footer').adopt(self.add_btn)
+		);
+	},
+
+	afterInject: function(){
+		var self = this;
+		self._rows = [];
+
+		// Close any open dropdown when clicking elsewhere
+		document.addEvent('click', function(e){
+			self.rows_el.getElements('.apprise-dropdown-list').each(function(dd){
+				var wrapper = dd.getParent('.apprise-service-wrapper');
+				if(wrapper && !wrapper.contains(e.target)){
+					dd.setStyle('display', 'none');
+				}
+			});
+		});
+
+		Api.request('apprise.schemas', {
+			'onComplete': function(json){
+				self._schemas = (json.success ? json.schemas : []);
+
+				// Parse existing value and render rows
+				var entries = [];
+				try {
+					var val = self.getSettingValue();
+					if(val) entries = JSON.parse(val);
+				} catch(e){}
+				if(entries && entries.length){
+					entries.each(function(entry){
+						self._createRow(entry.schema || '', entry.url || '', entry.enabled !== false);
+					});
+				}
+			}
+		});
+	},
+
+	_createRow: function(schema, url, enabled){
+		var self = this;
+		var row = new Element('div.apprise-row');
+
+		// Column 1: Service search/dropdown
+		var service_wrapper = new Element('div.apprise-service-wrapper');
+		var service_input = new Element('input.apprise-service-input', {
+			'type': 'text',
+			'placeholder': 'Search services...',
+			'value': self._getServiceName(schema)
+		});
+		var dropdown_list = new Element('div.apprise-dropdown-list');
+		self._populateDropdown(dropdown_list, service_input, row);
+
+		service_input.addEvents({
+			'focus': function(){
+				dropdown_list.setStyle('display', 'block');
+				self._filterDropdown(dropdown_list, this.get('value'));
+			},
+			'keyup': function(e){
+				if(e.key === 'escape'){
+					dropdown_list.setStyle('display', 'none');
+					return;
+				}
+				self._filterDropdown(dropdown_list, this.get('value'));
+			}
+		});
+
+		service_wrapper.adopt(service_input, dropdown_list);
+
+		// Column 2: URL builder link
+		var builder_link = new Element('a.apprise-builder-link', {
+			'href': self._getBuilderUrl(schema),
+			'target': '_blank',
+			'title': 'Open URL Builder',
+			'text': 'Build'
+		});
+
+		// Column 3: URL input
+		var url_input = new Element('input.apprise-url-input', {
+			'type': 'text',
+			'value': url,
+			'placeholder': self._getTemplate(schema)
+		});
+		url_input.addEvents({
+			'change': function(){ self._saveAll(); },
+			'keyup': function(){ self._saveAll(); }
+		});
+
+		// Column 4: Test button + result icon
+		var test_wrapper = new Element('div.apprise-test-wrapper');
+		var test_result = new Element('span.apprise-test-result');
+		var test_btn = new Element('a.button.apprise-test-btn', {
+			'text': 'Test',
+			'events': {
+				'click': function(e){
+					e.preventDefault();
+					self._testUrl(url_input.get('value'), this, test_result);
+				}
+			}
+		});
+		test_wrapper.adopt(test_btn, test_result);
+
+		// Column 5: Delete button
+		var delete_btn = new Element('a.icon-cancel.apprise-delete', {
+			'title': 'Remove',
+			'events': {
+				'click': function(e){
+					e.preventDefault();
+					row.destroy();
+					self._rows.erase(row);
+					self._saveAll();
+				}
+			}
+		});
+
+		// Column 6: Enable/disable toggle
+		var toggle_wrapper = new Element('label.switch.apprise-toggle');
+		var toggle_input = new Element('input', {
+			'type': 'checkbox',
+			'checked': enabled,
+			'events': {
+				'change': function(){
+					row[this.checked ? 'removeClass' : 'addClass']('apprise-disabled');
+					self._saveAll();
+				}
+			}
+		});
+		toggle_wrapper.adopt(toggle_input, new Element('div.toggle'));
+
+		row.adopt(service_wrapper, builder_link, url_input, test_wrapper, delete_btn, toggle_wrapper);
+
+		if(!enabled) row.addClass('apprise-disabled');
+
+		// Store data references on the row element
+		row.store('schema', schema);
+		row.store('url_input', url_input);
+		row.store('toggle_input', toggle_input);
+		row.store('service_input', service_input);
+		row.store('builder_link', builder_link);
+
+		self._rows.push(row);
+		self.rows_el.adopt(row);
+
+		return row;
+	},
+
+	_getServiceName: function(schema){
+		if(!schema || !this._schemas) return '';
+		var found = '';
+		this._schemas.each(function(s){
+			if(s.schemas.indexOf(schema) !== -1) found = s.service_name;
+		});
+		return found;
+	},
+
+	_getTemplate: function(schema){
+		if(!schema || !this._schemas) return 'schema://...';
+		var found = '';
+		this._schemas.each(function(s){
+			if(s.schemas.indexOf(schema) !== -1) found = s.template;
+		});
+		return found || schema + '://...';
+	},
+
+	_getBuilderUrl: function(schema){
+		var base = 'https://appriseit.com/tools/url-builder/';
+		return schema ? base + '?schema=' + schema : base;
+	},
+
+	_populateDropdown: function(dropdown, service_input, row){
+		var self = this;
+		if(!self._schemas) return;
+
+		self._schemas.each(function(s){
+			new Element('div.apprise-dropdown-item', {
+				'text': s.service_name + ' (' + s.schemas[0] + ')',
+				'data-schema': s.schemas[0],
+				'data-name': s.service_name,
+				'events': {
+					'click': function(e){
+						e.stop();
+						var schema = s.schemas[0];
+						service_input.set('value', s.service_name);
+						dropdown.setStyle('display', 'none');
+						row.store('schema', schema);
+
+						var url_input = row.retrieve('url_input');
+						var builder_link = row.retrieve('builder_link');
+						if(url_input) url_input.set('placeholder', self._getTemplate(schema));
+						if(builder_link) builder_link.set('href', self._getBuilderUrl(schema));
+
+						self._saveAll();
+					}
+				}
+			}).inject(dropdown);
+		});
+	},
+
+	_filterDropdown: function(dropdown, query){
+		query = (query || '').toLowerCase();
+		dropdown.getElements('.apprise-dropdown-item').each(function(item){
+			var name = (item.get('data-name') || '').toLowerCase();
+			var schema = (item.get('data-schema') || '').toLowerCase();
+			var match = !query || name.indexOf(query) !== -1 || schema.indexOf(query) !== -1;
+			item.setStyle('display', match ? 'block' : 'none');
+		});
+	},
+
+	_testUrl: function(url, btn, result_el){
+		if(!url){
+			result_el.set('html', '<span class="apprise-fail" title="No URL entered">\u2716</span>');
+			return;
+		}
+		btn.set('text', '...');
+		result_el.set('html', '');
+
+		Api.request('apprise.test_url', {
+			'data': {'url': url},
+			'onComplete': function(json){
+				btn.set('text', 'Test');
+				if(json.success){
+					var title = (json.service_name || 'Success').replace(/"/g, '&quot;');
+					result_el.set('html', '<span class="apprise-ok" title="' + title + '">\u2714</span>');
+				} else {
+					var msg = (json.message || 'Failed').replace(/"/g, '&quot;');
+					result_el.set('html', '<span class="apprise-fail" title="' + msg + '">\u2716</span>');
+				}
+			}
+		});
+	},
+
+	_saveAll: function(){
+		var self = this;
+		var entries = [];
+		self._rows.each(function(row){
+			var url_input = row.retrieve('url_input');
+			var toggle_input = row.retrieve('toggle_input');
+			var schema = row.retrieve('schema') || '';
+			entries.push({
+				'schema': schema,
+				'url': url_input ? url_input.get('value').trim() : '',
+				'enabled': toggle_input ? !!toggle_input.checked : true
+			});
+		});
+		self.input.set('value', JSON.stringify(entries));
+		self.changed();
+	},
+
+	getValue: function(){
+		return this.input.get('value');
+	}
+
 });
 
 var createTooltip = function(description){

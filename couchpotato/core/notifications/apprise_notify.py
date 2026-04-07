@@ -1,38 +1,35 @@
-import apprise
+import json
 
-from couchpotato.core.event import addEvent
-from couchpotato.core.helpers.variable import getTitle, getIdentifier, splitString
+from apprise import Apprise as AppriseLib
+from apprise.manager_plugins import NotificationManager
+
+from couchpotato.api import addApiView
+from couchpotato.core.helpers.variable import getTitle, getIdentifier
 from couchpotato.core.logger import CPLog
 from couchpotato.core.notifications.base import Notification
-from couchpotato.environment import Env
 
 log = CPLog(__name__)
 
-autoload = 'AppriseNotification'
+autoload = 'Apprise'
 
-
-def mask_token(token):
-    """Mask a token/key for safe logging: show first 4 chars + ***"""
-    if not token:
-        return '(empty)'
-    token = str(token)
-    if len(token) <= 4:
-        return '***'
-    return token[:4] + '***'
+# Cache for schema list — populated once on first request
+_schemas_cache = None
 
 
 def mask_url(url):
     """Mask sensitive parts of an apprise URL for safe logging.
 
     Keeps the scheme and first few chars of the host/token, masks the rest.
-    e.g. 'pover://userkey@apitoken' -> 'pover://user***'
+    e.g. 'pover://userkey@apitoken' -> 'pover://userke***'
     """
     if not url:
         return '(empty)'
     url = str(url)
     scheme_end = url.find('://')
     if scheme_end == -1:
-        return mask_token(url)
+        if len(url) <= 4:
+            return '***'
+        return url[:4] + '***'
     scheme = url[:scheme_end]
     rest = url[scheme_end + 3:]
     if len(rest) <= 6:
@@ -40,330 +37,154 @@ def mask_url(url):
     return '%s://%s***' % (scheme, rest[:6])
 
 
-# ---------------------------------------------------------------------------
-# Migration: convert old provider configs to Apprise URLs
-# ---------------------------------------------------------------------------
+def _get_schemas():
+    """Build and cache the list of available Apprise notification schemas."""
+    global _schemas_cache
+    if _schemas_cache is not None:
+        return _schemas_cache
 
-def _get(parser, section, option, fallback=''):
-    """Safely read a value from configparser."""
-    try:
-        if parser.has_option(section, option):
-            return parser.get(section, option).strip()
-    except Exception:
-        pass
-    return fallback
+    n_mgr = NotificationManager()
+    result = []
 
+    for plugin_cls in n_mgr.plugins():
+        if not plugin_cls.enabled:
+            continue
 
-def _is_enabled(parser, section):
-    """Check if a config section has enabled = 1/True."""
-    val = _get(parser, section, 'enabled', '0')
-    return val.lower() in ('1', 'true', 'yes', 'on')
+        # Collect all schemas for this plugin
+        schemas = []
+        if plugin_cls.secure_protocol:
+            if isinstance(plugin_cls.secure_protocol, (list, tuple)):
+                schemas.extend(plugin_cls.secure_protocol)
+            else:
+                schemas.append(plugin_cls.secure_protocol)
+        if plugin_cls.protocol:
+            if isinstance(plugin_cls.protocol, (list, tuple)):
+                schemas.extend(plugin_cls.protocol)
+            else:
+                schemas.append(plugin_cls.protocol)
 
+        if not schemas:
+            continue
 
-def migrate_pushover(parser):
-    """Pushover -> pover://user_key@api_token"""
-    section = 'pushover'
-    if not _is_enabled(parser, section):
-        return None
-    user_key = _get(parser, section, 'user_key')
-    api_token = _get(parser, section, 'api_token', 'YkxHMYDZp285L265L3IwH3LmzkTaCy')
-    if not user_key:
-        log.warning('Migration: pushover enabled but no user_key configured — skipping')
-        return None
-    url = 'pover://%s@%s' % (user_key, api_token)
-    priority = _get(parser, section, 'priority', '0')
-    if priority and priority != '0':
-        url += '?priority=%s' % priority
-    sound = _get(parser, section, 'sound')
-    if sound:
-        url += ('&' if '?' in url else '?') + 'sound=%s' % sound
-    return url
+        # Get the first URL template for placeholder hint
+        template = ''
+        if plugin_cls.templates:
+            template = plugin_cls.templates[0]
+            # Replace {schema} with the primary schema
+            template = template.replace('{schema}', schemas[0])
 
+        result.append({
+            'service_name': str(getattr(plugin_cls, 'service_name', schemas[0])),
+            'schemas': schemas,
+            'template': template,
+            'service_url': getattr(plugin_cls, 'service_url', ''),
+            'setup_url': getattr(plugin_cls, 'setup_url', ''),
+        })
 
-def migrate_pushbullet(parser):
-    """Pushbullet -> pbul://api_key or pbul://api_key/device or pbul://api_key/#channel"""
-    section = 'pushbullet'
-    if not _is_enabled(parser, section):
-        return None
-    api_key = _get(parser, section, 'api_key')
-    if not api_key:
-        log.warning('Migration: pushbullet enabled but no api_key configured — skipping')
-        return None
-    url = 'pbul://%s' % api_key
-    devices = _get(parser, section, 'devices')
-    channels = _get(parser, section, 'channels')
-    if devices:
-        url += '/%s' % devices.split(',')[0].strip()
-    if channels:
-        url += '/#%s' % channels.split(',')[0].strip()
-    return url
+    # Sort by service name
+    result.sort(key=lambda x: x['service_name'].lower())
+    _schemas_cache = result
+    return result
 
 
-def migrate_telegram(parser):
-    """Telegram -> tgram://bot_token/chat_id"""
-    section = 'telegrambot'
-    if not _is_enabled(parser, section):
-        return None
-    bot_token = _get(parser, section, 'bot_token')
-    chat_id = _get(parser, section, 'receiver_user_id')
-    if not bot_token:
-        log.warning('Migration: telegram enabled but no bot_token configured — skipping')
-        return None
-    if not chat_id:
-        log.warning('Migration: telegram enabled but no receiver_user_id configured — skipping')
-        return None
-    return 'tgram://%s/%s/' % (bot_token, chat_id)
+def _parse_urls_config(raw_value):
+    """Parse the urls config value as a JSON array.
 
-
-def migrate_discord(parser):
-    """Discord -> raw webhook URL (Apprise accepts Discord webhooks directly)"""
-    section = 'discord'
-    if not _is_enabled(parser, section):
-        return None
-    webhook_url = _get(parser, section, 'webhook_url')
-    if not webhook_url:
-        log.warning('Migration: discord enabled but no webhook_url configured — skipping')
-        return None
-    return webhook_url
-
-
-def migrate_slack(parser):
-    """Slack -> slack://token_a/token_b/token_c/#channel (incoming webhook style)"""
-    section = 'slack'
-    if not _is_enabled(parser, section):
-        return None
-    token = _get(parser, section, 'token')
-    if not token:
-        log.warning('Migration: slack enabled but no token configured — skipping')
-        return None
-    channels = _get(parser, section, 'channels')
-    bot_name = _get(parser, section, 'bot_name', 'CouchPotato')
-    # Slack token might be a webhook URL or a bot token
-    # If it looks like a webhook URL, pass it directly (Apprise handles it)
-    if token.startswith('http'):
-        return token
-    # Otherwise construct apprise URL
-    url = 'slack://%s@%s' % (bot_name, token)
-    if channels:
-        for ch in channels.split(','):
-            ch = ch.strip()
-            if ch:
-                url += '/%s%s' % ('' if ch.startswith('#') else '#', ch)
-    return url
-
-
-def migrate_email(parser):
-    """Email -> mailtos://user:pass@domain?smtp=server&to=addr"""
-    section = 'email'
-    if not _is_enabled(parser, section):
-        return None
-    smtp_server = _get(parser, section, 'smtp_server')
-    from_addr = _get(parser, section, 'from')
-    to_addr = _get(parser, section, 'to')
-    if not smtp_server or not to_addr:
-        log.warning('Migration: email enabled but missing smtp_server or to address — skipping')
-        return None
-    smtp_user = _get(parser, section, 'smtp_user')
-    smtp_pass = _get(parser, section, 'smtp_pass')
-    smtp_port = _get(parser, section, 'smtp_port', '25')
-    use_ssl = _get(parser, section, 'ssl', '0').lower() in ('1', 'true', 'yes')
-    use_starttls = _get(parser, section, 'starttls', '0').lower() in ('1', 'true', 'yes')
-
-    # Determine scheme and mode
-    if use_ssl:
-        scheme = 'mailtos'
-        mode = 'ssl'
-    elif use_starttls:
-        scheme = 'mailtos'
-        mode = 'starttls'
-    else:
-        scheme = 'mailto'
-        mode = None
-
-    # Build URL
-    if smtp_user and smtp_pass:
-        # URL-encode special chars in password
-        import urllib.parse
-        url = '%s://%s:%s@%s' % (scheme, urllib.parse.quote(smtp_user, safe=''),
-                                  urllib.parse.quote(smtp_pass, safe=''), smtp_server)
-    elif smtp_user:
-        url = '%s://%s@%s' % (scheme, smtp_user, smtp_server)
-    else:
-        url = '%s://%s' % (scheme, smtp_server)
-
-    params = []
-    if smtp_port and smtp_port != '25':
-        params.append('port=%s' % smtp_port)
-    if from_addr:
-        params.append('from=%s' % from_addr)
-    params.append('to=%s' % to_addr)
-    if mode:
-        params.append('mode=%s' % mode)
-    if params:
-        url += '?' + '&'.join(params)
-    return url
-
-
-def migrate_webhook(parser):
-    """Webhook -> form://url (form POST)"""
-    section = 'webhook'
-    if not _is_enabled(parser, section):
-        return None
-    url = _get(parser, section, 'url')
-    if not url:
-        log.warning('Migration: webhook enabled but no url configured — skipping')
-        return None
-    # Strip protocol and wrap with form://
-    clean = url
-    if clean.startswith('https://'):
-        clean = clean[8:]
-        return 'forms://%s' % clean
-    elif clean.startswith('http://'):
-        clean = clean[7:]
-        return 'form://%s' % clean
-    return 'form://%s' % clean
-
-
-def migrate_homey(parser):
-    """Homey -> json://url (JSON POST)"""
-    section = 'homey'
-    if not _is_enabled(parser, section):
-        return None
-    url = _get(parser, section, 'url')
-    if not url:
-        log.warning('Migration: homey enabled but no url configured — skipping')
-        return None
-    clean = url
-    if clean.startswith('https://'):
-        clean = clean[8:]
-        return 'jsons://%s' % clean
-    elif clean.startswith('http://'):
-        clean = clean[7:]
-        return 'json://%s' % clean
-    return 'json://%s' % clean
-
-
-def migrate_join(parser):
-    """Join -> join://apikey/device1/device2"""
-    section = 'join'
-    if not _is_enabled(parser, section):
-        return None
-    apikey = _get(parser, section, 'apikey')
-    if not apikey:
-        log.warning('Migration: join enabled but no apikey configured — skipping')
-        return None
-    devices = _get(parser, section, 'devices')
-    url = 'join://%s' % apikey
-    if devices:
-        for dev in devices.split(','):
-            dev = dev.strip()
-            if dev:
-                url += '/%s' % dev
-    else:
-        url += '/group.all'
-    return url
-
-
-# Map of section name -> migration function
-MIGRATORS = {
-    'pushover': migrate_pushover,
-    'pushbullet': migrate_pushbullet,
-    'telegrambot': migrate_telegram,
-    'discord': migrate_discord,
-    'slack': migrate_slack,
-    'email': migrate_email,
-    'webhook': migrate_webhook,
-    'homey': migrate_homey,
-    'join': migrate_join,
-}
-
-
-def migrate_old_providers(parser):
-    """Migrate enabled old notification providers to Apprise URLs.
-
-    Args:
-        parser: configparser.RawConfigParser instance
-
-    Returns:
-        list of apprise URLs that were migrated, or empty list if nothing to do
+    Returns a list of dicts: [{"url": "...", "schema": "...", "enabled": true}, ...]
+    Returns empty list if value is empty or invalid.
     """
-    # Check if migration already happened (apprise section has migrated marker)
-    if parser.has_option('apprise', '_migrated'):
-        log.debug('Migration: apprise migration already completed — skipping')
+    if not raw_value:
         return []
 
-    migrated_urls = []
-    migrated_names = []
-    skipped_names = []
-
-    for name, func in MIGRATORS.items():
-        try:
-            url = func(parser)
-            if url:
-                migrated_urls.append(url)
-                migrated_names.append(name)
-                log.info('Migration: %s -> %s' % (name, mask_url(url)))
-                # Disable old provider
-                if parser.has_section(name):
-                    parser.set(name, 'enabled', '0')
-            elif _is_enabled(parser, name):
-                skipped_names.append(name)
-        except Exception as e:
-            log.error('Migration: failed to migrate %s: %s' % (name, e))
-            skipped_names.append(name)
-
-    if not migrated_urls:
-        log.debug('Migration: no enabled old notification providers found — nothing to migrate')
+    raw_value = raw_value.strip()
+    if not raw_value:
         return []
 
-    # Write migrated URLs to apprise section
-    if not parser.has_section('apprise'):
-        parser.add_section('apprise')
-    parser.set('apprise', 'enabled', '1')
-    # Merge with any existing URLs
-    existing = _get(parser, 'apprise', 'urls')
-    existing_urls = [u.strip() for u in existing.split(',') if u.strip()] if existing else []
-    all_urls = existing_urls + migrated_urls
-    parser.set('apprise', 'urls', ', '.join(all_urls))
-    # Set marker to prevent re-migration
-    parser.set('apprise', '_migrated', '1')
+    try:
+        entries = json.loads(raw_value)
+        if isinstance(entries, list):
+            return entries
+    except (json.JSONDecodeError, TypeError):
+        pass
 
-    log.info('Migration: migrated %d provider(s) to Apprise: %s' % (len(migrated_names), ', '.join(migrated_names)))
-    if skipped_names:
-        log.warning('Migration: skipped %d provider(s) (missing config): %s' % (len(skipped_names), ', '.join(skipped_names)))
-
-    return migrated_urls
+    return []
 
 
-# ---------------------------------------------------------------------------
-# Apprise notification provider
-# ---------------------------------------------------------------------------
-
-class AppriseNotification(Notification):
+class Apprise(Notification):
 
     def __init__(self):
         super().__init__()
-        addEvent('app.load', self.migrateFromOldProviders, priority=10)
+        addApiView('apprise.schemas', self.schemasView)
+        addApiView('apprise.test_url', self.testUrlView)
 
-    def migrateFromOldProviders(self):
-        """Run migration on startup — convert old provider configs to Apprise URLs."""
+    def schemasView(self, **kwargs):
+        """API endpoint: return all available Apprise notification service schemas."""
         try:
-            settings = Env.get('settings')
-            parser = settings.parser()
-            urls = migrate_old_providers(parser)
-            if urls:
-                settings.save()
-                log.info('Migration: saved %d new Apprise URL(s) to config' % len(urls))
+            schemas = _get_schemas()
+            return {'success': True, 'schemas': schemas}
         except Exception as e:
-            log.error('Migration: unexpected error: %s' % e)
+            log.error('Failed to load Apprise schemas: %s' % e)
+            return {'success': False, 'message': str(e)}
+
+    def testUrlView(self, **kwargs):
+        """API endpoint: test a single Apprise notification URL."""
+        url = kwargs.get('url', '').strip()
+        if not url:
+            return {'success': False, 'message': 'No URL provided'}
+
+        log.info('Apprise: testing URL %s' % mask_url(url))
+
+        # Validate the URL first
+        instance = AppriseLib.instantiate(url)
+        if not instance:
+            log.warning('Apprise: invalid URL for test: %s' % mask_url(url))
+            return {'success': False, 'message': 'Invalid or unsupported Apprise URL'}
+
+        service_name = getattr(instance, 'service_name', 'Unknown')
+
+        # Send test notification
+        ap = AppriseLib()
+        ap.add(url)
+        try:
+            result = ap.notify(
+                title='CouchPotato Test',
+                body='This is a test notification from CouchPotato.',
+            )
+        except Exception as e:
+            log.error('Apprise: test failed for %s: %s' % (mask_url(url), e))
+            return {'success': False, 'message': 'Error: %s' % str(e), 'service_name': service_name}
+
+        if result:
+            log.info('Apprise: test notification sent successfully to %s' % service_name)
+            return {'success': True, 'service_name': service_name}
+        else:
+            log.warning('Apprise: test notification failed for %s' % service_name)
+            return {'success': False, 'message': 'Notification delivery failed', 'service_name': service_name}
 
     def notify(self, message='', data=None, listener=None):
         if not data:
             data = {}
 
-        urls = splitString(self.conf('urls', default=''))
-        if not urls:
+        raw_urls = self.conf('urls', default='')
+        entries = _parse_urls_config(raw_urls)
+
+        if not entries:
             log.warning('Apprise: no notification URLs configured — skipping')
+            return False
+
+        # Collect only enabled URLs
+        active_urls = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if not entry.get('enabled', True):
+                continue
+            url = entry.get('url', '').strip()
+            if url:
+                active_urls.append(url)
+
+        if not active_urls:
+            log.warning('Apprise: no enabled notification URLs — skipping')
             return False
 
         # Append IMDB link if we have an identifier
@@ -377,13 +198,10 @@ class AppriseNotification(Notification):
             else:
                 body = '%s\n%s' % (message, imdb_url)
 
-        # Create Apprise instance and add all URLs
-        ap = apprise.Apprise()
+        # Create Apprise instance and add all enabled URLs
+        ap = AppriseLib()
         valid_count = 0
-        for url in urls:
-            url = url.strip()
-            if not url:
-                continue
+        for url in active_urls:
             result = ap.add(url)
             if not result:
                 log.warning('Apprise: invalid or unsupported URL: %s' % mask_url(url))
@@ -408,7 +226,6 @@ class AppriseNotification(Notification):
         if success:
             log.info('Apprise: notification sent successfully to %d service(s)' % valid_count)
         else:
-            # Apprise returns False if ANY service failed
             log.warning('Apprise: one or more services failed — check service URLs and credentials')
 
         return success
@@ -422,10 +239,9 @@ config = [{
             'list': 'notification_providers',
             'name': 'apprise',
             'label': 'Apprise',
+            'multi_instance': False,
             'description': '<a href="https://github.com/caronc/apprise/wiki" target="_blank">Apprise</a> '
-                           'supports 100+ notification services (Pushover, Telegram, Discord, Slack, Email, and many more). '
-                           'Use <a href="https://appriseit.com/tools/url-builder/" target="_blank">the URL builder</a> '
-                           'to construct your service URLs.',
+                           'supports 100+ notification services (Pushover, Telegram, Discord, Slack, Email, and many more).',
             'options': [
                 {
                     'name': 'enabled',
@@ -434,11 +250,9 @@ config = [{
                 },
                 {
                     'name': 'urls',
-                    'label': 'Service URLs',
+                    'label': 'Notification Services',
                     'default': '',
-                    'description': 'Comma-separated Apprise notification URLs. '
-                                   'See <a href="https://github.com/caronc/apprise/wiki" target="_blank">Apprise wiki</a> for URL formats. '
-                                   'Example: pover://user@token, tgram://bottoken/chatid',
+                    'type': 'apprise_urls',
                 },
                 {
                     'name': 'on_snatch',

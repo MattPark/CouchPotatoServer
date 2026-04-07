@@ -523,6 +523,167 @@
 	}
 	.disabled .combined_table { display: none; }
 
+	/** Apprise URL manager **/
+	.ctrlHolder.apprise_urls {
+		display: block !important;
+		padding: 0;
+		border: none;
+	}
+
+	.apprise-rows {
+		max-height: 400px;
+		overflow-y: auto;
+	}
+
+	.apprise-row {
+		display: flex;
+		align-items: center;
+		padding: 8px $padding;
+		border-bottom: 1px solid transparent;
+		@include theme(border-color, off);
+		gap: 8px;
+
+		&.apprise-disabled {
+			opacity: 0.45;
+		}
+
+		@include media-phablet {
+			flex-wrap: wrap;
+			gap: 6px;
+		}
+	}
+
+	.apprise-service-wrapper {
+		position: relative;
+		width: 180px;
+		flex-shrink: 0;
+
+		@include media-phablet {
+			width: 100%;
+		}
+	}
+
+	.apprise-service-input {
+		width: 100%;
+		padding: 5px 8px;
+		border: 1px solid transparent;
+		@include theme(border-color, off);
+		border-radius: $border_radius;
+		font-size: .85em;
+		@include theme(background, background);
+		@include theme(color, text);
+		box-sizing: border-box;
+	}
+
+	.apprise-dropdown-list {
+		display: none;
+		position: absolute;
+		top: 100%;
+		left: 0;
+		right: 0;
+		max-height: 200px;
+		overflow-y: auto;
+		@include theme(background, background);
+		border: 1px solid transparent;
+		@include theme(border-color, off);
+		border-radius: 0 0 $border_radius $border_radius;
+		z-index: 100;
+		box-shadow: 0 4px 8px rgba(0,0,0,.15);
+	}
+
+	.apprise-dropdown-item {
+		padding: 6px 10px;
+		cursor: pointer;
+		font-size: .85em;
+		@include theme(color, text);
+
+		&:hover {
+			@include theme(background, off);
+		}
+	}
+
+	.apprise-builder-link {
+		flex-shrink: 0;
+		font-size: .8em;
+		@include theme(color, primary);
+		text-decoration: none;
+		white-space: nowrap;
+
+		&:hover {
+			text-decoration: underline;
+		}
+	}
+
+	.apprise-url-input {
+		flex: 1;
+		min-width: 180px;
+		padding: 5px 8px;
+		border: 1px solid transparent;
+		@include theme(border-color, off);
+		border-radius: $border_radius;
+		font-size: .85em;
+		font-family: monospace;
+		@include theme(background, background);
+		@include theme(color, text);
+		box-sizing: border-box;
+	}
+
+	.apprise-test-wrapper {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		flex-shrink: 0;
+	}
+
+	.apprise-test-btn {
+		font-size: .75em !important;
+		padding: 3px 10px !important;
+		line-height: 1.4 !important;
+	}
+
+	.apprise-test-result {
+		font-size: 1.1em;
+		min-width: 16px;
+		text-align: center;
+
+		.apprise-ok {
+			color: #4CAF50;
+			cursor: help;
+		}
+
+		.apprise-fail {
+			color: #f44336;
+			cursor: help;
+		}
+	}
+
+	.apprise-delete {
+		cursor: pointer;
+		opacity: 0.4;
+		font-size: 14px;
+		flex-shrink: 0;
+
+		&:hover {
+			opacity: 1;
+		}
+	}
+
+	.apprise-toggle {
+		flex-shrink: 0;
+	}
+
+	.apprise-footer {
+		padding: 8px $padding;
+	}
+
+	.apprise-add-btn {
+		font-size: .8em !important;
+		padding: 4px 12px !important;
+	}
+
+	.disabled .apprise-rows,
+	.disabled .apprise-footer { display: none; }
+
 
 	.tab_about {
 		.usenet {
