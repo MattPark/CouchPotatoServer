@@ -227,8 +227,13 @@ class NotificationInstanceManager(Plugin):
         if not instance:
             return {'success': False, 'message': 'Failed to create instance'}
 
-        # Return the new section's options and values so the frontend can render it
+        # Enable the new instance by default — the user explicitly asked to
+        # add it, so it should appear visible on the settings page.  Without
+        # this the Enabler's initial-render logic hides disabled cards and
+        # the newly created instance is invisible.
         settings = Env.get('settings')
+        settings.set(section_name, 'enabled', '1')
+        settings.save()
         options = settings.getOptions().get(section_name, {})
         values = {}
         try:

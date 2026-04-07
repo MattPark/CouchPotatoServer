@@ -186,6 +186,11 @@ class TestAddInstanceView:
         assert result['section_name'] == 'plex_2'
         manager._createInstance.assert_called_once_with('plex', 'plex_2')
 
+        # Verify the new instance is enabled by default so it shows up on
+        # the settings page (the Enabler hides disabled cards on initial render)
+        mock_settings.set.assert_called_with('plex_2', 'enabled', '1')
+        mock_settings.save.assert_called()
+
 
 # ---------------------------------------------------------------------------
 # removeInstanceView
