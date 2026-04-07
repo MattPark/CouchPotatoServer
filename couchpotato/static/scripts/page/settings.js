@@ -386,59 +386,55 @@ Page.Settings = new Class({
 			}
 		}).inject(wrapper);
 
-		// Refresh helper — rebuilds dropdown options
-		// Shows disabled providers to enable, plus all provider types to add duplicates
+		// Refresh helper — rebuilds dropdown options as a single flat list.
+		// Each provider type appears once: if not yet enabled, selecting it
+		// enables the base instance; if already enabled, selecting it creates
+		// a new duplicate instance.
 		list_el.addEvent('refreshDropdown', function(){
 			dropdown.empty();
 			dropdown.adopt(new Element('option', {'value': '', 'text': 'Add a notification service...'}));
 
-			// Collect disabled providers (can be re-enabled)
-			var fieldsets = list_el.getElements('fieldset.enabler.disabled');
-			fieldsets.each(function(fs){
-				if(fs.getStyle('display') === 'none'){
-					var label = fs.getElement('h2 .group_label');
-					if(label){
-						var name = label.get('text').trim();
-						dropdown.adopt(new Element('option', {
-							'value': 'enable:' + name,
-							'text': name
-						}));
+			var seen = {};
+			var all_fieldsets = list_el.getElements('fieldset.enabler');
+			all_fieldsets.each(function(fs){
+				// Determine the base provider type from the section class
+				var section_class = '';
+				fs.get('class').split(' ').each(function(cls){
+					if(cls.indexOf('section_') === 0){
+						section_class = cls.replace('section_', '');
 					}
+				});
+				var base_type = section_class.replace(/_\d+$/, '');
+				if(!base_type || seen[base_type]) return;
+				seen[base_type] = true;
+
+				var label = fs.getElement('h2 .group_label');
+				var display_name = label ? label.get('text').trim().replace(/ #\d+$/, '') : base_type;
+
+				// Check if this provider type has any enabled instance
+				var has_enabled = all_fieldsets.some(function(fs2){
+					var sc = '';
+					fs2.get('class').split(' ').each(function(cls){
+						if(cls.indexOf('section_') === 0) sc = cls.replace('section_', '');
+					});
+					return sc.replace(/_\d+$/, '') === base_type && !fs2.hasClass('disabled');
+				});
+
+				if(has_enabled){
+					// Already enabled — selecting adds a duplicate
+					dropdown.adopt(new Element('option', {
+						'value': 'duplicate:' + base_type,
+						'text': display_name
+					}));
+				} else {
+					// Not enabled — selecting enables the base instance
+					dropdown.adopt(new Element('option', {
+						'value': 'enable:' + display_name,
+						'text': display_name
+					}));
 				}
 			});
 
-			// Collect enabled providers (can add duplicates)
-			var enabled_fieldsets = list_el.getElements('fieldset.enabler:not(.disabled)');
-			if(enabled_fieldsets.length > 0){
-				// Add a separator/group for duplicates
-				var optgroup = new Element('optgroup', {'label': 'Add another instance of...'});
-				var seen = {};
-				enabled_fieldsets.each(function(fs){
-					// Get the provider type from the section class
-					var section_class = '';
-					fs.get('class').split(' ').each(function(cls){
-						if(cls.indexOf('section_') === 0){
-							section_class = cls.replace('section_', '');
-						}
-					});
-					// Get base provider type (strip _N suffix for duplicates)
-					var base_type = section_class.replace(/_\d+$/, '');
-					if(base_type && !seen[base_type]){
-						seen[base_type] = true;
-						var label = fs.getElement('h2 .group_label');
-						var display_name = label ? label.get('text').trim().replace(/ #\d+$/, '') : base_type;
-						optgroup.adopt(new Element('option', {
-							'value': 'duplicate:' + base_type,
-							'text': display_name
-						}));
-					}
-				});
-				if(optgroup.getElements('option').length > 0){
-					dropdown.adopt(optgroup);
-				}
-			}
-
-			// Always show the dropdown (there's always something to add)
 			wrapper.setStyle('display', 'block');
 		});
 
