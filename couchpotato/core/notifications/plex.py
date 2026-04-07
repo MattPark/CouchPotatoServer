@@ -351,7 +351,7 @@ config = [{
                 {
                     'name': 'client_id',
                     'default': '',
-                    'type': 'hidden',
+                    'hidden': True,
                 },
                 {
                     'name': 'on_snatch',

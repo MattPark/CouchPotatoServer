@@ -730,6 +730,21 @@ Option.Float = new Class({
 	Extends: Option.Int
 });
 
+Option.Hidden = new Class({
+	Extends: OptionBase,
+
+	create: function(){
+		var self = this;
+		self.input = new Element('input', {
+			'type': 'hidden',
+			'name': self.postName(),
+			'value': self.getSettingValue()
+		});
+		self.el.setStyle('display', 'none');
+		self.el.adopt(self.input);
+	}
+});
+
 Option.Directory = new Class({
 
 	Extends: OptionBase,
