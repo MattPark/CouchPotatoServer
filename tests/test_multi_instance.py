@@ -4,13 +4,11 @@ Tests creation, removal, and restoration of duplicate notification
 provider instances (e.g., plex_2, emby_3).
 """
 import configparser
-import copy
 import pytest
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import patch, MagicMock
 
 from couchpotato.core.notifications import (
     NotificationInstanceManager,
-    _provider_registry,
 )
 
 
