@@ -150,6 +150,23 @@ class Scanner(Plugin):
         'HDTV': ['hdtv']
     }
 
+    edition_map = {
+        "Director's Cut": [('directors', 'cut'), ('directors', 'edition')],
+        'Extended Edition': [('extended', 'cut'), ('extended', 'edition'), 'extended'],
+        'Unrated': ['unrated'],
+        'Theatrical': [('theatrical', 'cut'), ('theatrical', 'edition'), 'theatrical'],
+        'IMAX': [('imax', 'edition'), 'imax'],
+        'Final Cut': [('final', 'cut')],
+        'Remastered': ['remastered'],
+        'Special Edition': [('special', 'edition')],
+        'Anniversary Edition': [('anniversary', 'edition')],
+        'Criterion': [('criterion', 'collection'), 'criterion'],
+        'Redux': ['redux'],
+        'Ultimate Cut': [('ultimate', 'cut'), ('ultimate', 'edition')],
+        'Rogue Cut': [('rogue', 'cut')],
+        "Black & Chrome": [('black', 'chrome'), ('black', 'and', 'chrome')],
+    }
+
     clean = r'([ _\,\.\(\)\[\]\-]|^)(3d|hsbs|sbs|half.sbs|full.sbs|ou|half.ou|full.ou|extended|extended.cut|directors.cut|french|fr|swedisch|sw|danish|dutch|nl|swesub|subs|spanish|german|ac3|dts|custom|dc|divx|divx5|dsr|dsrip|dutch|dvd|dvdr|dvdrip|dvdscr|dvdscreener|screener|dvdivx|cam|fragment|fs|hdtv|hdrip' \
             r'|hdtvrip|webdl|web.dl|webrip|web.rip|internal|limited|multisubs|ntsc|ogg|ogm|pal|pdtv|proper|repack|rerip|retail|r3|r5|bd5|se|svcd|swedish|german|read.nfo|nfofix|unrated|ws|telesync|ts|telecine|tc|brrip|bdrip|video_ts|audio_ts|480p|480i|576p|576i|720p|720i|1080p|1080i|hrhd|hrhdtv|hddvd|bluray|x264|h264|x265|h265|xvid|xvidvd|xxx|www.www|hc|\[.*\])(?=[ _\,\.\(\)\[\]\-]|$)'
     multipart_regex = [
@@ -955,6 +972,7 @@ class Scanner(Plugin):
         data['source'] = self.getSourceMedia(filename)
         if data['quality'].get('is_3d', 0):
             data['3d_type'] = self.get3dType(filename)
+        data['edition'] = self.getEdition(filename)
         return data
 
     def get3dType(self, filename):
@@ -968,6 +986,23 @@ class Scanner(Plugin):
             for tag in tags:
                 if (isinstance(tag, tuple) and '.'.join(tag) in '.'.join(words)) or (isinstance(tag, str) and ss(tag.lower()) in words):
                     log.debug('Found %s in %s', (tag, filename))
+                    return key
+
+        return ''
+
+    def getEdition(self, filename):
+        """Detect edition/cut info from filename (e.g. Director's Cut, Extended, IMAX)."""
+        filename = ss(filename)
+        words = re.split(r'\W+', filename.lower())
+
+        for key in self.edition_map:
+            tags = self.edition_map.get(key, [])
+            for tag in tags:
+                if isinstance(tag, tuple) and '.'.join(tag) in '.'.join(words):
+                    log.debug('Found edition %s in %s', (key, filename))
+                    return key
+                elif isinstance(tag, str) and tag.lower() in words:
+                    log.debug('Found edition %s in %s', (key, filename))
                     return key
 
         return ''

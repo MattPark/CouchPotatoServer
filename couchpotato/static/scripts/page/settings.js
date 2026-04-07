@@ -1111,12 +1111,50 @@ Option.Choice = new Class({
 
 		wrapper.inject(self.input, 'after');
 
+		// Presets dropdown (e.g. "Plex Recommended")
+		if(o.presets){
+			var preset_wrapper = new Element('div.select_wrapper.icon-dropdown.preset_wrapper').grab(
+				self.preset_select = new Element('select.select', {
+					'events': {
+						'change': self.applyPreset.bind(self)
+					}
+				}).grab(
+					new Element('option[text=Presets]')
+				)
+			);
+
+			var option_name = self.options.name;
+			Object.each(o.presets, function(values, preset_name){
+				if(values[option_name]){
+					new Element('option', {
+						'text': preset_name,
+						'value': values[option_name]
+					}).inject(self.preset_select);
+				}
+			});
+
+			// Only show if there are preset options for this field
+			if(self.preset_select.getElements('option').length > 1){
+				preset_wrapper.inject(wrapper, 'after');
+			}
+		}
+
 	},
 
 	addSelection: function(){
 		var self = this;
 		self.input.set('value', self.input.get('value') + self.select.get('value'));
 		self.input.fireEvent('change');
+	},
+
+	applyPreset: function(){
+		var self = this;
+		var val = self.preset_select.get('value');
+		if(val){
+			self.input.set('value', val);
+			self.input.fireEvent('change');
+			self.preset_select.selectedIndex = 0;
+		}
 	}
 
 });

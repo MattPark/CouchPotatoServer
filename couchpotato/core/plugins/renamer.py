@@ -451,6 +451,9 @@ class Renamer(Plugin):
                     '3d': '3D' if group['meta_data']['quality'].get('is_3d', 0) else '',
                     '3d_type': group['meta_data'].get('3d_type'),
                     '3d_type_short': group['meta_data'].get('3d_type'),
+                    'edition': group['meta_data'].get('edition', ''),
+                    'edition_plex': '{edition-%s}' % group['meta_data']['edition'] if group['meta_data'].get('edition') else '',
+                    'imdb_id_plex': '{imdb-%s}' % group['identifier'] if group.get('identifier') else '',
                 }
 
                 if replacements['mpaa_only'] not in ('G', 'PG', 'PG-13', 'R', 'NC-17'):
@@ -1491,6 +1494,15 @@ rename_options = {
         'mpaa': 'MPAA or other certification',
         'mpaa_only': 'MPAA only certification (G|PG|PG-13|R|NC-17|Not Rated)',
         'category': 'Category label',
+        'edition': "Edition (Director's Cut)",
+        'edition_plex': "Plex Edition {edition-Director's Cut}",
+        'imdb_id_plex': 'Plex IMDB {imdb-tt0123456}',
+    },
+    'presets': {
+        'Plex Recommended': {
+            'folder_name': '<thename> (<year>)',
+            'file_name': '<thename> (<year>) <edition_plex> <imdb_id_plex>.<ext>',
+        },
     },
 }
 
