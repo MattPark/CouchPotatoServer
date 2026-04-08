@@ -37,7 +37,7 @@ Page.Wizard = new Class({
 		},
 		'automation': {
 			'title': 'Easily add movies to your wanted list!',
-			'description': 'You can easily add movies from your favorite movie site, like IMDB, Rotten Tomatoes, Apple Trailers and more. Just install the extension or drag the bookmarklet to your bookmarks.' +
+			'description': 'You can easily add movies from your favorite movie site, like IMDB, Rotten Tomatoes, Apple Trailers and more. Just drag the bookmarklet to your bookmarks.' +
 				'<br />Once installed, just click the bookmarklet on a movie page and watch the magic happen ;)',
 			'content': function(){
 				return App.createUserscriptButtons();
@@ -46,8 +46,7 @@ Page.Wizard = new Class({
 		'finish': {
 			'title': 'Finishing Up',
 			'description': 'Are you done? Did you fill in everything as much as possible?' +
-				'<br />Be sure to check the settings to see what more CP can do!<br /><br />' +
-				'<div class="wizard_support">After you\'ve used CP for a while, and you like it (which of course you will), consider supporting CP. Maybe even by writing some code. <br />Or by getting a subscription at <a href="https://usenetserver.com/partners/?a_aid=couchpotato&a_bid=3f357c6f" target="_blank">Usenet Server</a> or <a href="https://www.newshosting.com/partners/?a_aid=couchpotato&a_bid=a0b022df" target="_blank">Newshosting</a>.</div>',
+				'<br />Be sure to check the settings to see what more CP can do!',
 			'content': new Element('div').grab(
 				new Element('a.button.green', {
 					'styles': {

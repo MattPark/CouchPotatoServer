@@ -131,14 +131,6 @@
 			$(self.block.header).addClass('header').adopt(
 				self.block.navigation = new BlockHeader(self, {}),
 				self.block.search = new BlockSearch(self, {}),
-				self.support = new Element('a.donate.icon-donate', {
-					'href': 'https://couchpota.to/support/',
-					'target': '_blank'
-				}).grab(
-					new Element('span', {
-						'text': 'Donate'
-					})
-				),
 				self.block.more = new BlockMenu(self, {'button_class': 'icon-settings'})
 			),
 			new Element('div.corner_background'),
@@ -417,12 +409,6 @@
 
 		return new Element('div.group_userscript').adopt(
 			new Element('div').adopt(
-				new Element('a.userscript.button', {
-					'text': 'Install extension',
-					'href': 'https://couchpota.to/extension/',
-					'target': '_blank'
-				}),
-				new Element('span.or[text=or]'),
 				new Element('span.bookmarklet').adopt(
 					new Element('a.button', {
 						'text': '+CouchPotato',
@@ -444,10 +430,7 @@
 						'text': '⇽ Drag this to your bookmarks'
 					})
 				)
-			),
-			new Element('img', {
-				'src': 'https://couchpota.to/media/images/userscript.gif'
-			})
+			)
 		);
 	},
 

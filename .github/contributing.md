@@ -8,7 +8,7 @@
 Thank you for your interest in contributing to CouchPotato. There are several ways to help out, even if you've never worked on an open source project before.
 If you've found a bug or want to request a feature, you can report it by [posting an issue](https://github.com/CouchPotato/CouchPotatoServer/issues/new) - be sure to read the [guidelines](#issues) first!
 If you want to contribute your own work, please read the [guidelines](#pull-requests) for submitting a pull request.
-Lastly, for anything related to CouchPotato, feel free to stop by the [forum](http://couchpota.to/forum/) or the [#couchpotato](http://webchat.freenode.net/?channels=couchpotato) IRC channel at irc.freenode.net.
+Lastly, for anything related to CouchPotato, feel free to stop by the [#couchpotato](http://webchat.freenode.net/?channels=couchpotato) IRC channel at irc.freenode.net.
 
 ## Issues
 Issues are intended for reporting bugs and weird behaviour or suggesting improvements to CouchPotatoServer.

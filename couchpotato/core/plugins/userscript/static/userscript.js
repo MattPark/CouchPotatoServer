@@ -68,16 +68,10 @@ var UserscriptSettingTab = new Class({
 
 			self.settings.createGroup({
 				'name': 'userscript',
-				'label': 'Install the browser extension or bookmarklet',
+				'label': 'Bookmarklet',
 				'description': 'Easily add movies via imdb.com, appletrailers and more'
 			}).inject(self.settings.tabs.automation.content, 'top').adopt(
 				new Element('div').adopt(
-					new Element('a.userscript.button', {
-						'text': 'Install extension',
-						'href': 'https://couchpota.to/extension/',
-						'target': '_blank'
-					}),
-					new Element('span.or[text=or]'),
 					new Element('span.bookmarklet').adopt(
 						new Element('a.button.green', {
 							'text': '+CouchPotato',
@@ -99,10 +93,7 @@ var UserscriptSettingTab = new Class({
 							'text': '⇽ Drag this to your bookmarks'
 						})
 					)
-				),
-				new Element('img', {
-					'src': 'https://couchpota.to/media/images/userscript.gif'
-				})
+				)
 			);
 
 		});

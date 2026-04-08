@@ -85,7 +85,7 @@
        </common_name>
        <documentation>
           <doc_link name='couchpotato'
-                    uri='http://couchpota.to/' />
+                    uri='https://github.com/MattPark/CouchPotatoServer' />
        </documentation>
     </template>
  

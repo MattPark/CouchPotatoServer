@@ -210,38 +210,6 @@ input[type=text], textarea {
 
 	}
 
-	.donate {
-		position: absolute;
-		bottom: 44px;
-		left: 0;
-		right: 0;
-		padding: $padding/2 $padding;
-		transition: background 200ms;
-
-		&:hover {
-			@include theme(background, menu_off);
-		}
-
-		&:before {
-			display: none;
-			font-size: 20px;
-			text-align: center;
-		}
-
-		@include media-phablet {
-			bottom: 44px * 3;
-			padding: $padding/2 0;
-
-			span {
-				display: none;
-			}
-
-			&:before {
-				display: block;
-			}
-		}
-	}
-
 	.menu, .search_form, .notification_menu  {
 		position: absolute;
 		z-index: 21;

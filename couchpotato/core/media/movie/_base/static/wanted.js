@@ -38,7 +38,7 @@ var MoviesWanted = new Class({
 				'on_empty_element': function(){
 					return new Element('div.empty_wanted').adopt(
 						new Element('div.no_movies', {
-							'text': 'Seems like you don\'t have any movies yet.. Maybe add some via search or the extension.'
+							'text': 'Seems like you don\'t have any movies yet.. Maybe add some via search or the bookmarklet.'
 						}),
 						App.createUserscriptButtons()
 					);
