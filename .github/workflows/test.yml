@@ -25,6 +25,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install ruff pytest pytest-cov
           pip install tinydb requests tornado chardet beautifulsoup4 python-dateutil 'apscheduler>=3.10,<4' html5lib 'apprise>=1.9'
+          pip install cachelib deluge-client 'bencode.py' python-qbittorrent rarfile guessit pymediainfo
 
       - name: Lint with ruff
         run: ruff check couchpotato/ tests/
