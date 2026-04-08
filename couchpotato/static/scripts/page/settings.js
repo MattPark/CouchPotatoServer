@@ -1739,7 +1739,12 @@ Option.Apprise_urls = new Class({
 			'href': self._getBuilderUrl(schema),
 			'target': '_blank',
 			'title': 'Open URL Builder',
-			'text': 'Wizard'
+			'text': 'Wizard',
+			'styles': {
+				'position': 'static',
+				'overflow': 'visible',
+				'flex-shrink': '0'
+			}
 		});
 
 		// Column 3: URL input
