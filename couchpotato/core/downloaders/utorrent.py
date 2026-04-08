@@ -1,22 +1,19 @@
 ﻿from base64 import b16encode, b32decode
 from datetime import timedelta
 from hashlib import sha1
-import http.cookiejar as cookielib
-import http.client as httplib
 import json
 import os
 import re
 import stat
 import time
 from urllib.parse import quote as _urllib_quote
-from urllib import request as urllib2
 
+import requests
 from bencode import bencode as benc, bdecode
 from couchpotato.core._base.downloader.main import DownloaderBase, ReleaseDownloadList
 from couchpotato.core.helpers.encoding import isInt, ss, sp
 from couchpotato.core.helpers.variable import tryInt, tryFloat, cleanHost
 from couchpotato.core.logger import CPLog
-from multipartpost import MultipartPostHandler
 
 
 log = CPLog(__name__)
@@ -230,13 +227,10 @@ class uTorrentAPI(object):
         self.url = 'http://' + str(host) + ':' + str(port) + '/gui/'
         self.token = ''
         self.last_time = time.time()
-        cookies = cookielib.CookieJar()
-        self.opener = urllib2.build_opener(urllib2.HTTPCookieProcessor(cookies), MultipartPostHandler)
-        self.opener.addheaders = [('User-agent', 'couchpotato-utorrent-client/1.0')]
+        self.session = requests.Session()
+        self.session.headers.update({'User-agent': 'couchpotato-utorrent-client/1.0'})
         if username and password:
-            password_manager = urllib2.HTTPPasswordMgrWithDefaultRealm()
-            password_manager.add_password(realm = None, uri = self.url, user = username, passwd = password)
-            self.opener.add_handler(urllib2.HTTPBasicAuthHandler(password_manager))
+            self.session.auth = (username, password)
         elif username or password:
             log.debug('User or password missing, not using authentication.')
         self.token = self.get_token()
@@ -245,28 +239,39 @@ class uTorrentAPI(object):
         if time.time() > self.last_time + 1800:
             self.last_time = time.time()
             self.token = self.get_token()
-        request = urllib2.Request(self.url + '?token=' + self.token + '&' + action, data)
+        url = self.url + '?token=' + self.token + '&' + action
         try:
-            open_request = self.opener.open(request)
-            response = open_request.read()
-            if response:
-                return response
+            if data is not None:
+                # Multipart file upload — data is a dict with (filename, filedata) tuples
+                files = {}
+                for key, value in data.items():
+                    if isinstance(value, (list, tuple)):
+                        filename, filedata = value
+                        files[key] = (filename, filedata, 'application/octet-stream')
+                    else:
+                        files[key] = (None, value)
+                response = self.session.post(url, files=files)
             else:
-                log.debug('Unknown failure sending command to uTorrent. Return text is: %s', response)
-        except httplib.InvalidURL as err:
-            log.error('Invalid uTorrent host, check your config %s', err)
-        except urllib2.HTTPError as err:
-            if err.code == 401:
+                response = self.session.get(url)
+            response.raise_for_status()
+            if response.content:
+                return response.content
+            else:
+                log.debug('Unknown failure sending command to uTorrent. Return text is: %s', response.text)
+        except requests.exceptions.ConnectionError as err:
+            log.error('Unable to connect to uTorrent %s', err)
+        except requests.exceptions.HTTPError as err:
+            if err.response is not None and err.response.status_code == 401:
                 log.error('Invalid uTorrent Username or Password, check your config')
             else:
                 log.error('uTorrent HTTPError: %s', err)
-        except urllib2.URLError as err:
-            log.error('Unable to connect to uTorrent %s', err)
+        except requests.exceptions.RequestException as err:
+            log.error('uTorrent request error: %s', err)
         return False
 
     def get_token(self):
-        request = self.opener.open(self.url + 'token.html')
-        token = re.findall('<div.*?>(.*?)</', request.read())[0]
+        response = self.session.get(self.url + 'token.html')
+        token = re.findall('<div.*?>(.*?)</', response.text)[0]
         return token
 
     def add_torrent_uri(self, filename, torrent, add_folder = False):

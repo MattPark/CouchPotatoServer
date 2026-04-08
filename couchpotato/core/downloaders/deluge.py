@@ -222,7 +222,7 @@ class DelugeRPC(object):
     def connect(self):
         #self.client = DelugeClient()
         #self.client.connect(self.host, int(self.port), self.username, self.password)
-        self.client = DelugeRPCClient(self.host, int(self.port), self.username, self.password)
+        self.client = DelugeRPCClient(self.host, int(self.port), self.username, self.password, decode_utf8=True)
         self.client.connect()
 
     def test(self):

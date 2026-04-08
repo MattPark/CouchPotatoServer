@@ -394,15 +394,12 @@ def strptime(date):
         'second': date[17:],
     }
 
-    d = dict((k, int(v)) for k, v in d.iteritems())
+    d = dict((k, int(v)) for k, v in d.items())
     return datetime(**d)
 
 
 def _str(s):
-    """Python 3 compatibility function for converting to str."""
-    try:
-        if isinstance(s, unicode):
-            return s.encode('utf-8', 'replace')
-    except NameError:
-        pass
-    return s
+    """Convert to str (Python 3)."""
+    if isinstance(s, bytes):
+        return s.decode('utf-8', 'replace')
+    return str(s)

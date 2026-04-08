@@ -9,7 +9,7 @@ from couchpotato.core._base.downloader.main import DownloaderBase, ReleaseDownlo
 from couchpotato.core.helpers.encoding import sp
 from couchpotato.core.helpers.variable import cleanHost
 from couchpotato.core.logger import CPLog
-from qbittorrent.client import QBittorrentClient
+from qbittorrent.client import Client as QBittorrentClient
 
 
 log = CPLog(__name__)

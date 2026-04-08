@@ -1,7 +1,7 @@
 """Test configuration for CouchPotato test suite.
 
 Adds the libs/ directory to sys.path so that vendored dependencies
-(importhelper, etc.) are available during test imports.
+are available during test imports.
 """
 import os
 import sys

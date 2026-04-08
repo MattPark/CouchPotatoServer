@@ -55,7 +55,7 @@ class NotificationInstanceManager(Plugin):
             return _provider_registry
 
         # Import notification provider modules
-        from importhelper import import_module
+        from importlib import import_module
         import os
 
         notifications_dir = os.path.dirname(__file__)

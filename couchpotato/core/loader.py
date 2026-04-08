@@ -4,7 +4,7 @@ import traceback
 
 from couchpotato.core.event import fireEvent
 from couchpotato.core.logger import CPLog
-from importhelper import import_module
+from importlib import import_module
 
 
 log = CPLog(__name__)
@@ -63,12 +63,11 @@ class Loader(object):
 
                     self.loadPlugins(m, plugin.get('type'), plugin.get('name'))
                 except ImportError as e:
-                    # todo:: subclass ImportError for missing requirements.
-                    if e.message.lower().startswith("missing"):
-                        log.error(e.message)
-                        pass
-                    # todo:: this needs to be more descriptive.
-                    log.error('Import error, remove the empty folder: %s', plugin.get('module'))
+                    msg = str(e)
+                    if msg.lower().startswith("missing"):
+                        log.error(msg)
+                    else:
+                        log.error('Import error, remove the empty folder: %s', plugin.get('module'))
                     log.debug('Can\'t import %s: %s', (module_name, traceback.format_exc()))
                 except:
                     log.error('Can\'t import %s: %s', (module_name, traceback.format_exc()))

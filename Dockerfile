@@ -20,7 +20,9 @@ RUN \
     git \
     python3 \
     py3-pip \
-    py3-lxml && \
+    py3-lxml \
+    mediainfo \
+    unrar && \
   echo "**** install pip packages ****" && \
   pip3 install --no-cache-dir --break-system-packages \
     tinydb \
@@ -32,7 +34,14 @@ RUN \
     "apscheduler>=3.10,<4" \
     html5lib \
     apprise \
-    pyopenssl && \
+    pyopenssl \
+    cachelib \
+    deluge-client \
+    "bencode.py" \
+    python-qbittorrent \
+    rarfile \
+    guessit \
+    pymediainfo && \
   echo "**** cleanup ****" && \
   rm -rf /tmp/*
 

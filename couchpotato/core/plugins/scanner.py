@@ -16,9 +16,8 @@ from couchpotato.core.helpers.variable import getExt, getImdb, tryInt, \
     splitString, getIdentifier
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
-from guessit import guess_movie_info
-from subliminal.videos import Video
-import enzyme
+from guessit import guessit as guessit_parse
+from pymediainfo import MediaInfo
 
 
 log = CPLog(__name__)
@@ -130,17 +129,35 @@ class Scanner(Plugin):
     }
 
     audio_codec_map = {
-        0x2000: 'AC3',
-        0x2001: 'DTS',
-        0x0055: 'MP3',
-        0x0050: 'MP2',
-        0x0001: 'PCM',
-        0x003: 'WAV',
-        0x77a1: 'TTA1',
-        0x5756: 'WAV',
-        0x6750: 'Vorbis',
-        0xF1AC: 'FLAC',
-        0x00ff: 'AAC',
+        # pymediainfo format strings -> display names
+        'AC-3': 'AC3',
+        'E-AC-3': 'EAC3',
+        'DTS': 'DTS',
+        'DTS-HD MA': 'DTS-HD MA',
+        'DTS-HD': 'DTS-HD',
+        'AAC': 'AAC',
+        'AAC LC': 'AAC',
+        'FLAC': 'FLAC',
+        'MLP FBA': 'TrueHD',  # Dolby TrueHD
+        'MPEG Audio': 'MP3',
+        'PCM': 'PCM',
+        'Vorbis': 'Vorbis',
+        'Opus': 'Opus',
+        'WMA': 'WMA',
+        'TTA': 'TTA1',
+    }
+
+    video_codec_map = {
+        # pymediainfo format strings -> display names
+        'AVC': 'H264',
+        'HEVC': 'x265',
+        'MPEG-4 Visual': 'MPEG4',
+        'MPEG Video': 'MPEG2',
+        'VP8': 'VP8',
+        'VP9': 'VP9',
+        'AV1': 'AV1',
+        'VC-1': 'VC1',
+        'Theora': 'Theora',
     }
 
     source_media = {
@@ -822,7 +839,7 @@ class Scanner(Plugin):
     def _parallel_process_groups(self, valid_files, folder, release_download, simple,
                                   return_ignored, ignored_identifiers, on_found, total_found):
         """Process movie groups in parallel using self.process_workers threads.
-        Workers do the heavy lifting (classify + enzyme + TMDB) and push results
+        Workers do the heavy lifting (classify + pymediainfo + TMDB) and push results
         to a queue. self.notify_workers threads drain the queue and call on_found
         (release.add + movie.update) in parallel, decoupled from the workers."""
         processed_movies = {}
@@ -1052,26 +1069,39 @@ class Scanner(Plugin):
     def getMeta(self, filename):
 
         try:
-            p = enzyme.parse(filename)
+            mi = MediaInfo.parse(filename)
+            video_tracks = [t for t in mi.tracks if t.track_type == 'Video']
+            audio_tracks = [t for t in mi.tracks if t.track_type == 'Audio']
+            general_tracks = [t for t in mi.tracks if t.track_type == 'General']
+
+            if not video_tracks:
+                log.debug('No video tracks found in %s', filename)
+                return {}
+
+            vt = video_tracks[0]
 
             # Video codec
-            vc = ('H264' if p.video[0].codec == 'AVC1' else 'x265' if p.video[0].codec == 'HEVC' else p.video[0].codec)
+            vc = self.video_codec_map.get(vt.format, vt.format or '')
 
             # Audio codec
-            ac = p.audio[0].codec
-            try: ac = self.audio_codec_map.get(p.audio[0].codec)
-            except Exception: pass
+            ac = ''
+            if audio_tracks:
+                at = audio_tracks[0]
+                ac = self.audio_codec_map.get(at.format or '', at.format or '')
 
-            # Find title in video headers
+            # Find title in video/general headers
             titles = []
 
+            # Check general (container-level) title
             try:
-                if p.title and self.findYear(p.title):
-                    titles.append(ss(p.title))
+                gen_title = general_tracks[0].title if general_tracks else None
+                if gen_title and self.findYear(gen_title):
+                    titles.append(ss(gen_title))
             except Exception:
                 log.error('Failed getting title from meta: %s', traceback.format_exc())
 
-            for video in p.video:
+            # Check video track titles
+            for video in video_tracks:
                 try:
                     if video.title and self.findYear(video.title):
                         titles.append(ss(video.title))
@@ -1082,37 +1112,43 @@ class Scanner(Plugin):
                 'titles': list(set(titles)),
                 'video': vc,
                 'audio': ac,
-                'resolution_width': tryInt(p.video[0].width),
-                'resolution_height': tryInt(p.video[0].height),
-                'audio_channels': p.audio[0].channels,
+                'resolution_width': tryInt(vt.width),
+                'resolution_height': tryInt(vt.height),
+                'audio_channels': float(audio_tracks[0].channel_s) if audio_tracks and audio_tracks[0].channel_s else 0,
             }
-        except enzyme.exceptions.ParseError:
-            log.info('Failed to parse MKV metadata (EBML): %s', filename)
-        except enzyme.exceptions.NoParserError:
-            log.debug('No parser found for %s', filename)
         except Exception:
-            log.info('Failed parsing metadata: %s', filename)
+            log.debug('Failed parsing metadata: %s %s', (filename, traceback.format_exc()))
 
         return {}
 
     def getSubtitleLanguage(self, group):
         detected_languages = {}
 
-        # Subliminal scanner
+        # Detect external subtitle languages from filenames
+        # e.g., "Movie.en.srt" -> lang code "en", "Movie.eng.srt" -> "eng"
         paths = None
         try:
             paths = group['files']['movie']
-            scan_result = []
-            for p in paths:
-                if not group['is_dvd']:
-                    video = Video.from_path(toUnicode(sp(p)))
-                    video_result = [(video, video.scan())]
-                    scan_result.extend(video_result)
+            movie_dir = os.path.dirname(sp(paths[0])) if paths else None
 
-            for video, detected_subtitles in scan_result:
-                for s in detected_subtitles:
-                    if s.language and s.path not in paths:
-                        detected_languages[s.path] = [s.language]
+            if movie_dir and not group['is_dvd']:
+                subtitle_exts = {'.srt', '.sub', '.ass', '.ssa', '.smi', '.vtt'}
+                try:
+                    dir_files = os.listdir(movie_dir)
+                except OSError:
+                    dir_files = []
+
+                for fname in dir_files:
+                    fpath = os.path.join(movie_dir, fname)
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext in subtitle_exts and fpath not in paths:
+                        # Try to extract language code: "movie.en.srt" -> "en"
+                        name_no_ext = os.path.splitext(fname)[0]
+                        parts = name_no_ext.rsplit('.', 1)
+                        if len(parts) == 2:
+                            lang_code = parts[1].lower()
+                            if len(lang_code) in (2, 3) and lang_code.isalpha():
+                                detected_languages[fpath] = [lang_code]
         except Exception:
             log.debug('Failed parsing subtitle languages for %s: %s', (paths, traceback.format_exc()))
 
@@ -1492,7 +1528,7 @@ class Scanner(Plugin):
         guess = {}
         if file_name:
             try:
-                guessit = guess_movie_info(toUnicode(file_name))
+                guessit = guessit_parse(toUnicode(file_name), {'type': 'movie'})
                 if guessit.get('title') and guessit.get('year'):
                     guess = {
                         'name': guessit.get('title'),
@@ -1570,7 +1606,7 @@ config = [{
                     'type': 'int',
                     'default': 8,
                     'advanced': True,
-                    'description': 'Parallel threads for movie identification (enzyme metadata + TMDB lookups).',
+                    'description': 'Parallel threads for movie identification (metadata + TMDB lookups).',
                 },
                 {
                     'name': 'notify_workers',

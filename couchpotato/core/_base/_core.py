@@ -5,7 +5,6 @@ import signal
 import time
 import traceback
 import webbrowser
-import sys
 
 from couchpotato.api import addApiView
 from couchpotato.core.event import fireEvent, addEvent
@@ -72,9 +71,8 @@ class Core(Plugin):
 
         # Don't check ssl by default
         try:
-            if sys.version_info >= (2, 7, 9):
-                import ssl
-                ssl._create_default_https_context = ssl._create_unverified_context
+            import ssl
+            ssl._create_default_https_context = ssl._create_unverified_context
         except Exception:
             log.debug('Failed setting default ssl context: %s', traceback.format_exc())
 

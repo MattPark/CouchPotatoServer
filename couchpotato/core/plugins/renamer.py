@@ -17,7 +17,7 @@ from couchpotato.core.helpers.variable import getExt, mergeDicts, getTitle, \
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
 from couchpotato.environment import Env
-from unrar2 import RarFile
+import rarfile
 
 
 log = CPLog(__name__)
@@ -1391,22 +1391,26 @@ Remove it if you want it to be renamed (again, or at least let it try again)
             try:
                 unrar_path = self.conf('unrar_path')
                 unrar_path = unrar_path if unrar_path and (os.path.isfile(unrar_path) or re.match(r'^[a-zA-Z0-9_/\.\-]+$', unrar_path)) else None
+                if unrar_path:
+                    rarfile.UNRAR_TOOL = unrar_path
 
-                rar_handle = RarFile(archive['file'], custom_path = unrar_path)
+                rar_handle = rarfile.RarFile(archive['file'])
                 extr_path = os.path.join(from_folder, os.path.relpath(os.path.dirname(archive['file']), folder))
                 self.makeDir(extr_path)
                 for packedinfo in rar_handle.infolist():
                     extr_file_path = sp(os.path.join(extr_path, os.path.basename(packedinfo.filename)))
-                    if not packedinfo.isdir and not os.path.isfile(extr_file_path):
+                    if not packedinfo.is_dir() and not os.path.isfile(extr_file_path):
                         log.debug('Extracting %s...', packedinfo.filename)
-                        rar_handle.extract(condition = [packedinfo.index], path = extr_path, withSubpath = False, overwrite = False)
+                        with rar_handle.open(packedinfo) as src:
+                            with open(extr_file_path, 'wb') as dst:
+                                shutil.copyfileobj(src, dst)
                         if self.conf('unrar_modify_date'):
                             try:
                                 os.utime(extr_file_path, (os.path.getatime(archive['file']), os.path.getmtime(archive['file'])))
                             except OSError:
                                 log.error('Rar modify date enabled, but failed: %s', traceback.format_exc())
                         extr_files.append(extr_file_path)
-                del rar_handle
+                rar_handle.close()
                 # Tag archive as extracted if no cleanup.
                 if not cleanup and os.path.isfile(extr_file_path):
                     self.tagRelease(release_download = {'folder': os.path.dirname(archive['file']), 'files': [archive['file']]}, tag = 'extracted',

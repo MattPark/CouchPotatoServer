@@ -13,7 +13,7 @@ import shutil
 
 from couchpotato.core.db import CouchDB
 from argparse import ArgumentParser
-from cache import FileSystemCache
+from cachelib import FileSystemCache
 from couchpotato import KeyHandler, LoginHandler, LogoutHandler
 from couchpotato.api import NonBlockHandler, ApiHandler
 from couchpotato.core.event import fireEventAsync, fireEvent
@@ -194,7 +194,7 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
     Env.set('dev', development)
 
     # Disable logging for some modules
-    for logger_name in ['enzyme', 'guessit', 'subliminal', 'apscheduler', 'tornado', 'requests']:
+    for logger_name in ['pymediainfo', 'guessit', 'rebulk', 'apscheduler', 'tornado', 'requests']:
         logging.getLogger(logger_name).setLevel(logging.ERROR)
 
     for logger_name in ['gntp']:

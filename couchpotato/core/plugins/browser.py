@@ -14,16 +14,12 @@ from couchpotato.environment import Env
 log = CPLog(__name__)
 
 if os.name == 'nt':
-    import imp
     try:
-        imp.find_module('win32file')
-    except:
-        # todo:: subclass ImportError for missing dependencies, vs. broken plugins?
-        raise ImportError("Missing the win32file module, which is a part of the prerequisite \
-            pywin32 package. You can get it from http://sourceforge.net/projects/pywin32/files/pywin32/")
-    else:
         # noinspection PyUnresolvedReferences
         import win32file
+    except ImportError:
+        raise ImportError("Missing the win32file module, which is a part of the prerequisite "
+                          "pywin32 package. Install it with: pip install pywin32")
 
 autoload = 'FileBrowser'
 

@@ -20,6 +20,13 @@ dependencies = [
     "apscheduler>=3.10,<4",
     "html5lib>=1.1",
     "apprise>=1.9",
+    "cachelib>=0.9",
+    "deluge-client>=1.10",
+    "bencode.py>=4.0",
+    "python-qbittorrent>=0.4",
+    "rarfile>=4.0",
+    "guessit>=3.0",
+    "pymediainfo>=6.0",
 ]
 
 [project.optional-dependencies]

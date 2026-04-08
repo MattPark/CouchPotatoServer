@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from __future__ import print_function
 from logging import handlers
 from os.path import dirname
 import logging
