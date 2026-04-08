@@ -129,6 +129,7 @@ class CouchDB:
         self._type_docs = {}         # _t   -> {_id -> dict}
         self._key_cache = {}         # spec_name -> {key -> set(_id)}
         self._registered_indexes = {}
+        self._flush_timer = None
 
     @property
     def _db_file(self):
@@ -154,9 +155,11 @@ class CouchDB:
         CachingMiddleware.WRITE_CACHE_SIZE = 50
         self._db = TinyDB(self._db_file, storage=CachingMiddleware(JSONStorage))
         self._rebuild_caches()
+        self._start_flush_timer()
 
     def close(self):
         with self._lock:
+            self._stop_flush_timer()
             if self._db:
                 self._db.close()
                 self._db = None
@@ -168,6 +171,29 @@ class CouchDB:
         self.close()
         if os.path.isfile(self._db_file):
             os.unlink(self._db_file)
+
+    # ---- periodic flush --------------------------------------------------
+
+    def _start_flush_timer(self):
+        """Schedule a background flush every 10 seconds so cached writes
+        are persisted even during quiet periods."""
+        self._flush_timer = threading.Timer(10, self._periodic_flush)
+        self._flush_timer.daemon = True
+        self._flush_timer.start()
+
+    def _stop_flush_timer(self):
+        if self._flush_timer:
+            self._flush_timer.cancel()
+            self._flush_timer = None
+
+    def _periodic_flush(self):
+        try:
+            self.compact()
+        except Exception:
+            pass
+        # Re-schedule if DB is still open
+        if self._db:
+            self._start_flush_timer()
 
     # ---- cache management ------------------------------------------------
 

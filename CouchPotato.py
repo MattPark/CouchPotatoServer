@@ -67,7 +67,7 @@ class Loader(object):
 
     def addSignals(self):
         signal.signal(signal.SIGINT, self.onExit)
-        signal.signal(signal.SIGTERM, lambda signum, stack_frame: sys.exit(1))
+        signal.signal(signal.SIGTERM, self.onExit)
 
         from couchpotato.core.event import addEvent
         addEvent('app.do_shutdown', self.setRestart)
@@ -77,6 +77,17 @@ class Loader(object):
         return True
 
     def onExit(self, signal, frame):
+        # Flush the database immediately so no cached writes are lost,
+        # even if the graceful shutdown takes too long and we get SIGKILLed.
+        try:
+            from couchpotato import get_db
+            db = get_db()
+            if db and db._db:
+                storage = db._db.storage
+                if hasattr(storage, 'flush'):
+                    storage.flush()
+        except Exception:
+            pass
         from couchpotato.core.event import fireEvent
         fireEvent('app.shutdown', single=True)
 
