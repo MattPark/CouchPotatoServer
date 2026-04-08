@@ -4,7 +4,7 @@ import traceback
 
 from couchpotato.api import addApiView
 from couchpotato.core.helpers.encoding import toUnicode
-from couchpotato.core.helpers.variable import tryInt, splitString
+from couchpotato.core.helpers.variable import tryInt
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
 from couchpotato.environment import Env
@@ -129,30 +129,37 @@ class Logging(Plugin):
             'log': log_lines,
         }
 
+    # Regex for the start of a log entry: "MM-DD HH:MM:SS LEVEL ..."
+    _log_line_re = re.compile(
+        r'^(\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+'
+        r'(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+'
+        r'(.*)$'
+    )
+
     def toList(self, log_content = ''):
 
-        logs_raw = re.split(r'\[0m\n', toUnicode(log_content))
-
         logs = []
-        re_split = r'\x1b'
-        for log_line in logs_raw:
-            split = re.split(re_split, log_line)
-            if split and len(split) == 3:
-                try:
-                    date, time, log_type = splitString(split[0], ' ')
-                    timestamp = '%s %s' % (date, time)
-                except:
-                    timestamp = 'UNKNOWN'
-                    log_type = 'UNKNOWN'
+        content = toUnicode(log_content)
 
-                message = ''.join(split[1]) if len(split) > 1 else split[0]
-                message = re.sub(r'\[\d+m\[', '[', message)
+        # Strip any leftover ANSI escape codes (from old rotated log files)
+        content = re.sub(r'\x1b\[[0-9;]*m', '', content)
 
+        for raw_line in content.split('\n'):
+            line = raw_line.rstrip()
+            if not line:
+                continue
+
+            match = self._log_line_re.match(line)
+            if match:
+                # New log entry
                 logs.append({
-                    'time': timestamp,
-                    'type': log_type,
-                    'message': message
+                    'time': match.group(1),
+                    'type': match.group(2),
+                    'message': match.group(3),
                 })
+            elif logs:
+                # Continuation line (e.g. traceback) — append to previous entry
+                logs[-1]['message'] += '\n' + line
 
         return logs
 

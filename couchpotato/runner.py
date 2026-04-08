@@ -224,7 +224,7 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
     hdlr2.setFormatter(formatter)
     logger.addHandler(hdlr2)
 
-    # Start logging & enable colors
+    # Start logging
     # noinspection PyUnresolvedReferences
     from couchpotato.core.logger import CPLog
     log = CPLog(__name__)

@@ -178,9 +178,9 @@ Page.Settings = new Class({
 					content_container = self.tabs[group.tab].subtabs[group.subtab].content;
 				}
 
-				if(group.list && !self.lists[group.list]){
-					self.lists[group.list] = self.createList(content_container);
-				}
+			if(group.list && !self.lists[group.list]){
+				self.lists[group.list] = self.createList(content_container, group.list);
+			}
 
 			// Create the group
 			if(!self.tabs[group.tab].groups[group.name]){
@@ -325,11 +325,14 @@ Page.Settings = new Class({
 
 	},
 
-	createList: function(content_container){
+	createList: function(content_container, list_name){
 		var self = this;
+		var is_notification = (list_name === 'notification_providers');
 		var list_el = new Element('div.option_list').inject(content_container);
+		list_el.store('list_name', list_name);
 
-		// Build "Add a service" dropdown — populated after all groups are injected
+		// Build "Add" dropdown — populated after all groups are injected
+		var placeholder = is_notification ? 'Add a notification service...' : 'Add a new provider...';
 		var wrapper = new Element('div.add_service_wrapper', {
 			'styles': {'padding': '10px 20px', 'border-bottom': '1px solid #ebebeb'}
 		}).inject(list_el, 'top');
@@ -360,22 +363,16 @@ Page.Settings = new Class({
 								fs.removeClass('disabled');
 							}
 						});
-						// Refresh dropdown after the fieldset is visible
-						// (checkState's refresh ran before display was set)
 						list_el.fireEvent('refreshDropdown');
 					}
-					else if(action === 'duplicate'){
-						// Call backend to create a new instance
+					else if(action === 'duplicate' && is_notification){
+						// Only notification providers support multi-instance
 						Api.request('notification.add_instance', {
 							'data': {'provider_type': target},
 							'onComplete': function(json){
 								if(json.success){
-									// Reload settings to get the new section rendered
-									// This is the simplest reliable approach since
-									// the settings page Create logic handles all option types
 									self.getData(function(data){
 										self.data = data;
-										// Re-render the page
 										self.content.empty();
 										self.tabs = {};
 										self.lists = {};
@@ -393,14 +390,10 @@ Page.Settings = new Class({
 			}
 		}).inject(wrapper);
 
-		// Refresh helper — rebuilds dropdown options as a single flat list.
-		// Each provider type appears once: if it has any visible card on the
-		// page (enabled OR disabled-but-toggled-off), selecting it adds a new
-		// duplicate instance.  If all cards for that type are hidden (deleted
-		// or never configured), selecting it re-enables the base instance.
+		// Refresh helper — rebuilds dropdown options
 		list_el.addEvent('refreshDropdown', function(){
 			dropdown.empty();
-			dropdown.adopt(new Element('option', {'value': '', 'text': 'Add a notification service...'}));
+			dropdown.adopt(new Element('option', {'value': '', 'text': placeholder}));
 
 			var seen = {};
 			var all_fieldsets = list_el.getElements('fieldset.enabler');
@@ -419,9 +412,7 @@ Page.Settings = new Class({
 				var label = fs.getElement('h2 .group_label');
 				var display_name = label ? label.get('text').trim().replace(/ #\d+$/, '') : base_type;
 
-				// Check if this provider type has any visible card on the page.
-				// Visible = user can see it (enabled or disabled-via-toggle).
-				// Hidden (display:none) = deleted or never configured.
+				// Check if this provider type has any visible card on the page
 				var has_visible = all_fieldsets.some(function(fs2){
 					var sc = '';
 					fs2.get('class').split(' ').each(function(cls){
@@ -431,14 +422,16 @@ Page.Settings = new Class({
 				});
 
 				if(has_visible){
-					// Check if this provider type disallows multi-instance
-					var no_dup = fs.get('data-no-duplicate') === '1';
-					if(!no_dup){
-						// At least one visible card — selecting adds another instance
-						dropdown.adopt(new Element('option', {
-							'value': 'duplicate:' + base_type,
-							'text': display_name
-						}));
+					// For notifications: allow duplicating if multi_instance is allowed
+					// For other providers: no duplicate support, skip this entry
+					if(is_notification){
+						var no_dup = fs.get('data-no-duplicate') === '1';
+						if(!no_dup){
+							dropdown.adopt(new Element('option', {
+								'value': 'duplicate:' + base_type,
+								'text': display_name
+							}));
+						}
 					}
 				} else {
 					// All cards hidden/deleted — selecting re-enables the base
@@ -778,15 +771,18 @@ Option.Enabler = new Class({
 
 		self.parentFieldset[ enabled ? 'removeClass' : 'addClass']('disabled');
 
-		// In option_list containers (notifications, providers):
+		// In notification_providers lists:
 		// On initial render, hide disabled providers so the list starts clean.
 		// On user toggle, do NOT change visibility — the card stays visible
 		// so the user can easily toggle it back on.
+		// Other list types (download_providers, torrent_providers, etc.):
+		// Never hide — always show all providers with toggle on/off.
 		if(self.parentList){
-			if(self._initialRender){
+			var list_name = self.parentList.retrieve('list_name');
+			if(list_name === 'notification_providers' && self._initialRender){
 				self.parentFieldset.setStyle('display', enabled ? 'block' : 'none');
 			}
-			// Refresh the "add service" dropdown to include/exclude this entry
+			// Refresh the dropdown to include/exclude this entry
 			self.parentList.fireEvent('refreshDropdown');
 		}
 
@@ -799,8 +795,8 @@ Option.Enabler = new Class({
 		self.parentList = self.parentFieldset.getParent('.option_list');
 		self.el.inject(self.parentFieldset, 'top');
 
-		// Add a visible remove button for providers inside option_list containers
-		if(self.parentList){
+		// Add a visible remove button only for notification providers
+		if(self.parentList && self.parentList.retrieve('list_name') === 'notification_providers'){
 			new Element('a.icon-cancel.remove_provider', {
 				'title': 'Remove this service',
 				'styles': {
