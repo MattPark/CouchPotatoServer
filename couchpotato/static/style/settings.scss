@@ -605,6 +605,8 @@
 	}
 
 	.apprise-builder-link {
+		overflow: visible;
+		position: static;
 		flex-shrink: 0;
 		font-size: .8em;
 		text-decoration: none;

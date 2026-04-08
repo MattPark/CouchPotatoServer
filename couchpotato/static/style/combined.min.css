@@ -972,7 +972,7 @@ input[type=text],textarea{-webkit-appearance:none}
 .dark .page.settings .apprise-dropdown-item{color:#eee}
 .page.settings .apprise-dropdown-item:hover{background:#ebebeb}
 .dark .page.settings .apprise-dropdown-item:hover{background:#4e4e4e}
-.page.settings .apprise-builder-link{flex-shrink:0;font-size:.8em;text-decoration:none;white-space:nowrap;padding:4px 8px;margin:0 8px}
+.page.settings .apprise-builder-link{overflow:visible;position:static;flex-shrink:0;font-size:.8em;text-decoration:none;white-space:nowrap;padding:4px 8px;margin:0 8px}
 .page.settings .apprise-builder-link:hover{text-decoration:underline}
 .page.settings .apprise-url-input{flex:1;min-width:100px;padding:5px 8px;border:1px solid #ebebeb;border-radius:3px;font-size:.85em;font-family:monospace;background:#fff;color:#666;box-sizing:border-box}
 .dark .page.settings .apprise-url-input{border-color:#4e4e4e;background:#2d2d2d;color:#eee}
