@@ -21,8 +21,7 @@ RUN \
     python3 \
     py3-pip \
     py3-lxml \
-    mediainfo \
-    unrar && \
+    mediainfo && \
   echo "**** install pip packages ****" && \
   pip3 install --no-cache-dir --break-system-packages \
     tinydb \
