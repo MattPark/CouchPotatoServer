@@ -26,6 +26,8 @@ var QualityBase = new Class({
 	getActiveProfiles: function(){
 		return Array.filter(this.profiles, function(profile){
 			return !profile.data.hide;
+		}).sort(function(a, b){
+			return (a.data.order != null ? a.data.order : 99) - (b.data.order != null ? b.data.order : 99);
 		});
 	},
 
@@ -170,6 +172,16 @@ var QualityBase = new Class({
 				'ids': ids,
 				'hidden': hidden
 			}
+		});
+
+		// Update local profile data to match new order
+		ids.each(function(id, idx){
+			self.profiles.each(function(profile){
+				if(profile.data._id == id){
+					profile.data.order = idx;
+					profile.data.hide = !!hidden[idx];
+				}
+			});
 		});
 
 	},
