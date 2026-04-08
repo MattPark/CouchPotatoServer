@@ -123,6 +123,9 @@ class Settings(object):
             self.log.warning('set::option "%s.%s" cancelled, since it is a META option', (section, option))
             return None
 
+        if not self.p.has_section(section):
+            self.p.add_section(section)
+
         return self.p.set(section, option, str(value))
 
     def get(self, option = '', section = 'core', default = None, type = None):

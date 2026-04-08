@@ -595,10 +595,10 @@
 	.apprise-row {
 		display: flex;
 		align-items: center;
-		padding: 8px $padding;
+		padding: 8px 0 8px $padding;
 		border-bottom: 1px solid transparent;
 		@include theme(border-color, off);
-		gap: 8px;
+		gap: $padding/2;
 
 		&.apprise-disabled {
 			opacity: 0.45;
@@ -747,7 +747,7 @@
 	}
 
 	.apprise-footer {
-		padding: 8px $padding;
+		padding: 8px 0 8px $padding;
 	}
 
 	.apprise-add-btn {
@@ -757,6 +757,122 @@
 
 	.disabled .apprise-rows,
 	.disabled .apprise-footer { display: none; }
+
+	/** IMDB Watchlist URL manager **/
+	.ctrlHolder.imdb_watchlist_urls {
+		display: block !important;
+		padding: 0;
+		border: none;
+	}
+
+	.imdb-watchlist-row {
+		display: flex;
+		align-items: center;
+		padding: 8px 0 8px $padding;
+		border-bottom: 1px solid transparent;
+		@include theme(border-color, off);
+		gap: $padding/2;
+
+		&.imdb-watchlist-disabled {
+			opacity: 0.45;
+		}
+
+		@include media-phablet {
+			flex-wrap: wrap;
+			gap: 6px;
+		}
+	}
+
+	.imdb-watchlist-url-input {
+		flex: 1;
+		min-width: 100px;
+		font-family: monospace;
+		font-size: .85em;
+		padding: 5px 8px;
+		@include theme(background, background);
+		@include theme(color, text);
+		@include theme(border-color, off);
+		border: 1px solid;
+
+		@include theme-dark {
+			background: darken(get-theme-dark(background), 3);
+		}
+
+		@include media-phablet {
+			width: 100%;
+			flex: none;
+		}
+	}
+
+	.imdb-watchlist-test-wrapper {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		flex-shrink: 0;
+	}
+
+	.imdb-watchlist-test-btn {
+		font-size: .75em !important;
+		padding: 3px 10px !important;
+	}
+
+	.imdb-watchlist-test-result {
+		font-size: 1.1em;
+		min-width: 16px;
+
+		.imdb-ok {
+			color: #4CAF50;
+			cursor: help;
+		}
+
+		.imdb-fail {
+			color: #f44336;
+			cursor: help;
+		}
+	}
+
+	.imdb-watchlist-title {
+		font-size: .8em;
+		opacity: 0.7;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		max-width: 200px;
+		flex-shrink: 0;
+		@include theme(color, text);
+
+		@include media-phablet {
+			max-width: none;
+			flex: 1;
+		}
+	}
+
+	.imdb-watchlist-delete {
+		cursor: pointer;
+		opacity: 0.4;
+		font-size: 14px;
+		flex-shrink: 0;
+
+		&:hover {
+			opacity: 1;
+		}
+	}
+
+	.imdb-watchlist-toggle {
+		flex-shrink: 0;
+	}
+
+	.imdb-watchlist-footer {
+		padding: 8px 0 8px $padding;
+	}
+
+	.imdb-watchlist-add-btn {
+		font-size: .8em !important;
+		padding: 4px 12px !important;
+	}
+
+	.disabled .imdb-watchlist-rows,
+	.disabled .imdb-watchlist-footer { display: none; }
 
 
 	.tab_about {

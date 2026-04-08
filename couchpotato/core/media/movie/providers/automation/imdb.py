@@ -5,6 +5,7 @@ import traceback
 from base64 import b64decode
 
 from couchpotato import fireEvent
+from couchpotato.api import addApiView
 from couchpotato.core.helpers.variable import splitString, tryInt
 from couchpotato.core.logger import CPLog
 from couchpotato.core.media._base.providers.base import MultiProvider
@@ -116,13 +117,13 @@ class IMDBBase(Automation):
 
             result = self._graphqlRequest(query)
             if not result or 'data' not in result or not result['data'].get('list'):
-                log.error('Failed to fetch IMDB list %s via GraphQL' % list_id)
+                log.error('Failed to fetch IMDB list %s via GraphQL' % (list_id,))
                 break
 
             items = result['data']['list'].get('items') or {}
             if not items:
                 # List is private or requires authentication
-                log.warning('IMDB list %s returned no items (list may be private or require authentication)' % list_id)
+                log.warning('IMDB list %s returned no items (list may be private or require authentication)' % (list_id,))
                 break
             edges = items.get('edges', [])
 
@@ -145,6 +146,76 @@ class IMDBBase(Automation):
 
         log.debug('Fetched %d movies from IMDB list %s via GraphQL' % (len(imdb_ids), list_id))
         return imdb_ids
+
+    @staticmethod
+    def _extractListId(url):
+        """Extract an IMDB list ID (e.g. ls123456789) from a URL or bare ID string."""
+        if not url:
+            return None
+        url = url.strip()
+        # Bare list ID
+        if re.match(r'^ls\d{9,}$', url):
+            return url
+        # URL with list/ls... or list_id=ls...
+        ids = re.findall(r'(?:list/|list_id=)(ls\d{9,})', url)
+        if ids:
+            return ids[0]
+        return None
+
+    def getListInfoViaGraphQL(self, list_id):
+        """Fetch metadata for an IMDB list (name + first-page item count).
+
+        Returns dict: {'title': str, 'count': int} or None on failure.
+        The query asks for the list name and a small page of items to count.
+        """
+        query = '''
+        {
+          list(id: "%s") {
+            name {
+              originalText
+            }
+            items(first: 250) {
+              edges {
+                node {
+                  item {
+                    ... on Title {
+                      id
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        ''' % list_id
+
+        result = self._graphqlRequest(query)
+        if not result or 'data' not in result or not result['data'].get('list'):
+            return None
+
+        list_data = result['data']['list']
+
+        # Extract title — try name.originalText, fall back to list ID
+        title = ''
+        name_obj = list_data.get('name')
+        if name_obj and isinstance(name_obj, dict):
+            title = name_obj.get('originalText', '')
+        elif name_obj and isinstance(name_obj, str):
+            title = name_obj
+        if not title:
+            title = list_id
+
+        # Count items on first page
+        items = list_data.get('items') or {}
+        edges = items.get('edges', [])
+        count = 0
+        for edge in edges:
+            node = edge.get('node', {})
+            item = node.get('item', {})
+            if item.get('id', '').startswith('tt'):
+                count += 1
+
+        return {'title': title, 'count': count}
 
     def getTop250ViaGraphQL(self):
         """Fetch the IMDB Top 250 chart using the GraphQL API."""
@@ -277,25 +348,107 @@ class IMDBWatchlist(IMDBBase):
 
     enabled_option = 'automation_enabled'
 
+    def __init__(self):
+        super().__init__()
+        addApiView('imdb.test_url', self.testUrlView)
+
+    def testUrlView(self, **kwargs):
+        """API endpoint: test a single IMDB list URL and return list metadata."""
+        url = (kwargs.get('url') or '').strip()
+        if not url:
+            return {'success': False, 'message': 'No URL provided'}
+
+        list_id = self._extractListId(url)
+        if not list_id:
+            # Check for user watchlist URLs
+            userids = re.findall(r'(ur\d{7,9})', url)
+            if userids:
+                return {'success': False, 'message': 'User watchlist URLs (ur...) are not supported. Convert to a public IMDB list.'}
+            return {'success': False, 'message': 'Could not extract IMDB list ID from URL'}
+
+        try:
+            info = self.getListInfoViaGraphQL(list_id)
+            if info:
+                return {'success': True, 'title': info['title'], 'count': info['count'], 'list_id': list_id}
+            else:
+                return {'success': False, 'message': 'List not found or private (list: %s)' % list_id}
+        except:
+            log.error('IMDB test_url failed for %s: %s' % (url, traceback.format_exc()))
+            return {'success': False, 'message': 'Request failed'}
+
+    @staticmethod
+    def _parseWatchlistConfig(raw_value):
+        """Parse the automation_urls config value.
+
+        Supports JSON array format: [{"url": "...", "enabled": true, "title": "..."}, ...]
+        Returns list of dicts, or empty list.
+        """
+        if not raw_value:
+            return []
+        raw_value = raw_value.strip()
+        if not raw_value:
+            return []
+        try:
+            entries = json.loads(raw_value)
+            if isinstance(entries, list):
+                return entries
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+        return []
+
+    def _migrateOldConfig(self):
+        """Detect old comma-separated automation_urls + automation_urls_use format
+        and migrate to JSON array format. Returns True if migration happened."""
+        from couchpotato.environment import Env
+
+        raw_urls = self.conf('automation_urls') or ''
+        raw_use = self.conf('automation_urls_use') or ''
+
+        # Already in JSON format or empty
+        if not raw_urls or raw_urls.strip().startswith('['):
+            return False
+
+        # Old format: comma-separated URLs
+        urls = splitString(raw_urls)
+        enablers = [tryInt(x) for x in splitString(raw_use)]
+
+        entries = []
+        for i, url in enumerate(urls):
+            url = url.strip()
+            if not url:
+                continue
+            enabled = bool(enablers[i]) if i < len(enablers) else True
+            entries.append({'url': url, 'enabled': enabled, 'title': ''})
+
+        if entries:
+            new_value = json.dumps(entries)
+            # Save the new JSON format
+            settings = Env.get('settings')
+            settings.set('imdb', 'automation_urls', new_value)
+            settings.save()
+            log.info('Migrated %d IMDB watchlist URLs from old comma-separated format to JSON' % (len(entries),))
+            return True
+        return False
+
     def getIMDBids(self):
 
         movies = []
 
-        watchlist_enablers = [tryInt(x) for x in splitString(self.conf('automation_urls_use'))]
-        watchlist_urls = splitString(self.conf('automation_urls'))
+        # Migrate old format if needed
+        self._migrateOldConfig()
 
-        index = -1
-        for watchlist_url in watchlist_urls:
+        entries = self._parseWatchlistConfig(self.conf('automation_urls'))
 
-            index += 1
-            if index >= len(watchlist_enablers) or not watchlist_enablers[index]:
+        for entry in entries:
+            url = (entry.get('url') or '').strip()
+            enabled = entry.get('enabled', True)
+
+            if not url or not enabled:
                 continue
 
             try:
-                # Extract list ID from URL
-                ids = re.findall(r'(?:list/|list_id=)([a-zA-Z0-9\-_]{11})', watchlist_url)
-                if len(ids) == 1:
-                    list_id = ids[0]
+                list_id = self._extractListId(url)
+                if list_id:
                     imdbs = self.getListViaGraphQL(list_id)
 
                     for imdb in imdbs:
@@ -305,23 +458,41 @@ class IMDBWatchlist(IMDBBase):
                         if self.shuttingDown():
                             break
 
+                    # Update title/count in config if not already set
+                    if not entry.get('title') and imdbs:
+                        info = self.getListInfoViaGraphQL(list_id)
+                        if info:
+                            entry['title'] = info.get('title', '')
+                            entry['count'] = info.get('count', len(imdbs))
+                            self._saveWatchlistConfig(entries)
+
                     log.debug('Found %d movies from IMDB list %s' % (len(imdbs), list_id))
                 else:
                     # Try user watchlist - these are often private and won't work via GraphQL
-                    userids = re.findall(r'(ur\d{7,9})', watchlist_url)
-                    if len(userids) == 1:
+                    userids = re.findall(r'(ur\d{7,9})', url)
+                    if userids:
                         log.warning(
                             'User watchlist URLs (ur%s) are no longer supported. '
                             'Please convert your watchlist to a public IMDB list and use the list URL instead. '
                             'Go to your IMDB watchlist, click "..." menu, and choose "Copy list to new list".'
-                            % userids[0]
+                            % (userids[0],)
                         )
                     else:
-                        log.error('Could not extract IMDB list ID from URL: %s' % watchlist_url)
+                        log.error('Could not extract IMDB list ID from URL: %s' % (url,))
             except:
-                log.error('Failed loading IMDB watchlist "%s": %s' % (watchlist_url, traceback.format_exc()))
+                log.error('Failed loading IMDB watchlist "%s": %s' % (url, traceback.format_exc()))
 
         return movies
+
+    def _saveWatchlistConfig(self, entries):
+        """Persist the watchlist entries back to config as JSON."""
+        from couchpotato.environment import Env
+        try:
+            settings = Env.get('settings')
+            settings.set('imdb', 'automation_urls', json.dumps(entries))
+            settings.save()
+        except:
+            log.error('Failed saving watchlist config: %s' % (traceback.format_exc(),))
 
 
 class IMDBAutomation(IMDBBase):
@@ -436,14 +607,10 @@ config = [{
                     'type': 'enabler',
                 },
                 {
-                    'name': 'automation_urls_use',
-                    'label': 'Use',
-                },
-                {
                     'name': 'automation_urls',
-                    'label': 'url',
-                    'type': 'combined',
-                    'combine': ['automation_urls_use', 'automation_urls'],
+                    'label': 'IMDB Lists',
+                    'default': '',
+                    'type': 'imdb_watchlist_urls',
                 },
             ],
         },
