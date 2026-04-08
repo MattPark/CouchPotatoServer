@@ -267,3 +267,74 @@ class TestPy2RemnantsRemoved:
             path = os.path.join(libs_dir, name)
             assert not os.path.exists(path), \
                 '%s should have been deleted' % name
+
+
+class TestStaleCacheClearance:
+    """Tests for the startup logic that clears incompatible cache files.
+
+    runner.py detects stale cache files from the old vendored cache library
+    by trying to unpickle a sample file. If it fails, all files are removed.
+    """
+
+    def test_stale_files_cleared(self, tmp_path):
+        """Incompatible (non-pickle) cache files are removed on startup."""
+        cache_dir = str(tmp_path / 'python')
+        os.makedirs(cache_dir)
+        # Write files that aren't valid pickle
+        for i in range(5):
+            with open(os.path.join(cache_dir, 'stale_%d' % i), 'wb') as f:
+                f.write(b'not-a-pickle-file')
+
+        # Simulate the startup logic from runner.py
+        import pickle
+        _cache_files = [f for f in os.listdir(cache_dir) if not f.startswith('.')]
+        assert len(_cache_files) == 5
+        _sample = os.path.join(cache_dir, _cache_files[0])
+        try:
+            with open(_sample, 'rb') as _f:
+                pickle.load(_f)
+        except Exception:
+            for _cf in _cache_files:
+                try:
+                    os.remove(os.path.join(cache_dir, _cf))
+                except OSError:
+                    pass
+
+        remaining = os.listdir(cache_dir)
+        assert len(remaining) == 0
+
+    def test_valid_pickle_files_kept(self, tmp_path):
+        """Valid pickle cache files are NOT removed."""
+        cache_dir = str(tmp_path / 'python')
+        os.makedirs(cache_dir)
+        import pickle
+        for i in range(3):
+            with open(os.path.join(cache_dir, 'valid_%d' % i), 'wb') as f:
+                pickle.dump({'key': 'value_%d' % i}, f)
+
+        _cache_files = [f for f in os.listdir(cache_dir) if not f.startswith('.')]
+        assert len(_cache_files) == 3
+        _sample = os.path.join(cache_dir, _cache_files[0])
+        cleared = False
+        try:
+            with open(_sample, 'rb') as _f:
+                pickle.load(_f)
+        except Exception:
+            cleared = True
+            for _cf in _cache_files:
+                try:
+                    os.remove(os.path.join(cache_dir, _cf))
+                except OSError:
+                    pass
+
+        assert not cleared, "Valid pickle files should not trigger clearing"
+        remaining = os.listdir(cache_dir)
+        assert len(remaining) == 3
+
+    def test_empty_cache_dir_no_error(self, tmp_path):
+        """Empty cache directory doesn't cause any errors."""
+        cache_dir = str(tmp_path / 'python')
+        os.makedirs(cache_dir)
+        _cache_files = [f for f in os.listdir(cache_dir) if not f.startswith('.')]
+        assert len(_cache_files) == 0
+        # No sample to check — logic should skip entirely
