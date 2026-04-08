@@ -989,7 +989,7 @@ input[type=text],textarea{-webkit-appearance:none}
 .dark .page.settings .imdb-watchlist-row{border-color:#4e4e4e}
 .page.settings .imdb-watchlist-row.imdb-watchlist-disabled{opacity:.45}
 @media (max-width:485px){.page.settings .imdb-watchlist-row{flex-wrap:wrap;gap:6px}}
-.page.settings .imdb-watchlist-url-input{flex:1;min-width:100px;font-family:monospace;font-size:.85em;padding:5px 8px;background:#fff;color:#666;border:1px solid #ebebeb}
+.page.settings .imdb-watchlist-url-input{width:340px;flex-shrink:0;font-family:monospace;font-size:.85em;padding:5px 8px;background:#fff;color:#666;border:1px solid #ebebeb}
 .dark .page.settings .imdb-watchlist-url-input{background:#333;color:#eee;border-color:#4e4e4e}
 @media (max-width:485px){.page.settings .imdb-watchlist-url-input{width:100%;flex:none}}
 .page.settings .imdb-watchlist-test-wrapper{display:flex;align-items:center;gap:4px;flex-shrink:0}
@@ -997,9 +997,9 @@ input[type=text],textarea{-webkit-appearance:none}
 .page.settings .imdb-watchlist-test-result{font-size:1.1em;min-width:16px}
 .page.settings .imdb-watchlist-test-result .imdb-ok{color:#4CAF50;cursor:help}
 .page.settings .imdb-watchlist-test-result .imdb-fail{color:#f44336;cursor:help}
-.page.settings .imdb-watchlist-title{font-size:.8em;opacity:.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;flex-shrink:0;color:#666}
+.page.settings .imdb-watchlist-title{font-size:.8em;opacity:.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;color:#666}
 .dark .page.settings .imdb-watchlist-title{color:#eee}
-@media (max-width:485px){.page.settings .imdb-watchlist-title{max-width:none;flex:1}}
+
 .page.settings .imdb-watchlist-delete{cursor:pointer;opacity:.4;font-size:14px;flex-shrink:0}
 .page.settings .imdb-watchlist-delete:hover{opacity:1}
 .page.settings .imdb-watchlist-toggle{flex-shrink:0}

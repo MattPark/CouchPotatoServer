@@ -784,8 +784,8 @@
 	}
 
 	.imdb-watchlist-url-input {
-		flex: 1;
-		min-width: 100px;
+		width: 340px;
+		flex-shrink: 0;
 		font-family: monospace;
 		font-size: .85em;
 		padding: 5px 8px;
@@ -837,14 +837,9 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		max-width: 200px;
-		flex-shrink: 0;
+		flex: 1;
+		min-width: 0;
 		@include theme(color, text);
-
-		@include media-phablet {
-			max-width: none;
-			flex: 1;
-		}
 	}
 
 	.imdb-watchlist-delete {
