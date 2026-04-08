@@ -466,12 +466,11 @@ class TestDockerfile:
         src = self._read_dockerfile()
         assert 'mediainfo' in src
 
-    def test_installs_unrar(self):
-        """unrar removed from Alpine apk (not available in Alpine 3.20 repos).
-        rarfile will raise a clear error if no extraction tool is found."""
+    def test_installs_bsdtar(self):
+        """libarchive-tools provides bsdtar for RAR extraction in container.
+        rarfile auto-detects: tries unrar first, falls back to bsdtar."""
         src = self._read_dockerfile()
-        # unrar is no longer installed via apk; rarfile pip package handles gracefully
-        assert 'rarfile' in src
+        assert 'libarchive-tools' in src
 
     def test_installs_pip_rarfile(self):
         src = self._read_dockerfile()
