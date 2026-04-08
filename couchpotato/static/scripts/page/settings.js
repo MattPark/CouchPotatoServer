@@ -1734,18 +1734,15 @@ Option.Apprise_urls = new Class({
 
 		service_wrapper.adopt(service_input, dropdown_list);
 
-		// Column 2: URL builder link
+		// Column 2: URL builder link (wrapped in div like test button)
+		var builder_wrapper = new Element('div.apprise-builder-wrapper');
 		var builder_link = new Element('a.button.apprise-builder-link', {
 			'href': self._getBuilderUrl(schema),
 			'target': '_blank',
 			'title': 'Open URL Builder',
-			'text': 'Wizard',
-			'styles': {
-				'position': 'static',
-				'overflow': 'visible',
-				'flex-shrink': '0'
-			}
+			'text': 'Wizard'
 		});
+		builder_wrapper.adopt(builder_link);
 
 		// Column 3: URL input
 		var url_input = new Element('input.apprise-url-input', {
@@ -1812,7 +1809,7 @@ Option.Apprise_urls = new Class({
 		});
 		toggle_wrapper.adopt(toggle_input, new Element('div.toggle'));
 
-		row.adopt(service_wrapper, builder_link, url_input, snatch_wrapper, test_wrapper, delete_btn, toggle_wrapper);
+		row.adopt(service_wrapper, builder_wrapper, url_input, snatch_wrapper, test_wrapper, delete_btn, toggle_wrapper);
 
 		if(!enabled) row.addClass('apprise-disabled');
 
