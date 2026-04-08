@@ -178,19 +178,19 @@ Page.Settings = new Class({
 					content_container = self.tabs[group.tab].subtabs[group.subtab].content;
 				}
 
-			if(group.list && !self.lists[group.list]){
-				self.lists[group.list] = self.createList(content_container, group.list);
-			}
+				if(group.list && !self.lists[group.list]){
+					self.lists[group.list] = self.createList(content_container, group.list);
+				}
 
-			// Create the group
-			if(!self.tabs[group.tab].groups[group.name]){
-				var group_el = self.createGroup(group)
-					.inject(group.list ? self.lists[group.list] : content_container)
-					.addClass('section_'+section_name);
-				if(group.multi_instance === false)
-					group_el.set('data-no-duplicate', '1');
-				self.tabs[group.tab].groups[group.name] = group_el;
-			}
+				// Create the group
+				if(!self.tabs[group.tab].groups[group.name]){
+					var group_el = self.createGroup(group)
+						.inject(group.list ? self.lists[group.list] : content_container)
+						.addClass('section_'+section_name);
+					if(group.multi_instance === false)
+						group_el.set('data-no-duplicate', '1');
+					self.tabs[group.tab].groups[group.name] = group_el;
+				}
 
 				// Create list if needed
 				if(group.type && group.type == 'list'){
@@ -331,11 +331,10 @@ Page.Settings = new Class({
 		var list_el = new Element('div.option_list').inject(content_container);
 		list_el.store('list_name', list_name);
 
-		// Build "Add" dropdown — populated after all groups are injected
-		var placeholder = is_notification ? 'Add a notification service...' : 'Add a new provider...';
-		var wrapper = new Element('div.add_service_wrapper', {
-			'styles': {'padding': '10px 20px', 'border-bottom': '1px solid #ebebeb'}
-		}).inject(list_el, 'top');
+		// Only notification lists get the "Add / Duplicate" dropdown
+		if(!is_notification) return list_el;
+
+		var wrapper = new Element('div.add_service_wrapper').inject(list_el, 'top');
 
 		var dropdown = new Element('select.add_service_dropdown', {
 			'events': {
@@ -343,13 +342,11 @@ Page.Settings = new Class({
 					var val = this.get('value');
 					if(!val) return;
 
-					// Parse the value: "enable:group_label" or "duplicate:provider_type"
 					var parts = val.split(':');
 					var action = parts[0];
 					var target = parts.slice(1).join(':');
 
 					if(action === 'enable'){
-						// Find the fieldset for this provider and enable it
 						var fieldsets = list_el.getElements('fieldset.enabler.disabled');
 						fieldsets.each(function(fs){
 							var label = fs.getElement('h2 .group_label');
@@ -359,14 +356,12 @@ Page.Settings = new Class({
 									toggle.set('checked', true);
 									toggle.fireEvent('change');
 								}
-								fs.setStyle('display', 'block');
 								fs.removeClass('disabled');
 							}
 						});
 						list_el.fireEvent('refreshDropdown');
 					}
-					else if(action === 'duplicate' && is_notification){
-						// Only notification providers support multi-instance
+					else if(action === 'duplicate'){
 						Api.request('notification.add_instance', {
 							'data': {'provider_type': target},
 							'onComplete': function(json){
@@ -393,12 +388,11 @@ Page.Settings = new Class({
 		// Refresh helper — rebuilds dropdown options
 		list_el.addEvent('refreshDropdown', function(){
 			dropdown.empty();
-			dropdown.adopt(new Element('option', {'value': '', 'text': placeholder}));
+			dropdown.adopt(new Element('option', {'value': '', 'text': 'Add a notification service...'}));
 
 			var seen = {};
 			var all_fieldsets = list_el.getElements('fieldset.enabler');
 			all_fieldsets.each(function(fs){
-				// Determine the base provider type from the section class
 				var section_class = '';
 				fs.get('class').split(' ').each(function(cls){
 					if(cls.indexOf('section_') === 0){
@@ -412,37 +406,26 @@ Page.Settings = new Class({
 				var label = fs.getElement('h2 .group_label');
 				var display_name = label ? label.get('text').trim().replace(/ #\d+$/, '') : base_type;
 
-				// Check if this provider type has any visible card on the page
-				var has_visible = all_fieldsets.some(function(fs2){
+				// Check if provider is enabled (has at least one visible, non-disabled card)
+				var has_enabled = all_fieldsets.some(function(fs2){
 					var sc = '';
 					fs2.get('class').split(' ').each(function(cls){
 						if(cls.indexOf('section_') === 0) sc = cls.replace('section_', '');
 					});
-					return sc.replace(/_\d+$/, '') === base_type && fs2.getStyle('display') !== 'none';
+					return sc.replace(/_\d+$/, '') === base_type && !fs2.hasClass('disabled');
 				});
 
-				if(has_visible){
-					// For notifications: allow duplicating if multi_instance is allowed
-					// For other providers: no duplicate support, skip this entry
-					if(is_notification){
-						var no_dup = fs.get('data-no-duplicate') === '1';
-						if(!no_dup){
-							dropdown.adopt(new Element('option', {
-								'value': 'duplicate:' + base_type,
-								'text': display_name
-							}));
-						}
+				if(has_enabled){
+					// Allow duplicating if multi_instance is allowed
+					var no_dup = fs.get('data-no-duplicate') === '1';
+					if(!no_dup){
+						dropdown.adopt(new Element('option', {
+							'value': 'duplicate:' + base_type,
+							'text': '+ Add another ' + display_name
+						}));
 					}
-				} else {
-					// All cards hidden/deleted — selecting re-enables the base
-					dropdown.adopt(new Element('option', {
-						'value': 'enable:' + display_name,
-						'text': display_name
-					}));
 				}
 			});
-
-			wrapper.setStyle('display', 'block');
 		});
 
 		// Trigger initial refresh after a short delay (fieldsets not yet injected)
@@ -771,19 +754,12 @@ Option.Enabler = new Class({
 
 		self.parentFieldset[ enabled ? 'removeClass' : 'addClass']('disabled');
 
-		// In notification_providers lists:
-		// On initial render, hide disabled providers so the list starts clean.
-		// On user toggle, do NOT change visibility — the card stays visible
-		// so the user can easily toggle it back on.
-		// Other list types (download_providers, torrent_providers, etc.):
-		// Never hide — always show all providers with toggle on/off.
+		// Refresh the notification dropdown if this provider is in a notification list
 		if(self.parentList){
 			var list_name = self.parentList.retrieve('list_name');
-			if(list_name === 'notification_providers' && self._initialRender){
-				self.parentFieldset.setStyle('display', enabled ? 'block' : 'none');
+			if(list_name === 'notification_providers'){
+				self.parentList.fireEvent('refreshDropdown');
 			}
-			// Refresh the dropdown to include/exclude this entry
-			self.parentList.fireEvent('refreshDropdown');
 		}
 
 	},
@@ -834,9 +810,8 @@ Option.Enabler = new Class({
 			}).inject(self.parentFieldset.getElement('h2'));
 		}
 
-		self._initialRender = true;
+		self._initialRender = false;
 		self.checkState();
-		delete self._initialRender;
 	}
 
 });
