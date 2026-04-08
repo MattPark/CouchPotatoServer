@@ -567,15 +567,11 @@
 .empty_wanted .group_userscript.group_userscript{padding:20px 0}
 .wgroup_automation .group_userscript.group_userscript{padding:10px 0;margin-left:0}
 .group_userscript.group_userscript h2{margin:0 0 10px}
-.group_userscript.group_userscript .userscript{margin-left:20px}
-@media (max-width:768px){.group_userscript.group_userscript .userscript{margin-left:10px}
+.group_userscript.group_userscript .bookmarklet_wrapper{padding:0 20px}
+@media (max-width:768px){.group_userscript.group_userscript .bookmarklet_wrapper{padding:0 10px}
 }
-.wgroup_automation .group_userscript.group_userscript .userscript{margin-left:0}
+.wgroup_automation .group_userscript.group_userscript .bookmarklet_wrapper{padding:0}
 .group_userscript.group_userscript .bookmarklet span{margin-left:10px;display:inline-block}
-.group_userscript.group_userscript img{clear:both;margin:20px;width:100%;max-width:600px}
-@media (max-width:768px){.group_userscript.group_userscript img{margin:10px}
-}
-.wgroup_automation .group_userscript.group_userscript img{margin-left:0}
 .page.wizard{top:0!important}
 .page.wizard .navigation.navigation{display:none}
 .page.wizard .tab_content.tab_content{display:block}

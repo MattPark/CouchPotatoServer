@@ -88,15 +88,15 @@
 		margin: 0 0 $padding/2;
 	}
 
-	.userscript {
-		margin-left: $padding;
+	.bookmarklet_wrapper {
+		padding: 0 $padding;
 
 		@include media-tablet {
-			margin-left: $padding/2;
+			padding: 0 $padding/2;
 		}
 
 		.wgroup_automation & {
-			margin-left: 0;
+			padding: 0;
 		}
 	}
 
@@ -105,21 +105,6 @@
 		span {
 			margin-left: 10px;
 			display: inline-block;
-		}
-	}
-
-	img {
-		clear: both;
-		margin: $padding;
-		width: 100%;
-		max-width: 600px;
-
-		@include media-tablet {
-			margin: $padding/2;
-		}
-
-		.wgroup_automation & {
-			margin-left: 0;
 		}
 	}
 }

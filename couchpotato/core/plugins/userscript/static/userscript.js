@@ -70,8 +70,8 @@ var UserscriptSettingTab = new Class({
 				'name': 'userscript',
 				'label': 'Bookmarklet',
 				'description': 'Easily add movies via imdb.com, appletrailers and more'
-			}).inject(self.settings.tabs.automation.content, 'top').adopt(
-				new Element('div').adopt(
+			}			).inject(self.settings.tabs.automation.content, 'top').adopt(
+				new Element('div.bookmarklet_wrapper').adopt(
 					new Element('span.bookmarklet').adopt(
 						new Element('a.button.green', {
 							'text': '+CouchPotato',

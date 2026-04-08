@@ -408,7 +408,7 @@
 		var host_url = window.location.protocol + '//' + window.location.host;
 
 		return new Element('div.group_userscript').adopt(
-			new Element('div').adopt(
+			new Element('div.bookmarklet_wrapper').adopt(
 				new Element('span.bookmarklet').adopt(
 					new Element('a.button', {
 						'text': '+CouchPotato',
