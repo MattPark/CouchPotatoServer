@@ -7,7 +7,6 @@ application-wide HTTP cache (Env.get('cache')).
 
 import os
 import sys
-import tempfile
 import time
 
 import pytest
@@ -17,7 +16,7 @@ libs_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'libs')
 if libs_dir not in sys.path:
     sys.path.insert(0, libs_dir)
 
-from cachelib import FileSystemCache
+from cachelib import FileSystemCache  # noqa: E402
 
 
 @pytest.fixture

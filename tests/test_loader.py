@@ -19,7 +19,7 @@ libs_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'libs')
 if libs_dir not in sys.path:
     sys.path.insert(0, libs_dir)
 
-from couchpotato.core.loader import Loader
+from couchpotato.core.loader import Loader  # noqa: E402
 
 
 class TestLoaderImportModule:

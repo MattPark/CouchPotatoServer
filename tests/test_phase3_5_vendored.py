@@ -13,12 +13,9 @@ Verifies that:
 - No remaining Python 2 constructs in fixed files
 """
 
-import inspect
 import os
-import re
 import sys
 import tempfile
-import shutil
 
 import pytest
 
