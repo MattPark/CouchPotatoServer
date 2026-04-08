@@ -178,6 +178,25 @@ Page.Settings = new Class({
 					content_container = self.tabs[group.tab].subtabs[group.subtab].content;
 				}
 
+				// Handle list container definitions (type: 'list') — render section header + create list
+			if(group.type && group.type == 'list'){
+				// Create section header above the list
+				new Element('fieldset.list_section_header').adopt(
+					new Element('h2').adopt(
+						new Element('span.group_label', {'text': group.label || (group.name || '').capitalize()}),
+						group.description ? new Element('span.hint', {'html': group.description}) : null
+					)
+				).inject(content_container);
+
+				// Create the option_list below the header (or reposition an existing one)
+				if(!self.lists[group.name]){
+					self.lists[group.name] = self.createList(content_container, group.name);
+				} else {
+					self.lists[group.name].inject(content_container);
+				}
+				return;
+			}
+
 			if(group.list && !self.lists[group.list]){
 				self.lists[group.list] = self.createList(content_container, group.list);
 			}
@@ -190,15 +209,12 @@ Page.Settings = new Class({
 				if(group.multi_instance === false)
 					group_el.set('data-no-duplicate', '1');
 				self.tabs[group.tab].groups[group.name] = group_el;
-			}
 
-				// Create list if needed
-				if(group.type && group.type == 'list'){
-					if(!self.lists[group.name])
-						self.lists[group.name] = self.createList(content_container);
-					else
-						self.lists[group.name].inject(self.tabs[group.tab].groups[group.name]);
+				// If this provider was previously deleted (hidden), apply provider-removed class
+				if(group.list && self.getValue(section_name, 'hidden') == '1'){
+					group_el.addClass('provider-removed');
 				}
+			}
 
 				// Add options to group
 				group.options.stableSort(self.sortByOrder).each(function(option){
@@ -331,13 +347,11 @@ Page.Settings = new Class({
 		var list_el = new Element('div.option_list').inject(content_container);
 		list_el.store('list_name', list_name);
 
-		// Build "Add" dropdown — populated after all groups are injected
+		// Build "Add" dropdown — uses same select_wrapper.icon-dropdown as Option.Dropdown
 		var placeholder = is_notification ? 'Add a notification service...' : 'Add a new provider...';
-		var wrapper = new Element('div.add_service_wrapper', {
-			'styles': {'padding': '10px 20px', 'border-bottom': '1px solid #ebebeb'}
-		}).inject(list_el, 'top');
+		var wrapper = new Element('div.add_service_wrapper').inject(list_el, 'top');
 
-		var dropdown = new Element('select.add_service_dropdown', {
+		var dropdown = new Element('select', {
 			'events': {
 				'change': function(){
 					var val = this.get('value');
@@ -349,8 +363,8 @@ Page.Settings = new Class({
 					var target = parts.slice(1).join(':');
 
 					if(action === 'enable'){
-						// Find the fieldset for this provider and enable it
-						var fieldsets = list_el.getElements('fieldset.enabler.disabled');
+						// Find the fieldset for this provider and re-enable it
+						var fieldsets = list_el.getElements('fieldset.enabler');
 						fieldsets.each(function(fs){
 							var label = fs.getElement('h2 .group_label');
 							if(label && label.get('text').trim() === target){
@@ -359,8 +373,23 @@ Page.Settings = new Class({
 									toggle.set('checked', true);
 									toggle.fireEvent('change');
 								}
-								fs.setStyle('display', 'block');
+								fs.removeClass('provider-removed');
 								fs.removeClass('disabled');
+
+								// Clear persisted hidden state
+								var fs_section = '';
+								fs.get('class').split(' ').each(function(cls){
+									if(cls.indexOf('section_') === 0) fs_section = cls.replace('section_', '');
+								});
+								if(fs_section){
+									Api.request('settings.save', {
+										'data': {
+											'section': fs_section,
+											'name': 'hidden',
+											'value': '0'
+										}
+									});
+								}
 							}
 						});
 						list_el.fireEvent('refreshDropdown');
@@ -388,7 +417,9 @@ Page.Settings = new Class({
 					this.set('value', '');
 				}
 			}
-		}).inject(wrapper);
+		});
+
+		new Element('div.select_wrapper.icon-dropdown').grab(dropdown).inject(wrapper);
 
 		// Refresh helper — rebuilds dropdown options
 		list_el.addEvent('refreshDropdown', function(){
@@ -412,13 +443,13 @@ Page.Settings = new Class({
 				var label = fs.getElement('h2 .group_label');
 				var display_name = label ? label.get('text').trim().replace(/ #\d+$/, '') : base_type;
 
-				// Check if this provider type has any visible card on the page
+				// Check if this provider type has any visible (non-removed) card
 				var has_visible = all_fieldsets.some(function(fs2){
 					var sc = '';
 					fs2.get('class').split(' ').each(function(cls){
 						if(cls.indexOf('section_') === 0) sc = cls.replace('section_', '');
 					});
-					return sc.replace(/_\d+$/, '') === base_type && fs2.getStyle('display') !== 'none';
+					return sc.replace(/_\d+$/, '') === base_type && !fs2.hasClass('provider-removed');
 				});
 
 				if(has_visible){
@@ -434,7 +465,7 @@ Page.Settings = new Class({
 						}
 					}
 				} else {
-					// All cards hidden/deleted — selecting re-enables the base
+					// All cards removed — selecting re-enables the base
 					dropdown.adopt(new Element('option', {
 						'value': 'enable:' + display_name,
 						'text': display_name
@@ -771,18 +802,8 @@ Option.Enabler = new Class({
 
 		self.parentFieldset[ enabled ? 'removeClass' : 'addClass']('disabled');
 
-		// In notification_providers lists:
-		// On initial render, hide disabled providers so the list starts clean.
-		// On user toggle, do NOT change visibility — the card stays visible
-		// so the user can easily toggle it back on.
-		// Other list types (download_providers, torrent_providers, etc.):
-		// Never hide — always show all providers with toggle on/off.
+		// Refresh the dropdown to include/exclude this entry
 		if(self.parentList){
-			var list_name = self.parentList.retrieve('list_name');
-			if(list_name === 'notification_providers' && self._initialRender){
-				self.parentFieldset.setStyle('display', enabled ? 'block' : 'none');
-			}
-			// Refresh the dropdown to include/exclude this entry
 			self.parentList.fireEvent('refreshDropdown');
 		}
 
@@ -795,48 +816,60 @@ Option.Enabler = new Class({
 		self.parentList = self.parentFieldset.getParent('.option_list');
 		self.el.inject(self.parentFieldset, 'top');
 
-		// Add a visible remove button only for notification providers
-		if(self.parentList && self.parentList.retrieve('list_name') === 'notification_providers'){
-			new Element('a.icon-cancel.remove_provider', {
+		// Add a trash/remove button for all providers in option_lists
+		if(self.parentList){
+			var list_name = self.parentList.retrieve('list_name');
+			var is_notification = (list_name === 'notification_providers');
+
+			new Element('a.icon-delete.remove_provider', {
 				'title': 'Remove this service',
-				'styles': {
-					'float': 'right',
-					'cursor': 'pointer',
-					'font-size': '16px',
-					'line-height': '30px',
-					'opacity': '0.5'
-				},
 				'events': {
-					'mouseenter': function(){ this.setStyle('opacity', '1'); },
-					'mouseleave': function(){ this.setStyle('opacity', '0.5'); },
 					'click': function(e){
 						e.preventDefault();
-						// Delete this provider instance (works for both base and duplicates)
-						Api.request('notification.remove_instance', {
-							'data': {'section_name': self.section},
-							'onComplete': function(json){
-								if(json.success){
-									// Reload the settings page from the server so
-									// all fieldsets, dropdowns, and values are fresh.
-									var setting_page = App.getPage('Settings');
-									setting_page.getData(function(data){
-										setting_page.data = data;
-										setting_page.content.empty();
-										setting_page.tabs = {};
-										setting_page.lists = {};
-										setting_page.create(data);
-									});
+
+						if(is_notification && /\_\d+$/.test(self.section)){
+							// Duplicated notification instances: use dedicated remove API
+							Api.request('notification.remove_instance', {
+								'data': {'section_name': self.section},
+								'onComplete': function(json){
+									if(json.success){
+										var setting_page = App.getPage('Settings');
+										setting_page.getData(function(data){
+											setting_page.data = data;
+											setting_page.content.empty();
+											setting_page.tabs = {};
+											setting_page.lists = {};
+											setting_page.create(data);
+										});
+									}
 								}
+							});
+						} else {
+							// All other providers (including base notifications): toggle off + hide
+							var toggle = self.parentFieldset.getElement('.switch input[type=checkbox]');
+							if(toggle){
+								toggle.set('checked', false);
+								toggle.fireEvent('change');
 							}
-						});
+							self.parentFieldset.addClass('disabled');
+							self.parentFieldset.addClass('provider-removed');
+							if(self.parentList) self.parentList.fireEvent('refreshDropdown');
+
+							// Persist hidden state so it survives page reload
+							Api.request('settings.save', {
+								'data': {
+									'section': self.section,
+									'name': 'hidden',
+									'value': '1'
+								}
+							});
+						}
 					}
 				}
-			}).inject(self.parentFieldset.getElement('h2'));
+			}).inject(self.el, 'top');
 		}
 
-		self._initialRender = true;
 		self.checkState();
-		delete self._initialRender;
 	}
 
 });

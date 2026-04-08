@@ -1,5 +1,6 @@
 config = [{
     'name': 'nzb_providers',
+    'order': 200,
     'groups': [
         {
             'label': 'Usenet Providers',

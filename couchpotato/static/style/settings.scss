@@ -321,9 +321,12 @@
 				border: 0;
 				padding: 0;
 				z-index: 10;
+				display: flex;
+				align-items: center;
+				gap: $padding/2;
 
 				~ h2 {
-					margin-right: 66px + $padding;
+					margin-right: 86px + $padding;
 
 					@include media-phablet {
 						margin-right: 0;
@@ -413,10 +416,46 @@
 		}
 	}
 
+/** List section header — displayed above each option_list **/
+
 	/** Options list **/
 	.option_list {
 		@include theme(background, background);
-		margin-top: $padding/2;
+		margin-bottom: $padding/2;
+
+	.add_service_wrapper {
+		padding: $padding/2 $padding;
+		border-bottom: 1px solid transparent;
+		@include theme(border-color, off);
+
+		.select_wrapper {
+			position: relative;
+			display: flex;
+			align-items: center;
+			max-width: 400px;
+
+			select {
+				cursor: pointer;
+				appearance: none;
+				width: 100%;
+				border-radius: 0;
+
+				&::-ms-expand {
+					display: none;
+				}
+			}
+
+			&:before {
+				vertical-align: top;
+				pointer-events: none;
+				position: absolute;
+				top: 0;
+				line-height: 2em;
+				right: $padding/2;
+				height: 100%;
+			}
+		}
+	}
 
 		fieldset {
 			position: relative;
@@ -436,7 +475,23 @@
 					padding: 0 $padding/2;
 				}
 			}
+
+			&.provider-removed {
+				display: none;
+			}
 		}
+
+	/** Trash icon on provider cards **/
+	.remove_provider {
+		cursor: pointer;
+		font-size: 14px;
+		opacity: .4;
+		transition: opacity 150ms;
+
+		&:hover {
+			opacity: 1;
+		}
+	}
 
 		fieldset:after {
 			position: absolute;

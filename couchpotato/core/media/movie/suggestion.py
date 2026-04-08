@@ -173,7 +173,7 @@ config = [{
             'label': 'Suggestions',
             'description': 'Displays suggestions on the home page',
             'name': 'suggestions',
-            'tab': 'display',
+            'tab': 'dashboard',
             'options': [
                 {
                     'name': 'enabled',

@@ -127,7 +127,7 @@ config = [{
             ],
         },
         {
-            'tab': 'display',
+            'tab': 'dashboard',
             'list': 'charts_providers',
             'name': 'yts_popular_display',
             'label': 'YTS',

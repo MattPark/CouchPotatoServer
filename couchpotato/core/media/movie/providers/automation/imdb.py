@@ -483,7 +483,7 @@ config = [{
             ],
         },
         {
-            'tab': 'display',
+            'tab': 'dashboard',
             'list': 'charts_providers',
             'name': 'imdb_charts_display',
             'label': 'IMDB',

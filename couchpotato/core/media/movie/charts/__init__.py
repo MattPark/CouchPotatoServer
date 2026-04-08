@@ -13,7 +13,7 @@ config = [{
             'description': 'Displays selected charts on the home page',
             'type': 'list',
             'name': 'charts_providers',
-            'tab': 'display',
+            'tab': 'dashboard',
             'options': [],
         },
     ],

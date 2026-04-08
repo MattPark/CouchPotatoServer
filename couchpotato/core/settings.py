@@ -305,7 +305,7 @@ class Settings(object):
                                             group_copy_options.append(option)
                                             if not self.isOptionWritable(section_name, option_name):
                                                 option['readonly'] = True
-                            if len(group_copy_options)>0:
+                            if len(group_copy_options) > 0 or group_orig.get('type') == 'list':
                                 group_copy['options'] = group_copy_options
                                 section_copy_groups.append(group_copy)
                 if len(section_copy_groups)>0:

@@ -179,7 +179,7 @@ config = [{
             ],
         },
         {
-            'tab': 'display',
+            'tab': 'dashboard',
             'list': 'charts_providers',
             'name': 'bluray_charts_display',
             'label': 'Blu-ray.com',

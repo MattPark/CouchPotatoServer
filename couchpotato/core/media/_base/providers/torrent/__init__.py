@@ -1,5 +1,6 @@
 config = [{
     'name': 'torrent_providers',
+    'order': 210,
     'groups': [
         {
             'label': 'Torrent Providers',
