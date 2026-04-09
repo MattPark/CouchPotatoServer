@@ -4,6 +4,7 @@ Tier 1 (local, no network):
   1. Resolution mismatch — actual resolution vs filename-claimed resolution
   2. Runtime mismatch — actual duration vs TMDB runtime from CP database
   3. Container title mismatch — guessit-parsed metadata title/year vs folder title/year
+  4. TV episode detection — S##E## / Season / Disc patterns in container titles
 
 Tier 2 (targeted identification for flagged files):
   A. Container title already identified it (from Tier 1 data)
@@ -14,6 +15,11 @@ Usage (standalone):
   python audit.py --movies-dir /movies --db /config/data/database/db.json
   python audit.py --movies-dir /movies --db /config/data/database/db.json --scan-path "Dead, The (1987)"
   python audit.py --movies-dir /movies --db /config/data/database/db.json --tier2
+
+API (when running inside CouchPotato):
+  GET /api/{key}/audit.scan?tier2=0&scan_path=
+  GET /api/{key}/audit.progress
+  GET /api/{key}/audit.results
 """
 
 import argparse
@@ -22,6 +28,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import zlib
 
 from guessit import guessit as guessit_parse
@@ -30,6 +37,32 @@ try:
     import requests
 except ImportError:
     requests = None
+
+# Plugin integration — only available when running inside CouchPotato
+try:
+    from couchpotato.api import addApiView
+    from couchpotato.core.event import addEvent, fireEventAsync
+    from couchpotato.core.logger import CPLog
+    from couchpotato.core.plugins.base import Plugin
+    from couchpotato.environment import Env
+    _CP_AVAILABLE = True
+except ImportError:
+    _CP_AVAILABLE = False
+
+# Module-level log function — uses CPLog when inside CP, stderr when standalone
+if _CP_AVAILABLE:
+    log = CPLog(__name__)
+    def _log_info(msg): log.info(msg)
+    def _log_warn(msg): log.warning(msg)
+    def _log_error(msg): log.error(msg)
+else:
+    def _log_info(msg): print(msg, file=sys.stderr)
+    def _log_warn(msg): print(f'WARNING: {msg}', file=sys.stderr)
+    def _log_error(msg): print(f'ERROR: {msg}', file=sys.stderr)
+
+# Auto-load as a CP plugin when the module is imported by the loader.
+# When running standalone (python audit.py), the loader never calls this.
+autoload = 'Audit'
 
 
 # ---------------------------------------------------------------------------
@@ -217,22 +250,20 @@ def extract_file_meta(filepath):
             capture_output=True, text=True, timeout=60,
         )
     except FileNotFoundError:
-        print('  WARNING: mediainfo CLI not found, skipping', file=sys.stderr)
+        _log_warn('mediainfo CLI not found, skipping')
         return result
     except subprocess.TimeoutExpired:
-        print(f'  WARNING: mediainfo timed out on {filepath}', file=sys.stderr)
+        _log_warn('mediainfo timed out on %s' % filepath)
         return result
 
     if proc.returncode != 0:
-        print(f'  WARNING: mediainfo exited {proc.returncode} on {filepath}',
-              file=sys.stderr)
+        _log_warn('mediainfo exited %s on %s' % (proc.returncode, filepath))
         return result
 
     try:
         data = json.loads(proc.stdout)
     except (json.JSONDecodeError, ValueError) as e:
-        print(f'  WARNING: mediainfo JSON parse error on {filepath}: {e}',
-              file=sys.stderr)
+        _log_warn('mediainfo JSON parse error on %s: %s' % (filepath, e))
         return result
 
     tracks = data.get('media', {}).get('track', [])
@@ -507,7 +538,7 @@ def srrdb_lookup_crc(crc_hex):
     Returns dict with release info or None.
     """
     if not requests:
-        print('  WARNING: requests not available, skipping srrDB lookup', file=sys.stderr)
+        _log_warn('requests not available, skipping srrDB lookup')
         return None
 
     url = f'{SRRDB_API}/search/archive-crc:{crc_hex}'
@@ -516,7 +547,7 @@ def srrdb_lookup_crc(crc_hex):
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        print(f'  WARNING: srrDB lookup failed: {e}', file=sys.stderr)
+        _log_warn('srrDB lookup failed: %s' % e)
         return None
 
     results = data.get('results', [])
@@ -575,7 +606,7 @@ def identify_flagged_file(filepath, flags, container_title_parsed):
             return identification
 
     # Strategy B: CRC32 reverse lookup on srrDB
-    print(f'  Computing CRC32 of {os.path.basename(filepath)}...', file=sys.stderr)
+    _log_info('Computing CRC32 of %s...' % os.path.basename(filepath))
     file_size = os.path.getsize(filepath)
     file_size_gb = file_size / (1024 ** 3)
 
@@ -585,7 +616,7 @@ def identify_flagged_file(filepath, flags, container_title_parsed):
               end='', file=sys.stderr)
 
     crc_hex = compute_crc32(filepath, progress_callback=progress)
-    print(f'\n  CRC32: {crc_hex}', file=sys.stderr)
+    _log_info('CRC32: %s' % crc_hex)
 
     hit = srrdb_lookup_crc(crc_hex)
     if hit:
@@ -720,7 +751,8 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb, tier2=False):
     return result
 
 
-def scan_library(movies_dir, db_path, scan_path=None, tier2=False):
+def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
+                 progress_callback=None):
     """Scan movie library for mislabeled files.
 
     Args:
@@ -728,13 +760,15 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False):
         db_path: Path to CP's db.json
         scan_path: If set, only scan this specific folder name
         tier2: Run Tier 2 identification on flagged files
+        progress_callback: If set, called with (scanned, total, flagged_count)
+                           after each folder
 
     Returns:
         dict with scan results
     """
-    print(f'Loading CP database from {db_path}...', file=sys.stderr)
+    _log_info('Loading CP database from %s...' % db_path)
     media_by_imdb, files_by_media_id = load_cp_database(db_path)
-    print(f'  Loaded {len(media_by_imdb)} movies from database', file=sys.stderr)
+    _log_info('Loaded %s movies from database' % len(media_by_imdb))
 
     # Enumerate movie folders
     if scan_path:
@@ -743,7 +777,7 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False):
         try:
             folders = sorted(os.listdir(movies_dir))
         except OSError as e:
-            print(f'ERROR: Cannot list {movies_dir}: {e}', file=sys.stderr)
+            _log_error('Cannot list %s: %s' % (movies_dir, e))
             return {'error': str(e)}
 
     total = len(folders)
@@ -756,10 +790,6 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False):
         if not os.path.isdir(folder_path):
             continue
 
-        if not scan_path:
-            print(f'\r  Scanning [{i}/{total}] {folder_name[:60]:<60}',
-                  end='', file=sys.stderr)
-
         try:
             result = scan_movie_folder(folder_path, folder_name, media_by_imdb, tier2=tier2)
             scanned += 1
@@ -767,14 +797,14 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False):
                 flagged.append(result)
                 severity = max(f['severity'] for f in result['flags'])
                 checks = ', '.join(f['check'] for f in result['flags'])
-                print(f'\n  ** FLAGGED [{severity}] {folder_name}: {checks}',
-                      file=sys.stderr)
+                _log_info('FLAGGED [%s] %s: %s' % (severity, folder_name, checks))
+            if progress_callback:
+                progress_callback(scanned, total, len(flagged))
         except Exception as e:
             errors += 1
-            print(f'\n  ERROR scanning {folder_name}: {e}', file=sys.stderr)
+            _log_error('Error scanning %s: %s' % (folder_name, e))
 
-    print(f'\n\nScan complete: {scanned} scanned, {len(flagged)} flagged, {errors} errors',
-          file=sys.stderr)
+    _log_info('Scan complete: %s scanned, %s flagged, %s errors' % (scanned, len(flagged), errors))
 
     # Sort flagged by flag count (most flags first), then by severity
     severity_order = {'HIGH': 0, 'MEDIUM': 1, 'LOW': 2}
@@ -789,6 +819,132 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False):
         'total_errors': errors,
         'flagged': flagged,
     }
+
+
+# ---------------------------------------------------------------------------
+# CouchPotato plugin
+# ---------------------------------------------------------------------------
+
+class Audit(Plugin if _CP_AVAILABLE else object):
+    """Library audit plugin — exposes scan/progress/results via the CP API."""
+
+    in_progress = False
+    last_report = None
+
+    def __init__(self):
+        if not _CP_AVAILABLE:
+            return
+
+        addApiView('audit.scan', self.scanView, docs={
+            'desc': 'Start a library audit scan',
+            'params': {
+                'tier2': {'desc': 'Run Tier 2 identification (CRC + srrDB). Default 0.'},
+                'scan_path': {'desc': 'Scan only this folder name (optional).'},
+            },
+        })
+
+        addApiView('audit.progress', self.progressView, docs={
+            'desc': 'Get progress of current audit scan',
+            'return': {'type': 'object', 'example': """{
+    'progress': False || {'total': 8526, 'scanned': 1200, 'flagged': 45}
+}"""},
+        })
+
+        addApiView('audit.results', self.resultsView, docs={
+            'desc': 'Get results of the last completed audit scan',
+            'return': {'type': 'object', 'example': """{
+    'results': {'total_scanned': 8526, 'total_flagged': 127, 'flagged': [...]}
+}"""},
+        })
+
+        addEvent('audit.run_scan', self._run_scan)
+
+    def _get_movies_dir(self):
+        """Get the first library directory from manage settings."""
+        dirs = Env.setting('library', section='manage', default=[])
+        if dirs:
+            return dirs[0]
+        return None
+
+    def _get_db_path(self):
+        """Get the path to CP's db.json."""
+        data_dir = Env.get('data_dir')
+        return os.path.join(data_dir, 'database', 'db.json')
+
+    def _on_progress(self, scanned, total, flagged_count):
+        """Progress callback called by scan_library after each folder."""
+        self.in_progress = {
+            'total': total,
+            'scanned': scanned,
+            'flagged': flagged_count,
+        }
+
+    def _run_scan(self, tier2=False, scan_path=None):
+        """Run the audit scan (called in background thread)."""
+        movies_dir = self._get_movies_dir()
+        if not movies_dir:
+            log.error('No library directory configured in manage settings')
+            self.in_progress = False
+            return
+
+        db_path = self._get_db_path()
+        if not os.path.isfile(db_path):
+            log.error('Database not found at %s', (db_path,))
+            self.in_progress = False
+            return
+
+        self.in_progress = {'total': 0, 'scanned': 0, 'flagged': 0}
+
+        try:
+            report = scan_library(
+                movies_dir=movies_dir,
+                db_path=db_path,
+                scan_path=scan_path,
+                tier2=tier2,
+                progress_callback=self._on_progress,
+            )
+            self.last_report = report
+            self.last_report['completed_at'] = time.time()
+        except Exception as e:
+            log.error('Audit scan failed: %s', (e,))
+        finally:
+            self.in_progress = False
+
+    def scanView(self, tier2='0', scan_path=None, **kwargs):
+        """API handler: start an audit scan."""
+        if self.in_progress:
+            return {
+                'success': False,
+                'message': 'Scan already in progress',
+                'progress': self.in_progress,
+            }
+
+        do_tier2 = str(tier2) == '1'
+        self.in_progress = {'total': 0, 'scanned': 0, 'flagged': 0}
+
+        fireEventAsync(
+            'audit.run_scan',
+            tier2=do_tier2,
+            scan_path=scan_path if scan_path else None,
+        )
+
+        return {
+            'success': True,
+            'message': 'Audit scan started',
+            'progress': self.in_progress,
+        }
+
+    def progressView(self, **kwargs):
+        """API handler: return current scan progress."""
+        return {
+            'progress': self.in_progress,
+        }
+
+    def resultsView(self, **kwargs):
+        """API handler: return last completed scan report."""
+        return {
+            'results': self.last_report,
+        }
 
 
 # ---------------------------------------------------------------------------
