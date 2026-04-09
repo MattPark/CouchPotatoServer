@@ -752,7 +752,7 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb, tier2=False):
 
 
 def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
-                 progress_callback=None):
+                 progress_callback=None, cancel_flag=None):
     """Scan movie library for mislabeled files.
 
     Args:
@@ -762,6 +762,9 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
         tier2: Run Tier 2 identification on flagged files
         progress_callback: If set, called with (scanned, total, flagged_count)
                            after each folder
+        cancel_flag: If set, a list whose first element is checked each
+                     iteration — if truthy, the scan stops early and returns
+                     partial results.
 
     Returns:
         dict with scan results
@@ -786,6 +789,11 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
     errors = 0
 
     for i, folder_name in enumerate(folders, 1):
+        # Check cancel flag
+        if cancel_flag and cancel_flag[0]:
+            _log_info('Scan cancelled at %s/%s (%s flagged)' % (scanned, total, len(flagged)))
+            break
+
         folder_path = os.path.join(movies_dir, folder_name)
         if not os.path.isdir(folder_path):
             continue
@@ -804,7 +812,11 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
             errors += 1
             _log_error('Error scanning %s: %s' % (folder_name, e))
 
-    _log_info('Scan complete: %s scanned, %s flagged, %s errors' % (scanned, len(flagged), errors))
+    was_cancelled = bool(cancel_flag and cancel_flag[0])
+    if was_cancelled:
+        _log_info('Scan complete: %s scanned, %s flagged, %s errors (CANCELLED)' % (scanned, len(flagged), errors))
+    else:
+        _log_info('Scan complete: %s scanned, %s flagged, %s errors' % (scanned, len(flagged), errors))
 
     # Sort flagged by flag count (most flags first), then by severity
     severity_order = {'HIGH': 0, 'MEDIUM': 1, 'LOW': 2}
@@ -817,6 +829,7 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
         'total_scanned': scanned,
         'total_flagged': len(flagged),
         'total_errors': errors,
+        'cancelled': was_cancelled,
         'flagged': flagged,
     }
 
@@ -830,6 +843,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
     in_progress = False
     last_report = None
+    _cancel = [False]   # mutable list so the scan loop can observe changes
 
     def __init__(self):
         if not _CP_AVAILABLE:
@@ -841,6 +855,10 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 'tier2': {'desc': 'Run Tier 2 identification (CRC + srrDB). Default 0.'},
                 'scan_path': {'desc': 'Scan only this folder name (optional).'},
             },
+        })
+
+        addApiView('audit.cancel', self.cancelView, docs={
+            'desc': 'Cancel a running audit scan',
         })
 
         addApiView('audit.progress', self.progressView, docs={
@@ -881,6 +899,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
     def _run_scan(self, tier2=False, scan_path=None):
         """Run the audit scan (called in background thread)."""
+        self._cancel[0] = False
+
         movies_dir = self._get_movies_dir()
         if not movies_dir:
             log.error('No library directory configured in manage settings')
@@ -902,6 +922,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 scan_path=scan_path,
                 tier2=tier2,
                 progress_callback=self._on_progress,
+                cancel_flag=self._cancel,
             )
             self.last_report = report
             self.last_report['completed_at'] = time.time()
@@ -909,6 +930,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             log.error('Audit scan failed: %s', (e,))
         finally:
             self.in_progress = False
+            self._cancel[0] = False
 
     def scanView(self, tier2='0', scan_path=None, **kwargs):
         """API handler: start an audit scan."""
@@ -931,6 +953,21 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         return {
             'success': True,
             'message': 'Audit scan started',
+            'progress': self.in_progress,
+        }
+
+    def cancelView(self, **kwargs):
+        """API handler: cancel a running audit scan."""
+        if not self.in_progress:
+            return {
+                'success': False,
+                'message': 'No scan is running',
+            }
+
+        self._cancel[0] = True
+        return {
+            'success': True,
+            'message': 'Cancel signal sent — scan will stop after current folder',
             'progress': self.in_progress,
         }
 
