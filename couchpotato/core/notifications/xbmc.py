@@ -27,6 +27,7 @@ REQUEST_TIMEOUT = 10
 
 class Kodi(Notification):
 
+    _class_name = 'xbmc'
     listen_to = ['renamer.after', 'movie.snatched']
     http_time_between_calls = 0
 
