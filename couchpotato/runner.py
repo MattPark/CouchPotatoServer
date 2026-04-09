@@ -177,7 +177,8 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
     # that rebuild automatically).
     _cache_files = [f for f in os.listdir(python_cache) if not f.startswith('.')]
     if _cache_files:
-        import pickle, struct
+        import pickle
+        import struct
         _sample = os.path.join(python_cache, _cache_files[0])
         try:
             with open(_sample, 'rb') as _f:
