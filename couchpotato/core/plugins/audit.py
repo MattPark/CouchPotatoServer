@@ -1,0 +1,766 @@
+"""Library audit tool for detecting mislabeled movies.
+
+Tier 1 (local, no network):
+  1. Resolution mismatch — actual resolution vs filename-claimed resolution
+  2. Runtime mismatch — actual duration vs TMDB runtime from CP database
+  3. Container title mismatch — guessit-parsed metadata title/year vs folder title/year
+
+Tier 2 (targeted identification for flagged files):
+  A. Container title already identified it (from Tier 1 data)
+  B. CRC32 reverse lookup on srrDB → release name + IMDB ID
+  C. (future) TMDB search fallback
+
+Usage (standalone):
+  python audit.py --movies-dir /movies --db /config/data/database/db.json
+  python audit.py --movies-dir /movies --db /config/data/database/db.json --scan-path "Dead, The (1987)"
+  python audit.py --movies-dir /movies --db /config/data/database/db.json --tier2
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import zlib
+
+from guessit import guessit as guessit_parse
+from pymediainfo import MediaInfo
+
+try:
+    import requests
+except ImportError:
+    requests = None
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.m4v', '.wmv', '.flv', '.ts', '.m2ts'}
+
+# Map claimed resolution labels to expected widths
+RESOLUTION_MAP = {
+    '2160p': 3840,
+    '4k': 3840,
+    '1080p': 1920,
+    '1080i': 1920,
+    '720p': 1280,
+    '720i': 1280,
+    '480p': 640,
+    '480i': 640,
+}
+
+# Tolerance: actual width can be within this percentage of expected
+# (ultrawide crops like 1920x800 are still "1080p")
+RESOLUTION_TOLERANCE_PCT = 0.15
+
+# Runtime tolerance: flag if delta exceeds BOTH thresholds
+RUNTIME_DELTA_MIN = 15       # minutes
+RUNTIME_DELTA_PCT = 0.20     # 20%
+
+# Junk container titles to ignore
+JUNK_TITLE_PATTERNS = [
+    re.compile(r'^(lib|x264|x265|hevc|avc|mpeg|divx|xvid)', re.I),
+    re.compile(r'producties', re.I),
+    re.compile(r'handbrake', re.I),
+    re.compile(r'^encoded', re.I),
+    re.compile(r'^untitled', re.I),
+]
+
+# Regex to extract IMDB ID from filename
+IMDB_RE = re.compile(r'(tt\d{5,})')
+
+# Regex to parse folder name: "Title (Year)" or "Title, The (Year)"
+FOLDER_RE = re.compile(r'^(.+?)\s*\((\d{4})\)\s*$')
+
+# srrDB API base
+SRRDB_API = 'https://api.srrdb.com/v1'
+
+
+# ---------------------------------------------------------------------------
+# Database loader
+# ---------------------------------------------------------------------------
+
+def load_cp_database(db_path):
+    """Load CP's db.json and build lookup indices.
+
+    Returns:
+        media_by_imdb: dict mapping IMDB ID → {title, year, runtime, _id}
+        files_by_media_id: dict mapping media _id → list of file paths
+    """
+    with open(db_path, 'r') as f:
+        data = json.load(f).get('_default', {})
+
+    media_by_imdb = {}
+    files_by_media_id = {}
+
+    # First pass: collect media records
+    for doc in data.values():
+        if doc.get('_t') == 'media' and doc.get('type') == 'movie':
+            imdb_id = doc.get('identifiers', {}).get('imdb', '')
+            info = doc.get('info', {})
+            if imdb_id:
+                media_by_imdb[imdb_id] = {
+                    'title': doc.get('title', ''),
+                    'year': info.get('year', 0),
+                    'runtime': info.get('runtime', 0),
+                    '_id': doc.get('_id', ''),
+                }
+
+    # Second pass: collect file paths from done releases
+    for doc in data.values():
+        if doc.get('_t') == 'release' and doc.get('status') == 'done':
+            media_id = doc.get('media_id', '')
+            movie_files = doc.get('files', {}).get('movie', [])
+            if media_id and movie_files:
+                files_by_media_id.setdefault(media_id, []).extend(movie_files)
+
+    return media_by_imdb, files_by_media_id
+
+
+# ---------------------------------------------------------------------------
+# Title normalization
+# ---------------------------------------------------------------------------
+
+def normalize_title(title):
+    """Normalize a movie title for comparison.
+
+    Handles 'Title, The' → 'the title', strips punctuation, lowercases.
+    """
+    if not title:
+        return ''
+    t = title.strip()
+
+    # Handle "Something, The" → "The Something"
+    comma_article = re.match(r'^(.+),\s*(The|A|An)\s*$', t, re.I)
+    if comma_article:
+        t = comma_article.group(2) + ' ' + comma_article.group(1)
+
+    # Lowercase, strip punctuation, collapse whitespace
+    t = t.lower()
+    t = re.sub(r'[^\w\s]', ' ', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+
+def titles_match(title_a, title_b):
+    """Check if two normalized titles are substantially the same."""
+    a = normalize_title(title_a)
+    b = normalize_title(title_b)
+
+    if not a or not b:
+        return True  # can't compare, don't flag
+
+    if a == b:
+        return True
+
+    # Check if one is a substring of the other
+    # (e.g., "the dead" is in "dawn of the dead" — but this should NOT match)
+    # Instead, check word overlap
+    words_a = set(a.split())
+    words_b = set(b.split())
+
+    # Remove very common words for comparison
+    stopwords = {'the', 'a', 'an', 'of', 'in', 'on', 'at', 'to', 'and', 'or', 'is'}
+    sig_a = words_a - stopwords
+    sig_b = words_b - stopwords
+
+    if not sig_a or not sig_b:
+        # One title is all stopwords — can't meaningfully compare
+        return True
+
+    # Jaccard similarity on significant words
+    overlap = sig_a & sig_b
+    union = sig_a | sig_b
+    similarity = len(overlap) / len(union) if union else 1.0
+
+    return similarity >= 0.7
+
+
+# ---------------------------------------------------------------------------
+# File metadata extraction
+# ---------------------------------------------------------------------------
+
+def extract_file_meta(filepath):
+    """Extract metadata from a video file using pymediainfo.
+
+    Returns dict with: resolution_width, resolution_height, duration_min,
+                       video_codec, container_title
+    """
+    result = {
+        'resolution_width': 0,
+        'resolution_height': 0,
+        'duration_min': 0.0,
+        'video_codec': '',
+        'container_title': None,
+    }
+
+    try:
+        mi = MediaInfo.parse(filepath)
+    except Exception as e:
+        print(f'  WARNING: pymediainfo failed on {filepath}: {e}', file=sys.stderr)
+        return result
+
+    general_tracks = [t for t in mi.tracks if t.track_type == 'General']
+    video_tracks = [t for t in mi.tracks if t.track_type == 'Video']
+
+    if not video_tracks:
+        return result
+
+    vt = video_tracks[0]
+    result['resolution_width'] = int(vt.width) if vt.width else 0
+    result['resolution_height'] = int(vt.height) if vt.height else 0
+    result['video_codec'] = vt.format or ''
+
+    # Duration: prefer general track duration (container-level, most accurate)
+    if general_tracks and general_tracks[0].duration:
+        try:
+            result['duration_min'] = float(general_tracks[0].duration) / 60000.0
+        except (ValueError, TypeError):
+            pass
+
+    # Fallback to video track duration
+    if result['duration_min'] == 0.0 and vt.duration:
+        try:
+            result['duration_min'] = float(vt.duration) / 60000.0
+        except (ValueError, TypeError):
+            pass
+
+    # Container title
+    if general_tracks and general_tracks[0].title:
+        result['container_title'] = general_tracks[0].title
+
+    return result
+
+
+def parse_folder_name(folder_name):
+    """Parse a folder name like 'Dead, The (1987)' into title and year."""
+    m = FOLDER_RE.match(folder_name)
+    if m:
+        return m.group(1).strip(), int(m.group(2))
+    return folder_name, None
+
+
+def parse_filename_resolution(filename):
+    """Extract claimed resolution from filename (e.g., '1080p')."""
+    lower = filename.lower()
+    for label in ['2160p', '4k', '1080p', '1080i', '720p', '720i', '480p', '480i']:
+        if label in lower:
+            return label
+    return None
+
+
+def parse_filename_imdb(filename):
+    """Extract IMDB ID from filename (e.g., 'tt0092843')."""
+    m = IMDB_RE.search(filename)
+    return m.group(1) if m else None
+
+
+def is_junk_title(title):
+    """Check if a container title is junk (encoder name, etc.)."""
+    if not title or len(title.strip()) < 3:
+        return True
+    for pat in JUNK_TITLE_PATTERNS:
+        if pat.search(title):
+            return True
+    return False
+
+
+def resolution_label_for_width(width):
+    """Convert a pixel width to a human-readable label."""
+    if width >= 3840:
+        return '2160p (4K)'
+    elif width >= 1920:
+        return '1080p'
+    elif width >= 1280:
+        return '720p'
+    elif width >= 640:
+        return '480p'
+    else:
+        return f'{width}px (SD)'
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 checks
+# ---------------------------------------------------------------------------
+
+def check_resolution(claimed_label, actual_width):
+    """Check 1: Resolution mismatch.
+
+    Returns a flag dict or None.
+    """
+    if not claimed_label or not actual_width:
+        return None
+
+    expected_width = RESOLUTION_MAP.get(claimed_label.lower())
+    if expected_width is None:
+        return None
+
+    # Allow tolerance for non-standard aspect ratios
+    lower = expected_width * (1 - RESOLUTION_TOLERANCE_PCT)
+    upper_next = expected_width * (1 + RESOLUTION_TOLERANCE_PCT)
+
+    # Check if actual width falls outside the expected range
+    # but also make sure it's not just a slightly different encode of the same class
+    if actual_width < lower or actual_width > upper_next:
+        # Determine if it's actually a different resolution class
+        actual_label = resolution_label_for_width(actual_width)
+        expected_label = resolution_label_for_width(expected_width)
+
+        if actual_label != expected_label:
+            return {
+                'check': 'resolution',
+                'severity': 'HIGH',
+                'detail': f'Claimed {claimed_label}, actual {actual_width}x (maps to {actual_label})',
+            }
+
+    return None
+
+
+def check_runtime(actual_duration_min, expected_runtime_min):
+    """Check 2: Runtime mismatch.
+
+    Returns a flag dict or None.
+    """
+    if not expected_runtime_min or not actual_duration_min:
+        return None
+
+    delta = abs(actual_duration_min - expected_runtime_min)
+    pct = delta / expected_runtime_min if expected_runtime_min else 0
+
+    # Flag only if BOTH absolute and percentage thresholds are exceeded
+    if delta > RUNTIME_DELTA_MIN and pct > RUNTIME_DELTA_PCT:
+        return {
+            'check': 'runtime',
+            'severity': 'HIGH',
+            'detail': (
+                f'Expected {expected_runtime_min} min, '
+                f'actual {actual_duration_min:.1f} min '
+                f'(delta: {delta:+.1f} min, {pct:+.0%})'
+            ),
+        }
+
+    return None
+
+
+def check_container_title(container_title, folder_title, folder_year):
+    """Check 3: Container title mismatch.
+
+    Returns a flag dict or None.  Also returns parsed metadata (title, year)
+    for use in Tier 2 identification.
+    """
+    if not container_title or is_junk_title(container_title):
+        return None, None
+
+    parsed = guessit_parse(container_title)
+    meta_title = parsed.get('title')
+    meta_year = parsed.get('year')
+
+    # If guessit couldn't extract a year, it's probably not a scene name
+    # Still check the title if we got one
+    if not meta_title:
+        return None, None
+
+    parsed_meta = {
+        'title': meta_title,
+        'year': meta_year,
+        'screen_size': parsed.get('screen_size'),
+        'raw': container_title,
+    }
+
+    title_same = titles_match(meta_title, folder_title)
+    year_same = (meta_year is None) or (folder_year is None) or (meta_year == folder_year)
+
+    if not title_same and not year_same:
+        return {
+            'check': 'title',
+            'severity': 'HIGH',
+            'detail': (
+                f"Container title '{meta_title} ({meta_year})' "
+                f"vs folder '{folder_title} ({folder_year})'"
+            ),
+        }, parsed_meta
+
+    if not title_same:
+        return {
+            'check': 'title',
+            'severity': 'MEDIUM',
+            'detail': (
+                f"Container title '{meta_title}' "
+                f"vs folder '{folder_title}' (year matches)"
+            ),
+        }, parsed_meta
+
+    if not year_same:
+        return {
+            'check': 'title',
+            'severity': 'HIGH',
+            'detail': (
+                f"Container year {meta_year} "
+                f"vs folder year {folder_year} (title matches)"
+            ),
+        }, parsed_meta
+
+    return None, parsed_meta
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 identification
+# ---------------------------------------------------------------------------
+
+def compute_crc32(filepath, progress_callback=None):
+    """Compute CRC32 of a file, reading in chunks.
+
+    Returns uppercase hex string (e.g., 'AE45D279').
+    """
+    crc = 0
+    total_size = os.path.getsize(filepath)
+    bytes_read = 0
+    chunk_size = 4 * 1024 * 1024  # 4MB chunks
+
+    with open(filepath, 'rb') as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            crc = zlib.crc32(chunk, crc)
+            bytes_read += len(chunk)
+            if progress_callback:
+                progress_callback(bytes_read, total_size)
+
+    return format(crc & 0xFFFFFFFF, '08X')
+
+
+def srrdb_lookup_crc(crc_hex):
+    """Look up a CRC32 on srrDB to identify a release.
+
+    Returns dict with release info or None.
+    """
+    if not requests:
+        print('  WARNING: requests not available, skipping srrDB lookup', file=sys.stderr)
+        return None
+
+    url = f'{SRRDB_API}/search/archive-crc:{crc_hex}'
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f'  WARNING: srrDB lookup failed: {e}', file=sys.stderr)
+        return None
+
+    results = data.get('results', [])
+    if not results:
+        return None
+
+    # Return the first (best) match
+    hit = results[0]
+    return {
+        'release': hit.get('release', ''),
+        'imdb_id': 'tt' + hit.get('imdbId', '') if hit.get('imdbId') else None,
+        'size': hit.get('size', 0),
+    }
+
+
+def identify_flagged_file(filepath, flags, container_title_parsed):
+    """Try to identify what a flagged file actually is.
+
+    Strategy A: Container title (already parsed)
+    Strategy B: CRC32 → srrDB reverse lookup
+    """
+    identification = None
+
+    # Strategy A: container title already told us
+    if container_title_parsed and container_title_parsed.get('title'):
+        meta = container_title_parsed
+        # Only use if title or year differs from what was expected
+        has_title_flag = any(f['check'] == 'title' for f in flags)
+        if has_title_flag:
+            identification = {
+                'method': 'container_title',
+                'identified_title': meta['title'],
+                'identified_year': meta.get('year'),
+                'confidence': 'high' if meta.get('year') else 'medium',
+                'source': meta.get('raw', ''),
+            }
+            # Parse the container title for srrDB lookup to get IMDB
+            release_name = meta.get('raw', '').replace(' ', '.')
+            if release_name and requests:
+                try:
+                    resp = requests.get(
+                        f'{SRRDB_API}/search/{release_name}',
+                        timeout=15,
+                    )
+                    if resp.ok:
+                        results = resp.json().get('results', [])
+                        if results:
+                            imdb = results[0].get('imdbId')
+                            if imdb:
+                                identification['identified_imdb'] = f'tt{imdb}'
+                except Exception:
+                    pass
+
+            return identification
+
+    # Strategy B: CRC32 reverse lookup on srrDB
+    print(f'  Computing CRC32 of {os.path.basename(filepath)}...', file=sys.stderr)
+    file_size = os.path.getsize(filepath)
+    file_size_gb = file_size / (1024 ** 3)
+
+    def progress(done, total):
+        pct = done / total * 100 if total else 0
+        print(f'\r  CRC32: {pct:.1f}% ({done / (1024**3):.1f}/{total / (1024**3):.1f} GB)',
+              end='', file=sys.stderr)
+
+    crc_hex = compute_crc32(filepath, progress_callback=progress)
+    print(f'\n  CRC32: {crc_hex}', file=sys.stderr)
+
+    hit = srrdb_lookup_crc(crc_hex)
+    if hit:
+        # Parse the release name with guessit
+        parsed = guessit_parse(hit['release'])
+        identification = {
+            'method': 'srrdb_crc',
+            'identified_title': parsed.get('title', hit['release']),
+            'identified_year': parsed.get('year'),
+            'identified_imdb': hit.get('imdb_id'),
+            'confidence': 'high',
+            'source': hit['release'],
+            'crc32': crc_hex,
+        }
+    else:
+        identification = {
+            'method': 'crc_not_found',
+            'confidence': 'none',
+            'detail': f'CRC32 {crc_hex} not found in srrDB (may be P2P release)',
+            'crc32': crc_hex,
+        }
+
+    return identification
+
+
+# ---------------------------------------------------------------------------
+# Scanner
+# ---------------------------------------------------------------------------
+
+def find_video_files(folder_path):
+    """Find all video files in a folder (non-recursive within the folder)."""
+    files = []
+    try:
+        for entry in os.listdir(folder_path):
+            ext = os.path.splitext(entry)[1].lower()
+            if ext in VIDEO_EXTENSIONS:
+                files.append(os.path.join(folder_path, entry))
+    except OSError:
+        pass
+    return files
+
+
+def scan_movie_folder(folder_path, folder_name, media_by_imdb, tier2=False):
+    """Scan a single movie folder and return audit results.
+
+    Returns a dict with scan results or None if no issues found.
+    """
+    video_files = find_video_files(folder_path)
+    if not video_files:
+        return None
+
+    # Use the largest video file (skip samples)
+    video_files.sort(key=lambda f: os.path.getsize(f), reverse=True)
+    filepath = video_files[0]
+    filename = os.path.basename(filepath)
+
+    # Parse expected values from folder/filename
+    folder_title, folder_year = parse_folder_name(folder_name)
+    claimed_res = parse_filename_resolution(filename)
+    imdb_id = parse_filename_imdb(filename)
+
+    # Look up TMDB runtime from CP database
+    expected_runtime = 0
+    db_entry = None
+    if imdb_id and imdb_id in media_by_imdb:
+        db_entry = media_by_imdb[imdb_id]
+        expected_runtime = db_entry.get('runtime', 0)
+
+    # Extract actual metadata from file
+    meta = extract_file_meta(filepath)
+
+    # Run checks
+    flags = []
+    container_title_parsed = None
+
+    # Check 1: Resolution
+    flag = check_resolution(claimed_res, meta['resolution_width'])
+    if flag:
+        flags.append(flag)
+
+    # Check 2: Runtime
+    flag = check_runtime(meta['duration_min'], expected_runtime)
+    if flag:
+        flags.append(flag)
+
+    # Check 3: Container title
+    flag, container_title_parsed = check_container_title(
+        meta['container_title'], folder_title, folder_year
+    )
+    if flag:
+        flags.append(flag)
+
+    if not flags:
+        return None
+
+    result = {
+        'folder': folder_name,
+        'file': filename,
+        'file_path': filepath,
+        'imdb_id': imdb_id,
+        'file_size_bytes': os.path.getsize(filepath),
+        'actual': {
+            'resolution': f"{meta['resolution_width']}x{meta['resolution_height']}",
+            'duration_min': round(meta['duration_min'], 1),
+            'video_codec': meta['video_codec'],
+            'container_title': meta['container_title'],
+            'container_title_parsed': container_title_parsed,
+        },
+        'expected': {
+            'resolution': claimed_res,
+            'runtime_min': expected_runtime,
+            'title': folder_title,
+            'year': folder_year,
+            'db_title': db_entry['title'] if db_entry else None,
+        },
+        'flags': flags,
+        'flag_count': len(flags),
+        'identification': None,
+    }
+
+    # Tier 2: identification
+    if tier2:
+        result['identification'] = identify_flagged_file(
+            filepath, flags, container_title_parsed
+        )
+
+    return result
+
+
+def scan_library(movies_dir, db_path, scan_path=None, tier2=False):
+    """Scan movie library for mislabeled files.
+
+    Args:
+        movies_dir: Path to the movies directory
+        db_path: Path to CP's db.json
+        scan_path: If set, only scan this specific folder name
+        tier2: Run Tier 2 identification on flagged files
+
+    Returns:
+        dict with scan results
+    """
+    print(f'Loading CP database from {db_path}...', file=sys.stderr)
+    media_by_imdb, files_by_media_id = load_cp_database(db_path)
+    print(f'  Loaded {len(media_by_imdb)} movies from database', file=sys.stderr)
+
+    # Enumerate movie folders
+    if scan_path:
+        folders = [scan_path]
+    else:
+        try:
+            folders = sorted(os.listdir(movies_dir))
+        except OSError as e:
+            print(f'ERROR: Cannot list {movies_dir}: {e}', file=sys.stderr)
+            return {'error': str(e)}
+
+    total = len(folders)
+    flagged = []
+    scanned = 0
+    errors = 0
+
+    for i, folder_name in enumerate(folders, 1):
+        folder_path = os.path.join(movies_dir, folder_name)
+        if not os.path.isdir(folder_path):
+            continue
+
+        if not scan_path:
+            print(f'\r  Scanning [{i}/{total}] {folder_name[:60]:<60}',
+                  end='', file=sys.stderr)
+
+        try:
+            result = scan_movie_folder(folder_path, folder_name, media_by_imdb, tier2=tier2)
+            scanned += 1
+            if result:
+                flagged.append(result)
+                severity = max(f['severity'] for f in result['flags'])
+                checks = ', '.join(f['check'] for f in result['flags'])
+                print(f'\n  ** FLAGGED [{severity}] {folder_name}: {checks}',
+                      file=sys.stderr)
+        except Exception as e:
+            errors += 1
+            print(f'\n  ERROR scanning {folder_name}: {e}', file=sys.stderr)
+
+    print(f'\n\nScan complete: {scanned} scanned, {len(flagged)} flagged, {errors} errors',
+          file=sys.stderr)
+
+    # Sort flagged by flag count (most flags first), then by severity
+    severity_order = {'HIGH': 0, 'MEDIUM': 1, 'LOW': 2}
+    flagged.sort(key=lambda r: (
+        -r['flag_count'],
+        min(severity_order.get(f['severity'], 99) for f in r['flags']),
+    ))
+
+    return {
+        'total_scanned': scanned,
+        'total_flagged': len(flagged),
+        'total_errors': errors,
+        'flagged': flagged,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Audit movie library for mislabeled files'
+    )
+    parser.add_argument(
+        '--movies-dir', required=True,
+        help='Path to the movies directory',
+    )
+    parser.add_argument(
+        '--db', required=True,
+        help='Path to CP db.json',
+    )
+    parser.add_argument(
+        '--scan-path',
+        help='Scan only this specific folder name (within movies-dir)',
+    )
+    parser.add_argument(
+        '--tier2', action='store_true',
+        help='Run Tier 2 identification on flagged files (CRC32 + srrDB)',
+    )
+    parser.add_argument(
+        '--output', '-o',
+        help='Write JSON report to this file (default: stdout)',
+    )
+
+    args = parser.parse_args()
+
+    report = scan_library(
+        movies_dir=args.movies_dir,
+        db_path=args.db,
+        scan_path=args.scan_path,
+        tier2=args.tier2,
+    )
+
+    json_output = json.dumps(report, indent=2)
+
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(json_output)
+        print(f'\nReport written to {args.output}', file=sys.stderr)
+    else:
+        print(json_output)
+
+
+if __name__ == '__main__':
+    main()
