@@ -168,17 +168,20 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
         os.mkdir(python_cache)
 
     # Clear stale cache files from previous vendored cache library.
-    # The old library wrote files that cachelib.FileSystemCache can't unpickle,
-    # causing repeated "could not find MARK" pickle warnings on every read.
-    # We detect this by trying to unpickle the first file we find — if it fails,
-    # the entire cache directory is stale and safe to wipe (it's just HTTP/API
-    # response caches that rebuild automatically).
+    # cachelib.FileSystemCache stores files as [4-byte struct timeout][pickle data].
+    # The old library wrote raw pickle (no header), which cachelib can't read,
+    # causing repeated "could not find MARK" pickle warnings on every cache read.
+    # We detect this by reading a sample file the same way cachelib does — skip
+    # the first 4 bytes, then try to unpickle. If that fails, the entire cache
+    # directory is stale and safe to wipe (it's just HTTP/API response caches
+    # that rebuild automatically).
     _cache_files = [f for f in os.listdir(python_cache) if not f.startswith('.')]
     if _cache_files:
-        import pickle
+        import pickle, struct
         _sample = os.path.join(python_cache, _cache_files[0])
         try:
             with open(_sample, 'rb') as _f:
+                struct.unpack('I', _f.read(4))  # skip 4-byte timeout header
                 pickle.load(_f)
         except Exception:
             logging.info('Clearing %d incompatible cache files from previous version' % len(_cache_files))

@@ -95,17 +95,38 @@ class Provider(Plugin):
         if data and len(data) > 0:
             try:
                 data = XMLTree.fromstring(data)
-                return self.getElements(data, item_path)
+                return self._checkRSSForErrors(data, url, item_path)
             except:
                 try:
                     data = XMLTree.fromstring(ss(data))
-                    return self.getElements(data, item_path)
+                    return self._checkRSSForErrors(data, url, item_path)
                 except XmlParseError:
                     log.error('Invalid XML returned, check "%s" manually for issues', url)
                 except:
                     log.error('Failed to parsing %s: %s', (self.getName(), traceback.format_exc()))
 
         return []
+
+    def _checkRSSForErrors(self, data, url, item_path):
+        """Check parsed RSS XML for error responses before extracting items."""
+
+        # Detect newznab-style <error code="..." description="..."/> root elements
+        root_tag = data.tag.split('}')[-1] if '}' in data.tag else data.tag
+        if root_tag == 'error':
+            error_code = data.attrib.get('code', '?')
+            error_desc = data.attrib.get('description', 'Unknown error')
+            log.error('Newznab API error from %s: code %s - %s', (url.split('apikey')[0].rstrip('&?'), error_code, error_desc))
+            return []
+
+        # Also check for <error> child element (some APIs nest it)
+        error_elem = data.find('error')
+        if error_elem is not None:
+            error_code = error_elem.attrib.get('code', '?')
+            error_desc = error_elem.attrib.get('description', error_elem.text or 'Unknown error')
+            log.error('Newznab API error from %s: code %s - %s', (url.split('apikey')[0].rstrip('&?'), error_code, error_desc))
+            return []
+
+        return self.getElements(data, item_path)
 
     def getHTMLData(self, url, **kwargs):
 
