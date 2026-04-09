@@ -156,32 +156,31 @@ class Release(Plugin):
                     log.error('Failed updating existing release: %s', traceback.format_exc())
             else:
 
-                # Add Release
-                if not release:
-                    release = {
-                        '_t': 'release',
-                        'media_id': media['_id'],
-                        'identifier': release_identifier,
-                        'quality': group['meta_data']['quality'].get('identifier'),
-                        'is_3d': group['meta_data']['quality'].get('is_3d', 0),
-                        'source': group['meta_data']['quality'].get('source', 'unknown'),
-                        'codec': group['meta_data']['quality'].get('codec'),
-                        'last_edit': int(time.time()),
-                        'status': 'done'
-                    }
+                # Build the fields we want to set/update
+                new_fields = {
+                    '_t': 'release',
+                    'media_id': media['_id'],
+                    'identifier': release_identifier,
+                    'quality': group['meta_data']['quality'].get('identifier'),
+                    'is_3d': group['meta_data']['quality'].get('is_3d', 0),
+                    'source': group['meta_data']['quality'].get('source', 'unknown'),
+                    'codec': group['meta_data']['quality'].get('codec'),
+                    'last_edit': int(time.time()),
+                    'status': 'done'
+                }
 
                 try:
-                    r = db.get('release_identifier', release_identifier, with_doc = True)['doc']
-                    r['media_id'] = media['_id']
+                    release = db.get('release_identifier', release_identifier, with_doc = True)['doc']
+                    # Merge new fields into existing record, preserving download_info, info, etc.
+                    release.update(new_fields)
                 except:
-                    log.debug('Failed updating release by identifier "%s". Inserting new.', release_identifier)
+                    log.debug('No existing release for identifier "%s". Inserting new.', release_identifier)
+                    release = new_fields
                     r = db.insert(release)
-
-                # Update with ref and _id
-                release.update({
-                    '_id': r['_id'],
-                    '_rev': r['_rev'],
-                })
+                    release.update({
+                        '_id': r['_id'],
+                        '_rev': r['_rev'],
+                    })
 
             # Empty out empty file groups
             release['files'] = dict((k, [toUnicode(x) for x in v]) for k, v in group['files'].items() if v)
