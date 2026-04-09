@@ -40,7 +40,8 @@ RUN \
     "bencode.py" \
     python-qbittorrent \
     rarfile \
-    guessit && \
+    guessit \
+    pymediainfo && \
   echo "**** cleanup ****" && \
   rm -rf /tmp/*
 
