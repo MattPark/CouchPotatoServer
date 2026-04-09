@@ -20,11 +20,11 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import zlib
 
 from guessit import guessit as guessit_parse
-from pymediainfo import MediaInfo
 
 try:
     import requests
@@ -38,21 +38,21 @@ except ImportError:
 
 VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.m4v', '.wmv', '.flv', '.ts', '.m2ts'}
 
-# Map claimed resolution labels to expected widths
-RESOLUTION_MAP = {
-    '2160p': 3840,
-    '4k': 3840,
-    '1080p': 1920,
-    '1080i': 1920,
-    '720p': 1280,
-    '720i': 1280,
-    '480p': 640,
-    '480i': 640,
+# Map claimed resolution labels to expected heights (the "p" in 1080p = lines)
+RESOLUTION_HEIGHT_MAP = {
+    '2160p': 2160,
+    '4k': 2160,
+    '1080p': 1080,
+    '1080i': 1080,
+    '720p': 720,
+    '720i': 720,
+    '480p': 480,
+    '480i': 480,
 }
 
-# Tolerance: actual width can be within this percentage of expected
-# (ultrawide crops like 1920x800 are still "1080p")
-RESOLUTION_TOLERANCE_PCT = 0.15
+# Tolerance: actual height can be within this percentage of expected
+# (slight crops like 1920x1072 are still "1080p")
+RESOLUTION_TOLERANCE_PCT = 0.05
 
 # Runtime tolerance: flag if delta exceeds BOTH thresholds
 RUNTIME_DELTA_MIN = 15       # minutes
@@ -75,6 +75,17 @@ FOLDER_RE = re.compile(r'^(.+?)\s*\((\d{4})\)\s*$')
 
 # srrDB API base
 SRRDB_API = 'https://api.srrdb.com/v1'
+
+# TV episode patterns in container titles
+TV_EPISODE_RE = re.compile(
+    r'S\d{2}E\d{2}'           # S01E01
+    r'|Season\s*\d+'          # Season 1
+    r'|SEASON\s*\d+'          # SEASON 1
+    r'|\bST\d{2}\b'          # ST01 (foreign season notation)
+    r'|\bDisc\s*\d+'          # Disc 1
+    r'|\bDISC\s*\d+',         # DISC 1
+    re.I
+)
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +193,11 @@ def titles_match(title_a, title_b):
 # ---------------------------------------------------------------------------
 
 def extract_file_meta(filepath):
-    """Extract metadata from a video file using pymediainfo.
+    """Extract metadata from a video file using the mediainfo CLI.
+
+    Uses the CLI binary instead of the Python library to isolate crashes —
+    if libmediainfo segfaults on a file, only the subprocess dies and the
+    parent process continues scanning.
 
     Returns dict with: resolution_width, resolution_height, duration_min,
                        video_codec, container_title
@@ -195,40 +210,75 @@ def extract_file_meta(filepath):
         'container_title': None,
     }
 
+    # Ask mediainfo for JSON output (available in mediainfo >= 18.03)
     try:
-        mi = MediaInfo.parse(filepath)
-    except Exception as e:
-        print(f'  WARNING: pymediainfo failed on {filepath}: {e}', file=sys.stderr)
+        proc = subprocess.run(
+            ['mediainfo', '--Output=JSON', filepath],
+            capture_output=True, text=True, timeout=60,
+        )
+    except FileNotFoundError:
+        print('  WARNING: mediainfo CLI not found, skipping', file=sys.stderr)
+        return result
+    except subprocess.TimeoutExpired:
+        print(f'  WARNING: mediainfo timed out on {filepath}', file=sys.stderr)
         return result
 
-    general_tracks = [t for t in mi.tracks if t.track_type == 'General']
-    video_tracks = [t for t in mi.tracks if t.track_type == 'Video']
-
-    if not video_tracks:
+    if proc.returncode != 0:
+        print(f'  WARNING: mediainfo exited {proc.returncode} on {filepath}',
+              file=sys.stderr)
         return result
 
-    vt = video_tracks[0]
-    result['resolution_width'] = int(vt.width) if vt.width else 0
-    result['resolution_height'] = int(vt.height) if vt.height else 0
-    result['video_codec'] = vt.format or ''
+    try:
+        data = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f'  WARNING: mediainfo JSON parse error on {filepath}: {e}',
+              file=sys.stderr)
+        return result
 
-    # Duration: prefer general track duration (container-level, most accurate)
-    if general_tracks and general_tracks[0].duration:
+    tracks = data.get('media', {}).get('track', [])
+    general = None
+    video = None
+    for t in tracks:
+        ttype = t.get('@type', '')
+        if ttype == 'General' and general is None:
+            general = t
+        elif ttype == 'Video' and video is None:
+            video = t
+
+    if not video:
+        return result
+
+    # Resolution
+    try:
+        result['resolution_width'] = int(video.get('Width', 0))
+    except (ValueError, TypeError):
+        pass
+    try:
+        result['resolution_height'] = int(video.get('Height', 0))
+    except (ValueError, TypeError):
+        pass
+
+    # Codec
+    result['video_codec'] = video.get('Format', '')
+
+    # Duration: prefer general track (container-level, value is in seconds)
+    duration_sec = 0
+    if general and general.get('Duration'):
         try:
-            result['duration_min'] = float(general_tracks[0].duration) / 60000.0
+            duration_sec = float(general['Duration'])
         except (ValueError, TypeError):
             pass
-
-    # Fallback to video track duration
-    if result['duration_min'] == 0.0 and vt.duration:
+    if duration_sec == 0 and video.get('Duration'):
         try:
-            result['duration_min'] = float(vt.duration) / 60000.0
+            duration_sec = float(video['Duration'])
         except (ValueError, TypeError):
             pass
+    if duration_sec > 0:
+        result['duration_min'] = duration_sec / 60.0
 
     # Container title
-    if general_tracks and general_tracks[0].title:
-        result['container_title'] = general_tracks[0].title
+    if general and general.get('Title'):
+        result['container_title'] = general['Title']
 
     return result
 
@@ -266,52 +316,52 @@ def is_junk_title(title):
     return False
 
 
-def resolution_label_for_width(width):
-    """Convert a pixel width to a human-readable label."""
-    if width >= 3840:
-        return '2160p (4K)'
-    elif width >= 1920:
+def resolution_label_for_height(height):
+    """Convert a pixel height to a human-readable resolution label."""
+    if height >= 2160:
+        return '2160p'
+    elif height >= 1080:
         return '1080p'
-    elif width >= 1280:
+    elif height >= 720:
         return '720p'
-    elif width >= 640:
+    elif height >= 480:
         return '480p'
     else:
-        return f'{width}px (SD)'
+        return f'{height}p (SD)'
 
 
 # ---------------------------------------------------------------------------
 # Tier 1 checks
 # ---------------------------------------------------------------------------
 
-def check_resolution(claimed_label, actual_width):
-    """Check 1: Resolution mismatch.
+def check_resolution(claimed_label, actual_height):
+    """Check 1: Resolution mismatch (height-based).
+
+    The 'p' in 1080p refers to vertical lines, so classification should
+    be based on height, not width.  This avoids false positives from 4:3
+    content (e.g. 1440x1080 is still 1080p).
 
     Returns a flag dict or None.
     """
-    if not claimed_label or not actual_width:
+    if not claimed_label or not actual_height:
         return None
 
-    expected_width = RESOLUTION_MAP.get(claimed_label.lower())
-    if expected_width is None:
+    expected_height = RESOLUTION_HEIGHT_MAP.get(claimed_label.lower())
+    if expected_height is None:
         return None
 
-    # Allow tolerance for non-standard aspect ratios
-    lower = expected_width * (1 - RESOLUTION_TOLERANCE_PCT)
-    upper_next = expected_width * (1 + RESOLUTION_TOLERANCE_PCT)
+    # Allow small tolerance for slight crops (e.g. 1072 is close enough to 1080)
+    lower = expected_height * (1 - RESOLUTION_TOLERANCE_PCT)
 
-    # Check if actual width falls outside the expected range
-    # but also make sure it's not just a slightly different encode of the same class
-    if actual_width < lower or actual_width > upper_next:
-        # Determine if it's actually a different resolution class
-        actual_label = resolution_label_for_width(actual_width)
-        expected_label = resolution_label_for_width(expected_width)
+    if actual_height < lower:
+        actual_label = resolution_label_for_height(actual_height)
+        expected_label = resolution_label_for_height(expected_height)
 
         if actual_label != expected_label:
             return {
                 'check': 'resolution',
                 'severity': 'HIGH',
-                'detail': f'Claimed {claimed_label}, actual {actual_width}x (maps to {actual_label})',
+                'detail': f'Claimed {claimed_label}, actual height {actual_height}px (maps to {actual_label})',
             }
 
     return None
@@ -404,6 +454,26 @@ def check_container_title(container_title, folder_title, folder_year):
     return None, parsed_meta
 
 
+def check_tv_episode(container_title):
+    """Check 4: TV episode filed as a movie.
+
+    Detects TV episode patterns (S01E01, Season, Disc) in container titles.
+    Returns a flag dict or None.
+    """
+    if not container_title:
+        return None
+
+    m = TV_EPISODE_RE.search(container_title)
+    if m:
+        return {
+            'check': 'tv_episode',
+            'severity': 'HIGH',
+            'detail': f"Container title looks like a TV episode: '{container_title}'",
+        }
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Tier 2 identification
 # ---------------------------------------------------------------------------
@@ -473,9 +543,11 @@ def identify_flagged_file(filepath, flags, container_title_parsed):
     # Strategy A: container title already told us
     if container_title_parsed and container_title_parsed.get('title'):
         meta = container_title_parsed
-        # Only use if title or year differs from what was expected
+        title = meta['title']
+        # Only use if title or year differs from what was expected,
+        # AND the title isn't a junk encoder/group name
         has_title_flag = any(f['check'] == 'title' for f in flags)
-        if has_title_flag:
+        if has_title_flag and not is_junk_title(title) and len(title) > 3:
             identification = {
                 'method': 'container_title',
                 'identified_title': meta['title'],
@@ -589,8 +661,8 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb, tier2=False):
     flags = []
     container_title_parsed = None
 
-    # Check 1: Resolution
-    flag = check_resolution(claimed_res, meta['resolution_width'])
+    # Check 1: Resolution (height-based)
+    flag = check_resolution(claimed_res, meta['resolution_height'])
     if flag:
         flags.append(flag)
 
@@ -603,6 +675,11 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb, tier2=False):
     flag, container_title_parsed = check_container_title(
         meta['container_title'], folder_title, folder_year
     )
+    if flag:
+        flags.append(flag)
+
+    # Check 4: TV episode in container title
+    flag = check_tv_episode(meta['container_title'])
     if flag:
         flags.append(flag)
 
