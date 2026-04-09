@@ -11,13 +11,22 @@ Tier 2 (targeted identification for flagged files):
   B. CRC32 reverse lookup on srrDB → release name + IMDB ID
   C. (future) TMDB search fallback
 
+  Smart skip logic (tier2 without force_tier2):
+    - TV episode detected → skip tier 2, mark for deletion
+    - Resolution-only mismatch → skip tier 2 (right movie, wrong quality)
+    - Everything else → run tier 2 (suspect file needs identification)
+    - force_tier2=1 overrides all skip logic
+
 Usage (standalone):
   python audit.py --movies-dir /movies --db /config/data/database/db.json
   python audit.py --movies-dir /movies --db /config/data/database/db.json --scan-path "Dead, The (1987)"
   python audit.py --movies-dir /movies --db /config/data/database/db.json --tier2
+  python audit.py --movies-dir /movies --db /config/data/database/db.json --tier2 --force-tier2
+  python audit.py --movies-dir /movies --db /config/data/database/db.json --workers 8
 
 API (when running inside CouchPotato):
-  GET /api/{key}/audit.scan?tier2=0&scan_path=
+  GET /api/{key}/audit.scan?tier2=0&force_tier2=0&workers=4&scan_path=
+  GET /api/{key}/audit.cancel
   GET /api/{key}/audit.progress
   GET /api/{key}/audit.results
 """
@@ -28,8 +37,10 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import zlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from guessit import guessit as guessit_parse
 
@@ -119,6 +130,10 @@ TV_EPISODE_RE = re.compile(
     r'|\bDISC\s*\d+',         # DISC 1
     re.I
 )
+
+# Default number of parallel scan workers
+DEFAULT_WORKERS = 4
+MAX_WORKERS = 16
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +263,7 @@ def extract_file_meta(filepath):
         proc = subprocess.run(
             ['mediainfo', '--Output=JSON', filepath],
             capture_output=True, text=True, timeout=60,
+            encoding='utf-8', errors='replace',
         )
     except FileNotFoundError:
         _log_warn('mediainfo CLI not found, skipping')
@@ -506,6 +522,39 @@ def check_tv_episode(container_title):
 
 
 # ---------------------------------------------------------------------------
+# Tier 2 skip logic
+# ---------------------------------------------------------------------------
+
+def needs_identification(flags):
+    """Determine if a flagged file needs Tier 2 identification.
+
+    Smart skip logic — avoid expensive CRC32/srrDB lookups when Tier 1
+    already gives us enough information to act:
+
+      - TV episode detected → skip (already identified from container title,
+        queue for deletion)
+      - Resolution-only mismatch → skip (right movie, wrong quality — not
+        suspect, just needs re-download)
+      - Everything else → run (title mismatch, runtime mismatch, or
+        multi-flag combinations are suspect and need identification)
+
+    Returns True if Tier 2 should run, False to skip.
+    """
+    checks = {f['check'] for f in flags}
+
+    # TV episode: already identified from container title, no CRC needed
+    if 'tv_episode' in checks:
+        return False
+
+    # Resolution-only: right movie, wrong quality — not suspect
+    if checks == {'resolution'}:
+        return False
+
+    # Everything else is suspect — run tier 2
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Tier 2 identification
 # ---------------------------------------------------------------------------
 
@@ -659,8 +708,16 @@ def find_video_files(folder_path):
     return files
 
 
-def scan_movie_folder(folder_path, folder_name, media_by_imdb, tier2=False):
+def scan_movie_folder(folder_path, folder_name, media_by_imdb,
+                      tier2=False, force_tier2=False):
     """Scan a single movie folder and return audit results.
+
+    Args:
+        folder_path: Full path to the movie folder
+        folder_name: Folder basename (e.g., "Dead, The (1987)")
+        media_by_imdb: Dict mapping IMDB ID → movie info from CP database
+        tier2: Run Tier 2 identification on flagged files
+        force_tier2: Force Tier 2 even for high-confidence Tier 1 flags
 
     Returns a dict with scan results or None if no issues found.
     """
@@ -742,16 +799,37 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb, tier2=False):
         'identification': None,
     }
 
-    # Tier 2: identification
+    # Tier 2: identification with smart skip logic
     if tier2:
-        result['identification'] = identify_flagged_file(
-            filepath, flags, container_title_parsed
-        )
+        has_tv = any(f['check'] == 'tv_episode' for f in flags)
+        if has_tv and not force_tier2:
+            # TV episode detected — mark for deletion, skip CRC identification
+            result['identification'] = {
+                'method': 'tv_episode_detected',
+                'action': 'queue_deletion',
+                'detail': 'Container title indicates TV episode content',
+            }
+        elif force_tier2 or needs_identification(flags):
+            result['identification'] = identify_flagged_file(
+                filepath, flags, container_title_parsed
+            )
+        else:
+            # High-confidence tier 1 flag (resolution-only) — skip
+            result['identification'] = {
+                'method': 'skipped',
+                'reason': 'high_confidence_tier1',
+                'detail': 'Tier 1 flags sufficient; use force_tier2=1 to override',
+            }
 
     return result
 
 
+# Sentinel value for _scan_one: folder was not a directory, skip it
+_SKIP = object()
+
+
 def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
+                 force_tier2=False, workers=DEFAULT_WORKERS,
                  progress_callback=None, cancel_flag=None):
     """Scan movie library for mislabeled files.
 
@@ -760,6 +838,8 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
         db_path: Path to CP's db.json
         scan_path: If set, only scan this specific folder name
         tier2: Run Tier 2 identification on flagged files
+        force_tier2: Force Tier 2 even for high-confidence Tier 1 flags
+        workers: Number of parallel scan threads (1 = sequential)
         progress_callback: If set, called with (scanned, total, flagged_count)
                            after each folder
         cancel_flag: If set, a list whose first element is checked each
@@ -787,30 +867,94 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
     flagged = []
     scanned = 0
     errors = 0
+    lock = threading.Lock()
 
-    for i, folder_name in enumerate(folders, 1):
-        # Check cancel flag
-        if cancel_flag and cancel_flag[0]:
-            _log_info('Scan cancelled at %s/%s (%s flagged)' % (scanned, total, len(flagged)))
-            break
+    # Clamp workers to sane range
+    workers = max(1, min(workers, MAX_WORKERS))
 
+    def _scan_one(folder_name):
+        """Scan a single folder. Called from thread pool or main loop.
+
+        Returns:
+            (_SKIP, False) — not a directory, skip
+            (result_or_None, False) — scanned successfully (result is None if clean)
+            (None, True) — error during scan
+        """
         folder_path = os.path.join(movies_dir, folder_name)
         if not os.path.isdir(folder_path):
-            continue
-
+            return _SKIP, False
         try:
-            result = scan_movie_folder(folder_path, folder_name, media_by_imdb, tier2=tier2)
-            scanned += 1
-            if result:
-                flagged.append(result)
-                severity = max(f['severity'] for f in result['flags'])
-                checks = ', '.join(f['check'] for f in result['flags'])
-                _log_info('FLAGGED [%s] %s: %s' % (severity, folder_name, checks))
-            if progress_callback:
-                progress_callback(scanned, total, len(flagged))
+            result = scan_movie_folder(
+                folder_path, folder_name, media_by_imdb,
+                tier2=tier2, force_tier2=force_tier2,
+            )
+            return result, False
         except Exception as e:
-            errors += 1
             _log_error('Error scanning %s: %s' % (folder_name, e))
+            return None, True
+
+    def _collect_result(folder_name, result, is_error):
+        """Process a scan result. Must be called under lock (or single-threaded)."""
+        nonlocal scanned, errors
+        if is_error:
+            errors += 1
+            return
+        scanned += 1
+        if result is not None:
+            flagged.append(result)
+            severity = max(f['severity'] for f in result['flags'])
+            checks = ', '.join(f['check'] for f in result['flags'])
+            _log_info('FLAGGED [%s] %s: %s' % (severity, folder_name, checks))
+        if progress_callback:
+            progress_callback(scanned, total, len(flagged))
+
+    _log_info('Scanning %s folders with %s worker(s)...' % (total, workers))
+
+    if workers <= 1:
+        # ---- Sequential scan (original behavior) ----
+        for folder_name in folders:
+            if cancel_flag and cancel_flag[0]:
+                _log_info('Scan cancelled at %s/%s (%s flagged)' % (scanned, total, len(flagged)))
+                break
+
+            result, is_error = _scan_one(folder_name)
+            if result is _SKIP:
+                continue
+            _collect_result(folder_name, result, is_error)
+    else:
+        # ---- Multi-threaded scan ----
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            # Submit all work up front — the executor queues internally
+            # and only runs `workers` tasks concurrently
+            future_to_folder = {}
+            for folder_name in folders:
+                if cancel_flag and cancel_flag[0]:
+                    break
+                future = executor.submit(_scan_one, folder_name)
+                future_to_folder[future] = folder_name
+
+            for future in as_completed(future_to_folder):
+                if cancel_flag and cancel_flag[0]:
+                    # Cancel pending futures (already-running ones will finish)
+                    for f in future_to_folder:
+                        f.cancel()
+                    _log_info('Scan cancelled at %s/%s (%s flagged)' % (scanned, total, len(flagged)))
+                    break
+
+                folder_name = future_to_folder[future]
+                try:
+                    result, is_error = future.result()
+                except Exception as e:
+                    _log_error('Unexpected error scanning %s: %s' % (folder_name, e))
+                    with lock:
+                        errors += 1
+                    continue
+
+                if result is _SKIP:
+                    continue
+
+                with lock:
+                    _collect_result(folder_name, result, is_error)
 
     was_cancelled = bool(cancel_flag and cancel_flag[0])
     if was_cancelled:
@@ -853,6 +997,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'desc': 'Start a library audit scan',
             'params': {
                 'tier2': {'desc': 'Run Tier 2 identification (CRC + srrDB). Default 0.'},
+                'force_tier2': {'desc': 'Force Tier 2 even for high-confidence flags. Default 0.'},
+                'workers': {'desc': 'Number of parallel scan threads (1-16). Default 4.'},
                 'scan_path': {'desc': 'Scan only this folder name (optional).'},
             },
         })
@@ -897,7 +1043,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'flagged': flagged_count,
         }
 
-    def _run_scan(self, tier2=False, scan_path=None):
+    def _run_scan(self, tier2=False, force_tier2=False, scan_path=None,
+                  workers=DEFAULT_WORKERS):
         """Run the audit scan (called in background thread)."""
         self._cancel[0] = False
 
@@ -921,6 +1068,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 db_path=db_path,
                 scan_path=scan_path,
                 tier2=tier2,
+                force_tier2=force_tier2,
+                workers=workers,
                 progress_callback=self._on_progress,
                 cancel_flag=self._cancel,
             )
@@ -932,7 +1081,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             self.in_progress = False
             self._cancel[0] = False
 
-    def scanView(self, tier2='0', scan_path=None, **kwargs):
+    def scanView(self, tier2='0', force_tier2='0', workers='4',
+                 scan_path=None, **kwargs):
         """API handler: start an audit scan."""
         if self.in_progress:
             return {
@@ -942,17 +1092,28 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             }
 
         do_tier2 = str(tier2) == '1'
+        do_force = str(force_tier2) == '1'
+
+        try:
+            num_workers = int(workers)
+        except (ValueError, TypeError):
+            num_workers = DEFAULT_WORKERS
+        num_workers = max(1, min(num_workers, MAX_WORKERS))
+
         self.in_progress = {'total': 0, 'scanned': 0, 'flagged': 0}
 
         fireEventAsync(
             'audit.run_scan',
             tier2=do_tier2,
+            force_tier2=do_force,
             scan_path=scan_path if scan_path else None,
+            workers=num_workers,
         )
 
         return {
             'success': True,
-            'message': 'Audit scan started',
+            'message': 'Audit scan started (workers=%s, tier2=%s, force_tier2=%s)' % (
+                num_workers, do_tier2, do_force),
             'progress': self.in_progress,
         }
 
@@ -1009,6 +1170,14 @@ def main():
         help='Run Tier 2 identification on flagged files (CRC32 + srrDB)',
     )
     parser.add_argument(
+        '--force-tier2', action='store_true',
+        help='Force Tier 2 even for high-confidence Tier 1 flags',
+    )
+    parser.add_argument(
+        '--workers', type=int, default=DEFAULT_WORKERS,
+        help='Number of parallel scan threads (default: %s)' % DEFAULT_WORKERS,
+    )
+    parser.add_argument(
         '--output', '-o',
         help='Write JSON report to this file (default: stdout)',
     )
@@ -1020,6 +1189,8 @@ def main():
         db_path=args.db,
         scan_path=args.scan_path,
         tier2=args.tier2,
+        force_tier2=args.force_tier2,
+        workers=args.workers,
     )
 
     json_output = json.dumps(report, indent=2)
