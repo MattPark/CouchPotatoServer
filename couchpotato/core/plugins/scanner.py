@@ -168,7 +168,7 @@ class Scanner(Plugin):
     }
 
     edition_map = {
-        "Director's Cut": [('directors', 'cut'), ('directors', 'edition')],
+        "Director's Cut": [('directors', 'cut'), ('directors', 'edition'), 'dc'],
         'Extended Edition': [('extended', 'cut'), ('extended', 'edition'), 'extended'],
         'Unrated': ['unrated'],
         'Theatrical': [('theatrical', 'cut'), ('theatrical', 'edition'), 'theatrical'],
