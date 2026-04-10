@@ -112,6 +112,13 @@ JUNK_TITLE_PATTERNS = [
     re.compile(r'handbrake', re.I),
     re.compile(r'^encoded', re.I),
     re.compile(r'^untitled', re.I),
+    re.compile(r'^RARBG', re.I),             # RARBG.COM tracker prefix
+    re.compile(r'@', re.I),                  # user@tracker format (SNAKE@IPT, YiFan @ WiKi)
+    re.compile(r'\.(com|org|net|rocks|me)\b', re.I),  # domain names in titles
+    re.compile(r'^https?://', re.I),         # URLs
+    re.compile(r'releases?\s+(at|by)\b', re.I),  # "releases at/by ..."
+    re.compile(r'^(EVO|MIRCrew|g33k|CMRG|RPG|nmd|Manning|SbR)\b', re.I),  # known encoder/group names
+    re.compile(r'\binternal\s+rls\b', re.I),  # "internal rls" tags
 ]
 
 # Regex to extract IMDB ID from filename
@@ -723,9 +730,14 @@ def check_container_title(container_title, folder_title, folder_year):
     meta_title = parsed.get('title')
     meta_year = parsed.get('year')
 
-    # If guessit couldn't extract a year, it's probably not a scene name
-    # Still check the title if we got one
     if not meta_title:
+        return None, None
+
+    # Short titles with no year are almost certainly junk encoder/group names
+    # (e.g. "EVO", "g33k", "Manning", "Dread-Team", "ultimate-force").
+    # Real scene names include a year.  Allow longer titles through since they
+    # could be actual movie names (e.g. "What keeps you alive").
+    if not meta_year and len(meta_title.split()) <= 3:
         return None, None
 
     parsed_meta = {
