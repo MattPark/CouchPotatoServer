@@ -1972,41 +1972,47 @@ def _preview_reassign_movie(item):
     if not id_title:
         return {'error': 'Tier 2 did not identify a title'}
 
-    # Build destination folder and filename
-    # Format: "Title (Year)" or "Title, The (Year)"
+    # Build destination folder name: "Title (Year)" or "Title, The (Year)"
     if id_year:
         new_folder = '%s (%s)' % (id_title, id_year)
     else:
         new_folder = id_title
-
-    # Build new filename: "Title (Year) Resolution IMDBid.ext"
-    old_file = item['file']
-    ext = os.path.splitext(old_file)[1]
-
-    # Use actual resolution for the new filename
-    actual_res = item['actual'].get('resolution', '')
-    actual_width = 0
-    actual_height = 0
-    if 'x' in actual_res:
-        try:
-            actual_width = int(actual_res.split('x')[0])
-            actual_height = int(actual_res.split('x')[1])
-        except (ValueError, IndexError):
-            pass
-    res_label = resolution_label(actual_width, actual_height) if actual_height else ''
-
-    parts = [new_folder]
-    if res_label:
-        parts.append(res_label)
-    if id_imdb:
-        parts.append(id_imdb)
-    new_file = ' '.join(parts) + ext
 
     # Determine the movies root from the old path
     # old_path: /media/Movies/FolderName/file.mkv → movies_dir = /media/Movies
     old_path = item['file_path']
     old_folder_path = os.path.dirname(old_path)
     movies_dir = os.path.dirname(old_folder_path)
+
+    # Build new filename using the renamer template with the identified movie's
+    # title/year/IMDB, preserving guessit tokens from the original filename
+    reassign_item = dict(item)
+    reassign_item['expected'] = dict(item.get('expected', {}))
+    reassign_item['expected']['title'] = id_title
+    reassign_item['expected']['year'] = id_year
+    reassign_item['imdb_id'] = id_imdb
+
+    try:
+        new_file, _ = _apply_renamer_template(reassign_item)
+    except (ValueError, Exception) as e:
+        # Fallback to simple format if template fails
+        old_file = item['file']
+        ext = os.path.splitext(old_file)[1]
+        actual_res = item['actual'].get('resolution', '')
+        actual_width = actual_height = 0
+        if 'x' in actual_res:
+            try:
+                actual_width = int(actual_res.split('x')[0])
+                actual_height = int(actual_res.split('x')[1])
+            except (ValueError, IndexError):
+                pass
+        res_label = resolution_label(actual_width, actual_height) if actual_height else ''
+        parts = [new_folder]
+        if res_label:
+            parts.append(res_label)
+        if id_imdb:
+            parts.append(id_imdb)
+        new_file = ' '.join(parts) + ext
 
     new_folder_path = os.path.join(movies_dir, new_folder)
     new_path = os.path.join(new_folder_path, new_file)
