@@ -28,13 +28,20 @@ API (when running inside CouchPotato):
   GET /api/{key}/audit.scan?tier2=0&force_tier2=0&workers=4&scan_path=
   GET /api/{key}/audit.cancel
   GET /api/{key}/audit.progress
-  GET /api/{key}/audit.results
+  GET /api/{key}/audit.results?offset=0&limit=50&filter_check=&filter_severity=&filter_action=&sort=folder&sort_dir=asc
+  GET /api/{key}/audit.stats
+  GET /api/{key}/audit.fix.preview?item_id=&action=
+  GET /api/{key}/audit.fix?item_id=&action=&confirm=1
+  GET /api/{key}/audit.fix.batch?action=&filter_check=&confirm=1&dry_run=1
+  GET /api/{key}/audit.fix.progress
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -134,6 +141,31 @@ TV_EPISODE_RE = re.compile(
 # Default number of parallel scan workers
 DEFAULT_WORKERS = 4
 MAX_WORKERS = 16
+
+# Edition detection (ported from scanner.py)
+EDITION_MAP = {
+    "Director's Cut": [('directors', 'cut'), ('directors', 'edition'), 'dc'],
+    'Extended Edition': [('extended', 'cut'), ('extended', 'edition'), 'extended'],
+    'Unrated': ['unrated'],
+    'Theatrical': [('theatrical', 'cut'), ('theatrical', 'edition'), 'theatrical'],
+    'IMAX': [('imax', 'edition'), 'imax'],
+    'Final Cut': [('final', 'cut')],
+    'Remastered': ['remastered'],
+    'Special Edition': [('special', 'edition')],
+    'Anniversary Edition': [('anniversary', 'edition')],
+    'Criterion': [('criterion', 'collection'), 'criterion'],
+    'Redux': ['redux'],
+    'Ultimate Cut': [('ultimate', 'cut'), ('ultimate', 'edition')],
+    'Rogue Cut': [('rogue', 'cut')],
+    "Black & Chrome": [('black', 'chrome'), ('black', 'and', 'chrome')],
+}
+
+# Words that should not be treated as edition names when followed by Cut/Edition
+EDITION_EXCLUDE = {
+    'blu', 'ray', 'web', 'hd', 'sd', 'uhd', 'dvd', 'bd', 'hdr', 'tax',
+    'pay', 'price', 'budget', 'the', 'a', 'an', 'no', 'rough', 'first',
+    'clean',
+}
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +410,138 @@ def resolution_label_for_height(height):
 
 
 # ---------------------------------------------------------------------------
+# Edition detection (ported from scanner.py:getEdition)
+# ---------------------------------------------------------------------------
+
+def get_edition(filename):
+    """Detect edition/cut info from a filename or release name.
+
+    Ported from Scanner.getEdition() in scanner.py.  Works as a standalone
+    function (no class instance required).
+
+    Only searches AFTER the year in the filename to avoid false positives
+    when edition words appear in the movie title.
+
+    Returns the edition string (e.g. "Director's Cut") or empty string.
+    """
+    # ss() in CP is just toUnicode — in Python 3 it's a no-op for str
+    filename = str(filename)
+    words = re.split(r'\W+', filename.lower())
+
+    # Find year position — editions only appear after the year in release names
+    year_idx = 0
+    for i, w in enumerate(words):
+        if re.match(r'^(19|20)\d{2}$', w):
+            year_idx = i
+            break
+
+    # Restrict search to words at/after year position
+    search_words = words[year_idx:]
+    search_joined = '.'.join(search_words)
+
+    # Check known editions first
+    for key, tags in EDITION_MAP.items():
+        for tag in tags:
+            if isinstance(tag, tuple) and '.'.join(tag) in search_joined:
+                return key
+            elif isinstance(tag, str) and tag.lower() in search_words:
+                return key
+
+    # Fallback: catch arbitrary "<Word(s)> Cut" or "<Word(s)> Edition" patterns
+    basename = os.path.basename(filename)
+    # Restrict fallback to after the year too
+    year_match = re.search(r'[\.\s_\-]((?:19|20)\d{2})[\.\s_\-]', basename)
+    search_basename = basename[year_match.start():] if year_match else basename
+    m = re.search(
+        r'[\.\s_\-]((?:[a-z]+[\.\s_\-]){0,2}(?:[a-z]+))[\.\s_\-](cut|edition)(?=[\.\s_\-]|$)',
+        search_basename, re.IGNORECASE
+    )
+    if m:
+        name_part = re.sub(r'[\._\-]', ' ', m.group(1)).strip()
+        kind = m.group(2)
+        last_word = name_part.split()[-1].lower() if name_part else ''
+        if last_word and last_word not in EDITION_EXCLUDE:
+            return '%s %s' % (name_part.title(), kind.title())
+
+    return ''
+
+
+# ---------------------------------------------------------------------------
+# Item ID + recommended action
+# ---------------------------------------------------------------------------
+
+def compute_item_id(file_path):
+    """Compute a stable ID for a flagged item: SHA256 of file_path, 12 hex chars."""
+    return hashlib.sha256(file_path.encode('utf-8')).hexdigest()[:12]
+
+
+def compute_recommended_action(flags, identification=None):
+    """Derive the recommended fix action from flags and identification data.
+
+    Returns one of:
+        'delete_wrong'       — TV episode or identified as non-movie
+        'rename_resolution'  — resolution-only flag (right movie, wrong quality label)
+        'reassign_movie'     — tier 2 identified as a different movie
+        'rename_edition'     — edition detected in container but not filename
+        'needs_tier2'        — title/runtime mismatch, needs tier 2 identification
+        'manual_review'      — tier 2 ran but couldn't identify
+        'none'               — no action needed (tier 2 confirmed same movie)
+    """
+    checks = {f['check'] for f in flags}
+
+    # TV episode always gets delete
+    if 'tv_episode' in checks:
+        return 'delete_wrong'
+
+    # If tier 2 has run, use identification to decide
+    if identification:
+        method = identification.get('method', '')
+
+        if method == 'tv_episode_detected':
+            return 'delete_wrong'
+
+        if method == 'skipped':
+            # High-confidence tier 1 (resolution-only skip)
+            if checks == {'resolution'}:
+                return 'rename_resolution'
+            if checks == {'edition'}:
+                return 'rename_edition'
+            if 'edition' in checks and checks - {'edition', 'resolution'} == set():
+                # Only edition + resolution flags
+                return 'rename_resolution'
+
+        if method in ('container_title', 'srrdb_crc'):
+            # Tier 2 found a match — is it the same movie or different?
+            id_imdb = identification.get('identified_imdb')
+            if id_imdb:
+                # We have an IMDB — if it differs from expected, reassign
+                return 'reassign_movie'
+            # No IMDB from tier 2 — title-based guess
+            id_title = identification.get('identified_title', '')
+            if id_title:
+                return 'reassign_movie'
+
+        if method == 'crc_not_found':
+            return 'manual_review'
+
+    # No tier 2 data — decide from tier 1 flags alone
+    if checks == {'resolution'}:
+        return 'rename_resolution'
+
+    if checks == {'edition'}:
+        return 'rename_edition'
+
+    if 'edition' in checks and checks - {'edition', 'resolution'} == set():
+        return 'rename_resolution'
+
+    # Title or runtime mismatch without tier 2 — needs identification
+    if 'title' in checks or 'runtime' in checks:
+        return 'needs_tier2'
+
+    return 'manual_review'
+
+
+# ---------------------------------------------------------------------------
 # Tier 1 checks
 # ---------------------------------------------------------------------------
 
@@ -521,6 +685,49 @@ def check_tv_episode(container_title):
     return None
 
 
+def check_edition(container_title, filename):
+    """Check 5: Edition mismatch between container title and filename.
+
+    Detects when the container title metadata contains an edition keyword
+    (e.g., "Director's Cut", "Extended") but the filename does not, or
+    when they contain different editions.
+
+    Returns a flag dict or None.  Also returns the detected edition string.
+    """
+    if not container_title:
+        return None, ''
+
+    container_edition = get_edition(container_title)
+    if not container_edition:
+        return None, ''
+
+    filename_edition = get_edition(filename)
+
+    if not filename_edition:
+        # Container has edition, filename doesn't — missing from name
+        return {
+            'check': 'edition',
+            'severity': 'MEDIUM',
+            'detail': (
+                f"Container title has edition '{container_edition}' "
+                f"but filename does not"
+            ),
+        }, container_edition
+
+    if container_edition.lower() != filename_edition.lower():
+        # Different editions
+        return {
+            'check': 'edition',
+            'severity': 'LOW',
+            'detail': (
+                f"Container edition '{container_edition}' "
+                f"differs from filename edition '{filename_edition}'"
+            ),
+        }, container_edition
+
+    return None, container_edition
+
+
 # ---------------------------------------------------------------------------
 # Tier 2 skip logic
 # ---------------------------------------------------------------------------
@@ -535,6 +742,8 @@ def needs_identification(flags):
         queue for deletion)
       - Resolution-only mismatch → skip (right movie, wrong quality — not
         suspect, just needs re-download)
+      - Edition-only → skip (right movie, just missing edition in filename)
+      - Resolution + edition only → skip (quality label + edition fix, no ID needed)
       - Everything else → run (title mismatch, runtime mismatch, or
         multi-flag combinations are suspect and need identification)
 
@@ -548,6 +757,14 @@ def needs_identification(flags):
 
     # Resolution-only: right movie, wrong quality — not suspect
     if checks == {'resolution'}:
+        return False
+
+    # Edition-only: right movie, just missing edition in filename
+    if checks == {'edition'}:
+        return False
+
+    # Resolution + edition: both are simple renames, no ID needed
+    if checks == {'resolution', 'edition'}:
         return False
 
     # Everything else is suspect — run tier 2
@@ -771,10 +988,16 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
     if flag:
         flags.append(flag)
 
+    # Check 5: Edition mismatch
+    edition_flag, detected_edition = check_edition(meta['container_title'], filename)
+    if edition_flag:
+        flags.append(edition_flag)
+
     if not flags:
         return None
 
     result = {
+        'item_id': compute_item_id(filepath),
         'folder': folder_name,
         'file': filename,
         'file_path': filepath,
@@ -796,7 +1019,10 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
         },
         'flags': flags,
         'flag_count': len(flags),
+        'detected_edition': detected_edition if detected_edition else None,
         'identification': None,
+        'recommended_action': None,
+        'fixed': None,
     }
 
     # Tier 2: identification with smart skip logic
@@ -820,6 +1046,11 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
                 'reason': 'high_confidence_tier1',
                 'detail': 'Tier 1 flags sufficient; use force_tier2=1 to override',
             }
+
+    # Compute recommended action from flags + identification
+    result['recommended_action'] = compute_recommended_action(
+        flags, result['identification']
+    )
 
     return result
 
@@ -979,15 +1210,444 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
 
 
 # ---------------------------------------------------------------------------
+# Fix helpers
+# ---------------------------------------------------------------------------
+
+VALID_FIX_ACTIONS = {
+    'rename_resolution',
+    'reassign_movie',
+    'delete_wrong',
+    'rename_edition',
+}
+
+
+def _build_resolution_rename(item):
+    """Build the new filename for a resolution rename.
+
+    Replaces the claimed resolution label in the filename with the actual one.
+    Returns (new_filename, new_path, actual_label) or raises ValueError.
+    """
+    old_path = item['file_path']
+    old_file = item['file']
+    old_dir = os.path.dirname(old_path)
+
+    claimed = item['expected'].get('resolution')
+    if not claimed:
+        raise ValueError('No claimed resolution in item')
+
+    actual_height = 0
+    actual_res = item['actual'].get('resolution', '')
+    if 'x' in actual_res:
+        try:
+            actual_height = int(actual_res.split('x')[1])
+        except (ValueError, IndexError):
+            pass
+
+    if not actual_height:
+        raise ValueError('Cannot determine actual height from resolution: %s' % actual_res)
+
+    actual_label = resolution_label_for_height(actual_height)
+    if actual_label == claimed:
+        raise ValueError('Resolution already matches: %s' % claimed)
+
+    # Replace the claimed label in the filename (case-insensitive)
+    new_file = re.sub(re.escape(claimed), actual_label, old_file, count=1, flags=re.I)
+    if new_file == old_file:
+        raise ValueError('Could not replace %s in filename: %s' % (claimed, old_file))
+
+    new_path = os.path.join(old_dir, new_file)
+    return new_file, new_path, actual_label
+
+
+def _build_edition_rename(item):
+    """Build the new filename for an edition rename.
+
+    Inserts the detected edition into the filename (before the resolution label).
+    Returns (new_filename, new_path) or raises ValueError.
+    """
+    old_path = item['file_path']
+    old_file = item['file']
+    old_dir = os.path.dirname(old_path)
+
+    edition = item.get('detected_edition')
+    if not edition:
+        raise ValueError('No detected edition in item')
+
+    # Check if edition is already in the filename
+    filename_edition = get_edition(old_file)
+    if filename_edition:
+        raise ValueError('Filename already has edition: %s' % filename_edition)
+
+    # Insert edition before the resolution label or before the IMDB ID
+    # Pattern: "Title (Year) [Edition] Resolution IMDBid.ext"
+    # Try to insert before resolution first
+    claimed = item['expected'].get('resolution', '')
+    if claimed and claimed in old_file:
+        new_file = old_file.replace(claimed, '%s %s' % (edition, claimed), 1)
+    else:
+        # Try before IMDB ID
+        imdb = item.get('imdb_id', '')
+        if imdb and imdb in old_file:
+            new_file = old_file.replace(imdb, '%s %s' % (edition, imdb), 1)
+        else:
+            # Insert before extension
+            base, ext = os.path.splitext(old_file)
+            new_file = '%s %s%s' % (base, edition, ext)
+
+    new_path = os.path.join(old_dir, new_file)
+    return new_file, new_path
+
+
+def _preview_rename_resolution(item):
+    """Generate preview for rename_resolution action."""
+    try:
+        new_file, new_path, actual_label = _build_resolution_rename(item)
+    except ValueError as e:
+        return {'error': str(e)}
+
+    return {
+        'item_id': item['item_id'],
+        'action': 'rename_resolution',
+        'changes': {
+            'filesystem': {
+                'old_path': item['file_path'],
+                'new_path': new_path,
+            },
+            'database': {
+                'update_release_quality': {
+                    'from': item['expected'].get('resolution', ''),
+                    'to': actual_label,
+                },
+            },
+        },
+        'warnings': [],
+    }
+
+
+def _preview_rename_edition(item):
+    """Generate preview for rename_edition action."""
+    try:
+        new_file, new_path = _build_edition_rename(item)
+    except ValueError as e:
+        return {'error': str(e)}
+
+    return {
+        'item_id': item['item_id'],
+        'action': 'rename_edition',
+        'changes': {
+            'filesystem': {
+                'old_path': item['file_path'],
+                'new_path': new_path,
+            },
+            'database': None,
+        },
+        'warnings': [],
+    }
+
+
+def _preview_delete_wrong(item):
+    """Generate preview for delete_wrong action."""
+    old_path = item['file_path']
+    folder_path = os.path.dirname(old_path)
+
+    return {
+        'item_id': item['item_id'],
+        'action': 'delete_wrong',
+        'changes': {
+            'filesystem': {
+                'delete_path': old_path,
+                'folder_cleanup': folder_path,
+            },
+            'database': {
+                'remove_release': {
+                    'movie': item['expected'].get('title', ''),
+                    'year': item['expected'].get('year'),
+                    'imdb': item.get('imdb_id', ''),
+                },
+                'reset_status': {
+                    'movie': item['expected'].get('title', ''),
+                    'new_status': 'wanted',
+                },
+            },
+        },
+        'warnings': [],
+    }
+
+
+def _preview_reassign_movie(item):
+    """Generate preview for reassign_movie action.
+
+    Requires tier 2 identification with an identified IMDB ID.
+    """
+    ident = item.get('identification')
+    if not ident:
+        return {'error': 'No tier 2 identification data — run a tier 2 scan first'}
+
+    method = ident.get('method', '')
+    if method not in ('container_title', 'srrdb_crc'):
+        return {'error': 'Tier 2 identification method "%s" cannot determine correct movie' % method}
+
+    id_title = ident.get('identified_title', '')
+    id_year = ident.get('identified_year')
+    id_imdb = ident.get('identified_imdb', '')
+
+    if not id_title:
+        return {'error': 'Tier 2 did not identify a title'}
+
+    # Build destination folder and filename
+    # Format: "Title (Year)" or "Title, The (Year)"
+    if id_year:
+        new_folder = '%s (%s)' % (id_title, id_year)
+    else:
+        new_folder = id_title
+
+    # Build new filename: "Title (Year) Resolution IMDBid.ext"
+    old_file = item['file']
+    ext = os.path.splitext(old_file)[1]
+
+    # Use actual resolution for the new filename
+    actual_res = item['actual'].get('resolution', '')
+    actual_height = 0
+    if 'x' in actual_res:
+        try:
+            actual_height = int(actual_res.split('x')[1])
+        except (ValueError, IndexError):
+            pass
+    res_label = resolution_label_for_height(actual_height) if actual_height else ''
+
+    parts = [new_folder]
+    if res_label:
+        parts.append(res_label)
+    if id_imdb:
+        parts.append(id_imdb)
+    new_file = ' '.join(parts) + ext
+
+    # Determine the movies root from the old path
+    # old_path: /media/Movies/FolderName/file.mkv → movies_dir = /media/Movies
+    old_path = item['file_path']
+    old_folder_path = os.path.dirname(old_path)
+    movies_dir = os.path.dirname(old_folder_path)
+
+    new_folder_path = os.path.join(movies_dir, new_folder)
+    new_path = os.path.join(new_folder_path, new_file)
+
+    warnings = []
+    if not id_imdb:
+        warnings.append('No IMDB ID identified — movie may not be linked in CP database')
+    if not id_year:
+        warnings.append('No year identified — folder name may be ambiguous')
+
+    return {
+        'item_id': item['item_id'],
+        'action': 'reassign_movie',
+        'changes': {
+            'filesystem': {
+                'old_path': old_path,
+                'new_path': new_path,
+                'old_folder_cleanup': True,
+            },
+            'database': {
+                'remove_from': {
+                    'movie': item['expected'].get('title', ''),
+                    'year': item['expected'].get('year'),
+                    'imdb': item.get('imdb_id', ''),
+                },
+                'add_to': {
+                    'movie': id_title,
+                    'year': id_year,
+                    'imdb': id_imdb,
+                },
+                'reset_status': {
+                    'movie': item['expected'].get('title', ''),
+                    'new_status': 'wanted',
+                },
+            },
+        },
+        'warnings': warnings,
+    }
+
+
+def generate_fix_preview(item, action):
+    """Generate a fix preview for a flagged item.
+
+    Returns a preview dict describing what changes would be made.
+    """
+    if action == 'rename_resolution':
+        return _preview_rename_resolution(item)
+    elif action == 'rename_edition':
+        return _preview_rename_edition(item)
+    elif action == 'delete_wrong':
+        return _preview_delete_wrong(item)
+    elif action == 'reassign_movie':
+        return _preview_reassign_movie(item)
+    else:
+        return {'error': 'Unknown action: %s' % action}
+
+
+def execute_fix_rename_resolution(item):
+    """Execute a resolution rename fix.
+
+    Returns (success, details_dict).
+    """
+    try:
+        new_file, new_path, actual_label = _build_resolution_rename(item)
+    except ValueError as e:
+        return False, {'error': str(e)}
+
+    old_path = item['file_path']
+
+    # Safety: check file exists
+    if not os.path.isfile(old_path):
+        return False, {'error': 'File not found: %s' % old_path}
+
+    # Safety: check destination doesn't exist
+    if os.path.exists(new_path):
+        return False, {'error': 'Destination already exists: %s' % new_path}
+
+    try:
+        os.rename(old_path, new_path)
+    except OSError as e:
+        return False, {'error': 'Rename failed: %s' % e}
+
+    return True, {
+        'old_path': old_path,
+        'new_path': new_path,
+        'old_resolution': item['expected'].get('resolution', ''),
+        'new_resolution': actual_label,
+    }
+
+
+def execute_fix_rename_edition(item):
+    """Execute an edition rename fix.
+
+    Returns (success, details_dict).
+    """
+    try:
+        new_file, new_path = _build_edition_rename(item)
+    except ValueError as e:
+        return False, {'error': str(e)}
+
+    old_path = item['file_path']
+
+    if not os.path.isfile(old_path):
+        return False, {'error': 'File not found: %s' % old_path}
+
+    if os.path.exists(new_path):
+        return False, {'error': 'Destination already exists: %s' % new_path}
+
+    try:
+        os.rename(old_path, new_path)
+    except OSError as e:
+        return False, {'error': 'Rename failed: %s' % e}
+
+    return True, {
+        'old_path': old_path,
+        'new_path': new_path,
+        'edition': item.get('detected_edition', ''),
+    }
+
+
+def execute_fix_delete_wrong(item):
+    """Execute a delete-wrong-file fix.
+
+    Returns (success, details_dict).
+    """
+    old_path = item['file_path']
+
+    if not os.path.isfile(old_path):
+        return False, {'error': 'File not found: %s' % old_path}
+
+    folder_path = os.path.dirname(old_path)
+
+    try:
+        os.remove(old_path)
+    except OSError as e:
+        return False, {'error': 'Delete failed: %s' % e}
+
+    # Clean up empty folder
+    folder_cleaned = False
+    try:
+        remaining = os.listdir(folder_path)
+        # Only delete if empty or only contains small files (nfo, srt, jpg, etc)
+        video_remaining = [f for f in remaining
+                          if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS]
+        if not video_remaining:
+            shutil.rmtree(folder_path, ignore_errors=True)
+            folder_cleaned = True
+    except OSError:
+        pass
+
+    return True, {
+        'deleted_path': old_path,
+        'folder_cleaned': folder_cleaned,
+    }
+
+
+def execute_fix_reassign_movie(item):
+    """Execute a reassign-movie fix (move file to correct folder).
+
+    Returns (success, details_dict).
+    """
+    preview = _preview_reassign_movie(item)
+    if 'error' in preview:
+        return False, preview
+
+    old_path = item['file_path']
+    changes = preview['changes']
+    new_path = changes['filesystem']['new_path']
+    new_folder = os.path.dirname(new_path)
+    old_folder = os.path.dirname(old_path)
+
+    if not os.path.isfile(old_path):
+        return False, {'error': 'File not found: %s' % old_path}
+
+    if os.path.exists(new_path):
+        return False, {'error': 'Destination already exists: %s' % new_path}
+
+    # Create destination folder
+    try:
+        os.makedirs(new_folder, exist_ok=True)
+    except OSError as e:
+        return False, {'error': 'Cannot create folder %s: %s' % (new_folder, e)}
+
+    # Move the file
+    try:
+        shutil.move(old_path, new_path)
+    except (OSError, shutil.Error) as e:
+        return False, {'error': 'Move failed: %s' % e}
+
+    # Clean up old folder if empty
+    folder_cleaned = False
+    try:
+        remaining = os.listdir(old_folder)
+        video_remaining = [f for f in remaining
+                          if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS]
+        if not video_remaining:
+            shutil.rmtree(old_folder, ignore_errors=True)
+            folder_cleaned = True
+    except OSError:
+        pass
+
+    return True, {
+        'old_path': old_path,
+        'new_path': new_path,
+        'folder_cleaned': folder_cleaned,
+    }
+
+
+# ---------------------------------------------------------------------------
 # CouchPotato plugin
 # ---------------------------------------------------------------------------
 
 class Audit(Plugin if _CP_AVAILABLE else object):
-    """Library audit plugin — exposes scan/progress/results via the CP API."""
+    """Library audit plugin — exposes scan/progress/results/stats via the CP API."""
 
     in_progress = False
     last_report = None
     _cancel = [False]   # mutable list so the scan loop can observe changes
+
+    # Fix progress tracking
+    fix_in_progress = False
 
     def __init__(self):
         if not _CP_AVAILABLE:
@@ -1015,13 +1675,93 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         })
 
         addApiView('audit.results', self.resultsView, docs={
-            'desc': 'Get results of the last completed audit scan',
-            'return': {'type': 'object', 'example': """{
-    'results': {'total_scanned': 8526, 'total_flagged': 127, 'flagged': [...]}
-}"""},
+            'desc': 'Get results of the last completed audit scan (paginated)',
+            'params': {
+                'offset': {'desc': 'Skip N items (default 0)'},
+                'limit': {'desc': 'Return N items (default 50, max 500)'},
+                'filter_check': {'desc': 'Filter by check type (comma-sep): resolution,title,runtime,tv_episode,edition'},
+                'filter_severity': {'desc': 'Filter by severity: HIGH, MEDIUM, LOW'},
+                'filter_action': {'desc': 'Filter by recommended action'},
+                'filter_fixed': {'desc': 'true, false, all (default false)'},
+                'sort': {'desc': 'Sort by: folder, severity, flag_count, file_size (default folder)'},
+                'sort_dir': {'desc': 'asc or desc (default asc)'},
+            },
+        })
+
+        addApiView('audit.stats', self.statsView, docs={
+            'desc': 'Get summary statistics of the last audit scan (no item data)',
+        })
+
+        addApiView('audit.fix.preview', self.fixPreviewView, docs={
+            'desc': 'Preview what a fix action would change (dry run)',
+            'params': {
+                'item_id': {'desc': '12-char hex ID of the flagged item'},
+                'action': {'desc': 'Fix action: rename_resolution, reassign_movie, delete_wrong, rename_edition'},
+            },
+        })
+
+        addApiView('audit.fix', self.fixView, docs={
+            'desc': 'Execute a fix action on a flagged item',
+            'params': {
+                'item_id': {'desc': '12-char hex ID of the flagged item'},
+                'action': {'desc': 'Fix action: rename_resolution, reassign_movie, delete_wrong, rename_edition'},
+                'confirm': {'desc': 'Must be 1 to confirm execution'},
+            },
+        })
+
+        addApiView('audit.fix.batch', self.fixBatchView, docs={
+            'desc': 'Execute a fix action on multiple items (async)',
+            'params': {
+                'action': {'desc': 'Fix action to apply'},
+                'filter_check': {'desc': 'Only apply to items with this check type'},
+                'filter_severity': {'desc': 'Only apply to items with this severity'},
+                'confirm': {'desc': 'Must be 1 to confirm execution'},
+                'dry_run': {'desc': '1 = preview only, 0 = execute (default 1)'},
+            },
+        })
+
+        addApiView('audit.fix.progress', self.fixProgressView, docs={
+            'desc': 'Get progress of a running batch fix operation',
         })
 
         addEvent('audit.run_scan', self._run_scan)
+        addEvent('audit.run_batch_fix', self._run_batch_fix)
+
+        # Load persisted results on startup
+        self._load_results()
+
+    def _get_results_path(self):
+        """Get the path to the persisted audit results file."""
+        data_dir = Env.get('data_dir')
+        return os.path.join(data_dir, 'audit_results.json')
+
+    def _save_results(self):
+        """Persist last_report to disk."""
+        if not self.last_report:
+            return
+        results_path = self._get_results_path()
+        try:
+            tmp_path = results_path + '.tmp'
+            with open(tmp_path, 'w') as f:
+                json.dump(self.last_report, f)
+            os.replace(tmp_path, results_path)
+            log.info('Audit results saved to %s', (results_path,))
+        except Exception as e:
+            log.error('Failed to save audit results: %s', (e,))
+
+    def _load_results(self):
+        """Load persisted results from disk on startup."""
+        results_path = self._get_results_path()
+        if not os.path.isfile(results_path):
+            return
+        try:
+            with open(results_path, 'r') as f:
+                self.last_report = json.load(f)
+            count = self.last_report.get('total_flagged', 0)
+            log.info('Loaded %s flagged items from %s', (count, results_path))
+        except Exception as e:
+            log.error('Failed to load audit results: %s', (e,))
+            self.last_report = None
 
     def _get_movies_dir(self):
         """Get the first library directory from manage settings."""
@@ -1075,11 +1815,89 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             )
             self.last_report = report
             self.last_report['completed_at'] = time.time()
+            self.last_report['scan_timestamp'] = time.strftime(
+                '%Y-%m-%dT%H:%M:%S'
+            )
+            # Persist to disk
+            self._save_results()
         except Exception as e:
             log.error('Audit scan failed: %s', (e,))
         finally:
             self.in_progress = False
             self._cancel[0] = False
+
+    def _filter_and_sort(self, filter_check=None, filter_severity=None,
+                         filter_action=None, filter_fixed='false',
+                         sort='folder', sort_dir='asc'):
+        """Filter and sort flagged items from last_report.
+
+        Returns a list of flagged items matching the filter criteria, sorted.
+        """
+        if not self.last_report:
+            return []
+
+        items = self.last_report.get('flagged', [])
+
+        # Filter by fixed status
+        if filter_fixed == 'true':
+            items = [i for i in items if i.get('fixed')]
+        elif filter_fixed == 'false':
+            items = [i for i in items if not i.get('fixed')]
+        # 'all' returns everything
+
+        # Filter by check type (comma-separated)
+        if filter_check:
+            check_set = {c.strip() for c in filter_check.split(',')}
+            items = [
+                i for i in items
+                if check_set & {f['check'] for f in i.get('flags', [])}
+            ]
+
+        # Filter by severity
+        if filter_severity:
+            sev_set = {s.strip().upper() for s in filter_severity.split(',')}
+            items = [
+                i for i in items
+                if sev_set & {f['severity'] for f in i.get('flags', [])}
+            ]
+
+        # Filter by recommended action
+        if filter_action:
+            action_set = {a.strip() for a in filter_action.split(',')}
+            items = [
+                i for i in items
+                if i.get('recommended_action') in action_set
+            ]
+
+        # Sort
+        severity_order = {'HIGH': 0, 'MEDIUM': 1, 'LOW': 2}
+
+        if sort == 'severity':
+            items.sort(
+                key=lambda r: min(
+                    severity_order.get(f['severity'], 99)
+                    for f in r.get('flags', [{'severity': 'LOW'}])
+                ),
+                reverse=(sort_dir == 'desc'),
+            )
+        elif sort == 'flag_count':
+            items.sort(
+                key=lambda r: r.get('flag_count', 0),
+                reverse=(sort_dir == 'desc'),
+            )
+        elif sort == 'file_size':
+            items.sort(
+                key=lambda r: r.get('file_size_bytes', 0),
+                reverse=(sort_dir == 'desc'),
+            )
+        else:
+            # Default: sort by folder name
+            items.sort(
+                key=lambda r: r.get('folder', '').lower(),
+                reverse=(sort_dir == 'desc'),
+            )
+
+        return items
 
     def scanView(self, tier2='0', force_tier2='0', workers='4',
                  scan_path=None, **kwargs):
@@ -1138,10 +1956,379 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'progress': self.in_progress,
         }
 
-    def resultsView(self, **kwargs):
-        """API handler: return last completed scan report."""
+    def resultsView(self, offset='0', limit='50', filter_check=None,
+                    filter_severity=None, filter_action=None,
+                    filter_fixed='false', sort='folder', sort_dir='asc',
+                    **kwargs):
+        """API handler: return last completed scan report (paginated).
+
+        Supports filtering by check type, severity, action, and fixed status.
+        Supports sorting by folder, severity, flag_count, file_size.
+        """
+        if not self.last_report:
+            return {'results': None}
+
+        # Parse pagination params
+        try:
+            offset_int = max(0, int(offset))
+        except (ValueError, TypeError):
+            offset_int = 0
+        try:
+            limit_int = max(1, min(500, int(limit)))
+        except (ValueError, TypeError):
+            limit_int = 50
+
+        # Filter and sort
+        filtered = self._filter_and_sort(
+            filter_check=filter_check,
+            filter_severity=filter_severity,
+            filter_action=filter_action,
+            filter_fixed=filter_fixed or 'false',
+            sort=sort or 'folder',
+            sort_dir=sort_dir or 'asc',
+        )
+
+        total_filtered = len(filtered)
+        page = filtered[offset_int:offset_int + limit_int]
+
         return {
-            'results': self.last_report,
+            'results': {
+                'total_scanned': self.last_report.get('total_scanned', 0),
+                'total_flagged': self.last_report.get('total_flagged', 0),
+                'total_errors': self.last_report.get('total_errors', 0),
+                'scan_timestamp': self.last_report.get('scan_timestamp', ''),
+                'total_filtered': total_filtered,
+                'offset': offset_int,
+                'limit': limit_int,
+                'items': page,
+            },
+        }
+
+    def statsView(self, **kwargs):
+        """API handler: return summary statistics (no item data)."""
+        if not self.last_report:
+            return {'stats': None}
+
+        flagged = self.last_report.get('flagged', [])
+
+        # Count by check type
+        check_counts = {}
+        for item in flagged:
+            for flag in item.get('flags', []):
+                check = flag.get('check', 'unknown')
+                check_counts[check] = check_counts.get(check, 0) + 1
+
+        # Count by severity
+        severity_counts = {}
+        for item in flagged:
+            for flag in item.get('flags', []):
+                sev = flag.get('severity', 'UNKNOWN')
+                severity_counts[sev] = severity_counts.get(sev, 0) + 1
+
+        # Count by recommended action
+        action_counts = {}
+        for item in flagged:
+            action = item.get('recommended_action', 'none')
+            action_counts[action] = action_counts.get(action, 0) + 1
+
+        # Count fixed items
+        total_fixed = sum(1 for i in flagged if i.get('fixed'))
+
+        # Tier 2 stats
+        tier2_identified = 0
+        tier2_unidentified = 0
+        tier2_skipped = 0
+        for item in flagged:
+            ident = item.get('identification')
+            if not ident:
+                continue
+            method = ident.get('method', '')
+            if method in ('container_title', 'srrdb_crc'):
+                tier2_identified += 1
+            elif method == 'crc_not_found':
+                tier2_unidentified += 1
+            elif method in ('skipped', 'tv_episode_detected'):
+                tier2_skipped += 1
+
+        total_scanned = self.last_report.get('total_scanned', 0)
+        total_flagged = self.last_report.get('total_flagged', 0)
+
+        return {
+            'stats': {
+                'scan_timestamp': self.last_report.get('scan_timestamp', ''),
+                'total_scanned': total_scanned,
+                'total_flagged': total_flagged,
+                'total_clean': total_scanned - total_flagged,
+                'total_errors': self.last_report.get('total_errors', 0),
+                'total_fixed': total_fixed,
+                'checks': check_counts,
+                'severity': severity_counts,
+                'actions': action_counts,
+                'tier2': {
+                    'identified': tier2_identified,
+                    'unidentified': tier2_unidentified,
+                    'skipped': tier2_skipped,
+                },
+            },
+        }
+
+    def _find_item(self, item_id):
+        """Find a flagged item by its item_id.
+
+        Returns the item dict or None.
+        """
+        if not self.last_report:
+            return None
+        for item in self.last_report.get('flagged', []):
+            if item.get('item_id') == item_id:
+                return item
+        return None
+
+    def _mark_fixed(self, item, action, details):
+        """Mark a flagged item as fixed and persist."""
+        item['fixed'] = {
+            'action': action,
+            'timestamp': time.time(),
+            'details': details,
+        }
+        # Update the file_path if it changed (for subsequent operations)
+        if 'new_path' in details:
+            item['file_path'] = details['new_path']
+        self._save_results()
+
+    def fixPreviewView(self, item_id=None, action=None, **kwargs):
+        """API handler: preview what a fix action would change."""
+        if not item_id:
+            return {'success': False, 'error': 'item_id is required'}
+        if not action or action not in VALID_FIX_ACTIONS:
+            return {
+                'success': False,
+                'error': 'action must be one of: %s' % ', '.join(sorted(VALID_FIX_ACTIONS)),
+            }
+
+        item = self._find_item(item_id)
+        if not item:
+            return {'success': False, 'error': 'Item not found: %s' % item_id}
+
+        if item.get('fixed'):
+            return {'success': False, 'error': 'Item already fixed'}
+
+        preview = generate_fix_preview(item, action)
+        if 'error' in preview:
+            return {'success': False, 'error': preview['error']}
+
+        return {'success': True, 'preview': preview}
+
+    def fixView(self, item_id=None, action=None, confirm='0', **kwargs):
+        """API handler: execute a fix action on a flagged item."""
+        if not item_id:
+            return {'success': False, 'error': 'item_id is required'}
+        if not action or action not in VALID_FIX_ACTIONS:
+            return {
+                'success': False,
+                'error': 'action must be one of: %s' % ', '.join(sorted(VALID_FIX_ACTIONS)),
+            }
+        if str(confirm) != '1':
+            return {
+                'success': False,
+                'error': 'confirm=1 is required to execute a fix (use audit.fix.preview first)',
+            }
+
+        item = self._find_item(item_id)
+        if not item:
+            return {'success': False, 'error': 'Item not found: %s' % item_id}
+
+        if item.get('fixed'):
+            return {'success': False, 'error': 'Item already fixed'}
+
+        # Execute the fix
+        if action == 'rename_resolution':
+            success, details = execute_fix_rename_resolution(item)
+        elif action == 'rename_edition':
+            success, details = execute_fix_rename_edition(item)
+        elif action == 'delete_wrong':
+            success, details = execute_fix_delete_wrong(item)
+        elif action == 'reassign_movie':
+            success, details = execute_fix_reassign_movie(item)
+        else:
+            return {'success': False, 'error': 'Unknown action: %s' % action}
+
+        if not success:
+            log.error('Fix %s failed for %s: %s', (action, item_id, details.get('error', '')))
+            return {'success': False, 'error': details.get('error', 'Unknown error')}
+
+        # Mark as fixed
+        self._mark_fixed(item, action, details)
+        log.info('Fix %s applied to %s: %s', (action, item.get('folder', item_id), details))
+
+        return {
+            'success': True,
+            'action': action,
+            'item_id': item_id,
+            'details': details,
+        }
+
+    def _run_batch_fix(self, action, items, dry_run=False):
+        """Run a batch fix operation (called in background thread).
+
+        Updates self.fix_in_progress with running stats.
+        """
+        total = len(items)
+        completed = 0
+        failed = 0
+        results = []
+
+        self.fix_in_progress = {
+            'active': True,
+            'action': action,
+            'total': total,
+            'completed': 0,
+            'failed': 0,
+            'current_item': '',
+        }
+
+        for item in items:
+            if item.get('fixed'):
+                completed += 1
+                self.fix_in_progress['completed'] = completed
+                continue
+
+            self.fix_in_progress['current_item'] = item.get('folder', '')
+
+            if dry_run:
+                preview = generate_fix_preview(item, action)
+                results.append({
+                    'item_id': item.get('item_id', ''),
+                    'folder': item.get('folder', ''),
+                    'preview': preview,
+                })
+                completed += 1
+            else:
+                # Execute the fix
+                if action == 'rename_resolution':
+                    success, details = execute_fix_rename_resolution(item)
+                elif action == 'rename_edition':
+                    success, details = execute_fix_rename_edition(item)
+                elif action == 'delete_wrong':
+                    success, details = execute_fix_delete_wrong(item)
+                elif action == 'reassign_movie':
+                    success, details = execute_fix_reassign_movie(item)
+                else:
+                    success, details = False, {'error': 'Unknown action'}
+
+                if success:
+                    self._mark_fixed(item, action, details)
+                    completed += 1
+                else:
+                    failed += 1
+                    log.error('Batch fix failed for %s: %s',
+                              (item.get('folder', ''), details.get('error', '')))
+
+                results.append({
+                    'item_id': item.get('item_id', ''),
+                    'folder': item.get('folder', ''),
+                    'success': success,
+                    'details': details,
+                })
+
+            self.fix_in_progress['completed'] = completed
+            self.fix_in_progress['failed'] = failed
+
+        self.fix_in_progress = {
+            'active': False,
+            'action': action,
+            'total': total,
+            'completed': completed,
+            'failed': failed,
+            'current_item': '',
+        }
+
+        if not dry_run:
+            # Save results after batch completes
+            self._save_results()
+
+        return results
+
+    def fixBatchView(self, action=None, filter_check=None,
+                     filter_severity=None, confirm='0', dry_run='1',
+                     **kwargs):
+        """API handler: execute a fix action on multiple items."""
+        if not action or action not in VALID_FIX_ACTIONS:
+            return {
+                'success': False,
+                'error': 'action must be one of: %s' % ', '.join(sorted(VALID_FIX_ACTIONS)),
+            }
+        if str(confirm) != '1':
+            return {
+                'success': False,
+                'error': 'confirm=1 is required',
+            }
+
+        is_dry_run = str(dry_run) != '0'
+
+        if self.fix_in_progress and self.fix_in_progress.get('active'):
+            return {
+                'success': False,
+                'error': 'A batch fix is already in progress',
+                'fix_progress': self.fix_in_progress,
+            }
+
+        if not self.last_report:
+            return {'success': False, 'error': 'No scan results available'}
+
+        # Get matching items using the filter
+        items = self._filter_and_sort(
+            filter_check=filter_check,
+            filter_severity=filter_severity,
+            filter_action=action,
+            filter_fixed='false',
+        )
+
+        if not items:
+            return {
+                'success': False,
+                'error': 'No matching unfixed items found for action %s' % action,
+            }
+
+        if is_dry_run:
+            # Synchronous dry run — return previews immediately
+            previews = []
+            for item in items:
+                preview = generate_fix_preview(item, action)
+                previews.append({
+                    'item_id': item.get('item_id', ''),
+                    'folder': item.get('folder', ''),
+                    'preview': preview,
+                })
+            return {
+                'success': True,
+                'dry_run': True,
+                'action': action,
+                'total': len(previews),
+                'previews': previews,
+            }
+        else:
+            # Async execution
+            fireEventAsync(
+                'audit.run_batch_fix',
+                action=action,
+                items=items,
+                dry_run=False,
+            )
+            return {
+                'success': True,
+                'dry_run': False,
+                'action': action,
+                'total': len(items),
+                'message': 'Batch fix started — check audit.fix.progress for status',
+            }
+
+    def fixProgressView(self, **kwargs):
+        """API handler: return current batch fix progress."""
+        return {
+            'fix_progress': self.fix_in_progress if self.fix_in_progress else {
+                'active': False,
+            },
         }
 
 
