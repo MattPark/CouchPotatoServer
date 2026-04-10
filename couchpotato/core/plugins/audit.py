@@ -600,45 +600,39 @@ def compute_recommended_action(flags, identification=None):
     if 'tv_episode' in checks:
         return 'delete_wrong'
 
-    # Template mismatch is a naming-only fix — use rename_template
-    # It subsumes resolution and edition rename when template check is present
-    if 'template' in checks:
-        # If there are also identity flags (title/runtime), those take priority
-        identity_checks = checks & {'title', 'runtime'}
-        if identity_checks:
-            return 'needs_tier2'
-        return 'rename_template'
-
-    # If tier 2 has run, use identification to decide
+    # If tier 2 has run, use identification to decide — takes priority over
+    # tier 1 flag-based logic since it has more information
     if identification:
         method = identification.get('method', '')
 
         if method == 'tv_episode_detected':
             return 'delete_wrong'
 
-        if method == 'skipped':
-            # High-confidence tier 1 (resolution-only skip)
-            if checks == {'resolution'}:
-                return 'rename_resolution'
-            if checks == {'edition'}:
-                return 'rename_edition'
-            if 'edition' in checks and checks - {'edition', 'resolution'} == set():
-                # Only edition + resolution flags
-                return 'rename_resolution'
-
         if method in ('container_title', 'srrdb_crc'):
             # Tier 2 found a match — is it the same movie or different?
             id_imdb = identification.get('identified_imdb')
             if id_imdb:
-                # We have an IMDB — if it differs from expected, reassign
                 return 'reassign_movie'
-            # No IMDB from tier 2 — title-based guess
             id_title = identification.get('identified_title', '')
             if id_title:
                 return 'reassign_movie'
 
         if method == 'crc_not_found':
             return 'manual_review'
+
+        if method == 'skipped':
+            # High-confidence tier 1 — fall through to flag-based logic below
+            pass
+
+    # Template mismatch is a naming-only fix — use rename_template
+    # It subsumes resolution and edition rename when template check is present
+    if 'template' in checks:
+        # If there are also identity flags (title/runtime) and no tier 2 data,
+        # those need identification first
+        identity_checks = checks & {'title', 'runtime'}
+        if identity_checks and not identification:
+            return 'needs_tier2'
+        return 'rename_template'
 
     # No tier 2 data — decide from tier 1 flags alone
     if checks == {'resolution'}:
@@ -1007,6 +1001,9 @@ def build_expected_filename(item, template, replace_doubles=True, separator=''):
     if replace_doubles:
         replaced = replaced.lstrip('. ')
         double_replaces = [
+            (r'\(\s*\)', ''),   # remove empty parentheses from missing tokens
+            (r'\[\s*\]', ''),   # remove empty brackets from missing tokens
+            (r'\{\s*\}', ''),   # remove empty braces from missing tokens
             (r'\.+', '.'), (r'_+', '_'), (r'-+', '-'), (r'\s+', ' '), (r' \\', r'\\'), (' /', '/'),
             (r'(\s\.)+', '.'), (r'(-\.)+', '.'), (r'(\s-[^\s])+', '-'), (' ]', ']'),
         ]
@@ -1828,6 +1825,9 @@ def _apply_renamer_template(item, quality_override=None, edition_override=None):
     if replace_doubles:
         replaced = replaced.lstrip('. ')
         double_replaces = [
+            (r'\(\s*\)', ''),   # remove empty parentheses from missing tokens
+            (r'\[\s*\]', ''),   # remove empty brackets from missing tokens
+            (r'\{\s*\}', ''),   # remove empty braces from missing tokens
             (r'\.+', '.'), (r'_+', '_'), (r'-+', '-'), (r'\s+', ' '), (r' \\', r'\\'), (' /', '/'),
             (r'(\s\.)+', '.'), (r'(-\.)+', '.'), (r'(\s-[^\s])+', '-'), (' ]', ']'),
         ]
