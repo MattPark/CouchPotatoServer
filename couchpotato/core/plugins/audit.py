@@ -474,26 +474,40 @@ def is_junk_title(title):
 def resolution_label(width, height):
     """Convert pixel dimensions to a human-readable resolution label.
 
-    Width takes priority because widescreen/letterbox crops reduce height
-    while the encode resolution stays the same (e.g. 1920x800 is 1080p,
-    not 720p).  Height is the fallback for non-standard widths (e.g.
-    1440x1080 4:3 content is still 1080p).
+    Uses the higher of the two indicators (width-derived or height-derived)
+    because both widescreen crops (1920x800 → 1080p by width) and narrow
+    aspect ratios (1800x1080 → 1080p by height) are common in movie encodes.
     """
+    # Derive label from width (handles widescreen crops like 1920x800)
     if width >= 3800:
-        return '2160p'
-    if width >= 1900:
-        return '1080p'
-    if width >= 1260:
-        return '720p'
+        w_label = '2160p'
+    elif width >= 1900:
+        w_label = '1080p'
+    elif width >= 1260:
+        w_label = '720p'
+    else:
+        w_label = None
+
+    # Derive label from height (handles narrow aspect ratios like 1800x1080)
     if height >= 2160:
-        return '2160p'
-    if height >= 1080:
-        return '1080p'
-    if height >= 720:
-        return '720p'
-    if height >= 480:
-        return '480p'
-    return f'{height}p (SD)'
+        h_label = '2160p'
+    elif height >= 1080:
+        h_label = '1080p'
+    elif height >= 720:
+        h_label = '720p'
+    elif height >= 480:
+        h_label = '480p'
+    else:
+        h_label = f'{height}p (SD)' if height else None
+
+    # Use whichever gives the higher resolution
+    rank = {'2160p': 4, '1080p': 3, '720p': 2, '480p': 1}
+    w_rank = rank.get(w_label, 0)
+    h_rank = rank.get(h_label, 0)
+
+    if w_rank >= h_rank:
+        return w_label or h_label or f'{height}p (SD)'
+    return h_label or w_label or f'{height}p (SD)'
 
 
 # ---------------------------------------------------------------------------
