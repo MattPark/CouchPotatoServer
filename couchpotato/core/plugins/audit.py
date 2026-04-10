@@ -444,8 +444,13 @@ def get_edition(filename):
 
     Returns the edition string (e.g. "Director's Cut") or empty string.
     """
-    # ss() in CP is just toUnicode — in Python 3 it's a no-op for str
     filename = str(filename)
+
+    # Check for Plex {edition-X} tag first
+    plex_match = re.search(r'\{edition-([^}]+)\}', filename, re.IGNORECASE)
+    if plex_match:
+        return plex_match.group(1)
+
     words = re.split(r'\W+', filename.lower())
 
     # Find year position — editions only appear after the year in release names
@@ -1426,7 +1431,12 @@ def _build_edition_rename(item):
     if filename_edition:
         raise ValueError('Filename already has edition: %s' % filename_edition)
 
-    return _apply_renamer_template(item, edition_override=edition)
+    new_file, new_path = _apply_renamer_template(item, edition_override=edition)
+
+    if new_path == item['file_path']:
+        raise ValueError('Rename would produce identical filename')
+
+    return new_file, new_path
 
 
 def _preview_rename_resolution(item):
