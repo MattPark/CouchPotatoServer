@@ -163,6 +163,73 @@ EDITION_EXCLUDE = {
     'clean',
 }
 
+# ---------------------------------------------------------------------------
+# Guessit → CouchPotato token mapping
+# ---------------------------------------------------------------------------
+# guessit returns different string values than CP's renamer expects.
+# These dicts translate guessit output to the display names used in
+# renamer template tokens (<video>, <audio>, <source>, <group>).
+
+GUESSIT_VIDEO_MAP = {
+    'H.264': 'H264',
+    'H.265': 'x265',
+    'MPEG-4 Visual': 'MPEG4',
+    'MPEG-2': 'MPEG2',
+    'MPEG-1': 'MPEG2',
+    'VP8': 'VP8',
+    'VP9': 'VP9',
+    'AV1': 'AV1',
+    'VC-1': 'VC1',
+    'Theora': 'Theora',
+    'x264': 'x264',
+    'x265': 'x265',
+    'XviD': 'Xvid',
+    'DivX': 'DivX',
+}
+
+GUESSIT_AUDIO_MAP = {
+    'AC3': 'AC3',
+    'Dolby Digital': 'AC3',
+    'E-AC-3': 'EAC3',
+    'Dolby Digital Plus': 'EAC3',
+    'DTS': 'DTS',
+    'DTS-HD': 'DTS-HD',
+    'DTS-HD MA': 'DTS-HD MA',
+    'Dolby TrueHD': 'TrueHD',
+    'Dolby Atmos': 'TrueHD',
+    'AAC': 'AAC',
+    'FLAC': 'FLAC',
+    'MP3': 'MP3',
+    'PCM': 'PCM',
+    'Vorbis': 'Vorbis',
+    'Opus': 'Opus',
+    'WMA': 'WMA',
+}
+
+GUESSIT_SOURCE_MAP = {
+    'Blu-ray': 'Blu-ray',
+    'Ultra HD Blu-ray': 'Blu-ray',
+    'HD DVD': 'HD DVD',
+    'DVD': 'DVD',
+    'HDTV': 'HDTV',
+    'Web': 'WEB-DL',
+    'Pay-per-view': 'HDTV',
+    'TV': 'HDTV',
+}
+
+# Tokens that are "fillable" from audit data (folder, mediainfo, DB, guessit).
+# Used to determine whether the template can be fully reconstructed.
+FILLABLE_TOKENS = {
+    'ext', 'thename', 'namethe', 'year', 'first', 'quality',
+    'quality_type', 'video', 'audio', 'source', 'group',
+    'audio_channels', 'imdb_id', 'cd', 'cd_nr',
+    'edition', 'edition_plex',
+    'imdb_id_plex', 'imdb_id_emby', 'imdb_id_kodi',
+    '3d', '3d_type', '3d_type_short',
+    'mpaa', 'mpaa_only', 'category',
+    'resolution_width', 'resolution_height',
+}
+
 
 # ---------------------------------------------------------------------------
 # Database loader
@@ -505,6 +572,7 @@ def compute_recommended_action(flags, identification=None):
 
     Returns one of:
         'delete_wrong'       — TV episode or identified as non-movie
+        'rename_template'    — filename doesn't match template (superset of resolution/edition)
         'rename_resolution'  — resolution-only flag (right movie, wrong quality label)
         'reassign_movie'     — tier 2 identified as a different movie
         'rename_edition'     — edition detected in container but not filename
@@ -517,6 +585,15 @@ def compute_recommended_action(flags, identification=None):
     # TV episode always gets delete
     if 'tv_episode' in checks:
         return 'delete_wrong'
+
+    # Template mismatch is a naming-only fix — use rename_template
+    # It subsumes resolution and edition rename when template check is present
+    if 'template' in checks:
+        # If there are also identity flags (title/runtime), those take priority
+        identity_checks = checks & {'title', 'runtime'}
+        if identity_checks:
+            return 'needs_tier2'
+        return 'rename_template'
 
     # If tier 2 has run, use identification to decide
     if identification:
@@ -749,6 +826,263 @@ def check_edition(container_title, filename):
     return None, container_edition
 
 
+def parse_guessit_tokens(filename):
+    """Parse a filename with guessit and map results to CP renamer token values.
+
+    Returns a dict with keys matching renamer tokens: video, audio, source,
+    group, audio_channels, quality_type.  Values are CP-format strings or
+    empty string if not detected.
+    """
+    try:
+        g = guessit_parse(filename, {'type': 'movie'})
+    except Exception:
+        return {
+            'video': '', 'audio': '', 'source': '', 'group': '',
+            'audio_channels': '', 'quality_type': '',
+        }
+
+    # Video codec
+    vc = g.get('video_codec', '')
+    if isinstance(vc, list):
+        vc = vc[0] if vc else ''
+    video = GUESSIT_VIDEO_MAP.get(str(vc), str(vc)) if vc else ''
+
+    # Audio codec (handle DTS-HD MA via audio_profile)
+    ac = g.get('audio_codec', '')
+    if isinstance(ac, list):
+        ac = ac[0] if ac else ''
+    ac_str = str(ac) if ac else ''
+    audio_profile = g.get('audio_profile', '')
+    if isinstance(audio_profile, list):
+        audio_profile = audio_profile[0] if audio_profile else ''
+    # DTS with "Master Audio" profile → DTS-HD MA
+    if ac_str == 'DTS' and audio_profile and 'master' in str(audio_profile).lower():
+        audio = 'DTS-HD MA'
+    elif ac_str == 'DTS' and audio_profile and 'high' in str(audio_profile).lower():
+        audio = 'DTS-HD'
+    else:
+        audio = GUESSIT_AUDIO_MAP.get(ac_str, ac_str) if ac_str else ''
+
+    # Source
+    src = g.get('source', '')
+    if isinstance(src, list):
+        src = src[0] if src else ''
+    source = GUESSIT_SOURCE_MAP.get(str(src), str(src)) if src else ''
+
+    # Release group
+    grp = g.get('release_group', '')
+    group = str(grp) if grp else ''
+
+    # Audio channels
+    channels = g.get('audio_channels', '')
+    if isinstance(channels, list):
+        channels = channels[0] if channels else ''
+    audio_channels = str(channels) if channels else ''
+
+    # Quality type (HD vs SD) — derive from screen_size
+    screen = g.get('screen_size', '')
+    if screen and screen in ('2160p', '1080p', '1080i', '720p', '720i'):
+        quality_type = 'HD'
+    elif screen and screen in ('480p', '480i', '576p', '576i'):
+        quality_type = 'SD'
+    else:
+        quality_type = ''
+
+    return {
+        'video': video,
+        'audio': audio,
+        'source': source,
+        'group': group,
+        'audio_channels': audio_channels,
+        'quality_type': quality_type,
+    }
+
+
+def build_expected_filename(item, template, replace_doubles=True, separator=''):
+    """Build the expected filename from renamer template and item data.
+
+    This is a scan-time variant of _apply_renamer_template() that works
+    without Env.setting() by accepting template/settings as arguments.
+    Uses guessit_tokens from the item to fill video/audio/source/group.
+
+    Returns the expected filename string or None on error.
+    """
+    old_file = item['file']
+    _, ext = os.path.splitext(old_file)
+    ext = ext.lstrip('.')
+
+    movie_name = item['expected'].get('title', '')
+    movie_name = re.sub(r'[\x00/\\:*?"<>|]', '', movie_name)
+
+    name_the = movie_name
+    for prefix in ['the ', 'an ', 'a ']:
+        if prefix == movie_name[:len(prefix)].lower():
+            name_the = movie_name[len(prefix):] + ', ' + prefix.strip().capitalize()
+            break
+
+    quality = item['expected'].get('resolution', '')
+    if not quality:
+        actual_res = item['actual'].get('resolution', '')
+        if 'x' in actual_res:
+            try:
+                w = int(actual_res.split('x')[0])
+                h = int(actual_res.split('x')[1])
+                quality = resolution_label(w, h)
+            except (ValueError, IndexError):
+                pass
+
+    edition = item.get('detected_edition', '') or ''
+    imdb_id = item.get('imdb_id', '') or ''
+    year = item['expected'].get('year') or ''
+
+    # Guessit-derived tokens
+    gt = item.get('guessit_tokens', {})
+
+    actual_res = item['actual'].get('resolution', '')
+    actual_width = ''
+    actual_height = ''
+    if 'x' in actual_res:
+        parts = actual_res.split('x')
+        actual_width = parts[0]
+        actual_height = parts[1] if len(parts) > 1 else ''
+
+    replacements = {
+        'ext': ext,
+        'namethe': name_the.strip(),
+        'thename': movie_name.strip(),
+        'year': str(year) if year else '',
+        'first': name_the[0].upper() if name_the else '',
+        'quality': quality,
+        'quality_type': gt.get('quality_type', ''),
+        'video': gt.get('video', ''),
+        'audio': gt.get('audio', ''),
+        'group': gt.get('group', ''),
+        'source': gt.get('source', ''),
+        'resolution_width': actual_width,
+        'resolution_height': actual_height,
+        'audio_channels': gt.get('audio_channels', ''),
+        'imdb_id': imdb_id,
+        'cd': '',
+        'cd_nr': '',
+        'mpaa': '',
+        'mpaa_only': 'Not Rated',
+        'category': '',
+        '3d': '',
+        '3d_type': '',
+        '3d_type_short': '',
+        'edition': edition,
+        'edition_plex': '{edition-%s}' % edition if edition else '',
+        'imdb_id_plex': '{imdb-%s}' % imdb_id if imdb_id else '',
+        'imdb_id_emby': '[imdbid-%s]' % imdb_id if imdb_id else '',
+        'imdb_id_kodi': '{imdb=%s}' % imdb_id if imdb_id else '',
+    }
+
+    # Apply template — same logic as renamer.doReplace()
+    replaced = template
+    for key, val in replacements.items():
+        if key in ('thename', 'namethe'):
+            continue
+        if val is not None:
+            replaced = replaced.replace('<%s>' % key, str(val))
+        else:
+            replaced = replaced.replace('<%s>' % key, '')
+
+    if replace_doubles:
+        replaced = replaced.lstrip('. ')
+        double_replaces = [
+            (r'\.+', '.'), (r'_+', '_'), (r'-+', '-'), (r'\s+', ' '), (r' \\', r'\\'), (' /', '/'),
+            (r'(\s\.)+', '.'), (r'(-\.)+', '.'), (r'(\s-[^\s])+', '-'), (' ]', ']'),
+        ]
+        for pattern, repl in double_replaces:
+            replaced = re.sub(pattern, repl, replaced)
+        replaced = replaced.rstrip(',_-/\\ ')
+
+    for key, val in replacements.items():
+        if key in ('thename', 'namethe'):
+            replaced = replaced.replace('<%s>' % key, str(val))
+
+    replaced = re.sub(r'[\x00:*?"<>|]', '', replaced)
+
+    if separator:
+        replaced = replaced.replace(' ', separator)
+
+    return replaced
+
+
+def check_template(item, template, replace_doubles=True, separator=''):
+    """Check 6: Filename doesn't match renamer template.
+
+    Builds the expected filename from the template and all available item
+    data (folder title/year, mediainfo resolution, IMDB, edition, guessit
+    tokens from the filename).  Compares strictly against the actual filename.
+
+    Returns a flag dict or None.
+    """
+    if not template:
+        return None
+
+    expected = build_expected_filename(item, template, replace_doubles, separator)
+    if not expected:
+        return None
+
+    actual = item['file']
+
+    if expected == actual:
+        return None
+
+    # Build detail message listing specific differences
+    differences = []
+
+    # Check IMDB presence
+    imdb_id = item.get('imdb_id', '') or ''
+    if imdb_id:
+        # Check if any IMDB token is in the template
+        has_imdb_token = any(
+            ('<%s>' % t) in template
+            for t in ('imdb_id_plex', 'imdb_id_emby', 'imdb_id_kodi', 'imdb_id')
+        )
+        if has_imdb_token:
+            # Check if IMDB is actually in the filename
+            if imdb_id not in actual and '{imdb-' not in actual and '[imdbid-' not in actual and '{imdb=' not in actual:
+                differences.append('missing IMDB tag')
+
+    # Check quality/resolution
+    quality = item['expected'].get('resolution', '')
+    if not quality:
+        actual_res = item['actual'].get('resolution', '')
+        if 'x' in actual_res:
+            try:
+                w = int(actual_res.split('x')[0])
+                h = int(actual_res.split('x')[1])
+                quality = resolution_label(w, h)
+            except (ValueError, IndexError):
+                pass
+    if quality and '<quality>' in template:
+        if quality.lower() not in actual.lower():
+            differences.append('wrong/missing quality')
+
+    # Check edition
+    edition = item.get('detected_edition', '') or ''
+    has_edition_token = '<edition>' in template or '<edition_plex>' in template
+    if edition and has_edition_token:
+        if edition.lower() not in actual.lower() and '{edition-' not in actual:
+            differences.append('missing edition')
+
+    # Check year
+    year = item['expected'].get('year')
+    if year and '<year>' in template:
+        if str(year) not in actual:
+            differences.append('missing year')
+
+    detail_parts = ', '.join(differences) if differences else 'filename format mismatch'
+
+    return {
+        'check': 'template',
+        'severity': 'MEDIUM',
+        'detail': '%s (expected: %s)' % (detail_parts.capitalize(), expected),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tier 2 skip logic
 # ---------------------------------------------------------------------------
@@ -765,6 +1099,8 @@ def needs_identification(flags):
         suspect, just needs re-download)
       - Edition-only → skip (right movie, just missing edition in filename)
       - Resolution + edition only → skip (quality label + edition fix, no ID needed)
+      - Template-only → skip (naming fix, no ID needed)
+      - Template + resolution/edition only → skip (naming fixes, no ID needed)
       - Everything else → run (title mismatch, runtime mismatch, or
         multi-flag combinations are suspect and need identification)
 
@@ -776,16 +1112,9 @@ def needs_identification(flags):
     if 'tv_episode' in checks:
         return False
 
-    # Resolution-only: right movie, wrong quality — not suspect
-    if checks == {'resolution'}:
-        return False
-
-    # Edition-only: right movie, just missing edition in filename
-    if checks == {'edition'}:
-        return False
-
-    # Resolution + edition: both are simple renames, no ID needed
-    if checks == {'resolution', 'edition'}:
+    # Pure naming-fix checks — no identification needed
+    naming_only = {'resolution', 'edition', 'template'}
+    if checks <= naming_only:
         return False
 
     # Everything else is suspect — run tier 2
@@ -947,7 +1276,9 @@ def find_video_files(folder_path):
 
 
 def scan_movie_folder(folder_path, folder_name, media_by_imdb,
-                      tier2=False, force_tier2=False, media_by_title=None):
+                      tier2=False, force_tier2=False, media_by_title=None,
+                      renamer_template=None, renamer_replace_doubles=True,
+                      renamer_separator=''):
     """Scan a single movie folder and return audit results.
 
     Args:
@@ -957,6 +1288,9 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
         tier2: Run Tier 2 identification on flagged files
         force_tier2: Force Tier 2 even for high-confidence Tier 1 flags
         media_by_title: Dict mapping (normalized_title, year) → movie info
+        renamer_template: Renamer file_name template string (e.g. '<thename> (<year>) <quality>.<ext>')
+        renamer_replace_doubles: Whether to clean up double separators
+        renamer_separator: Character to replace spaces with (empty = spaces)
 
     Returns a dict with scan results or None if no issues found.
     """
@@ -994,6 +1328,15 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
     # Extract actual metadata from file
     meta = extract_file_meta(filepath)
 
+    # Parse guessit tokens from filename for template comparison and rename
+    guessit_tokens = parse_guessit_tokens(filename)
+
+    # Determine if renamer template has edition tokens
+    has_edition_in_template = (
+        renamer_template and
+        ('<edition>' in renamer_template or '<edition_plex>' in renamer_template)
+    )
+
     # Run checks
     flags = []
     container_title_parsed = None
@@ -1020,10 +1363,43 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
     if flag:
         flags.append(flag)
 
-    # Check 5: Edition mismatch
-    edition_flag, detected_edition = check_edition(meta['container_title'], filename)
-    if edition_flag:
-        flags.append(edition_flag)
+    # Check 5: Edition mismatch — skip if template has no edition token
+    detected_edition = ''
+    if has_edition_in_template or not renamer_template:
+        edition_flag, detected_edition = check_edition(meta['container_title'], filename)
+        if edition_flag:
+            flags.append(edition_flag)
+    else:
+        # Still detect edition for metadata even if we don't flag it
+        _, detected_edition = check_edition(meta['container_title'], filename)
+
+    # Build partial item for template check (needs all data populated)
+    # We need this before the "no flags → return None" check because the
+    # template check itself may be the only flag
+    partial_item = {
+        'file': filename,
+        'file_path': filepath,
+        'imdb_id': imdb_id,
+        'actual': {
+            'resolution': f"{meta['resolution_width']}x{meta['resolution_height']}",
+        },
+        'expected': {
+            'resolution': claimed_res,
+            'title': folder_title,
+            'year': folder_year,
+        },
+        'detected_edition': detected_edition if detected_edition else None,
+        'guessit_tokens': guessit_tokens,
+    }
+
+    # Check 6: Template conformance
+    if renamer_template:
+        template_flag = check_template(
+            partial_item, renamer_template,
+            renamer_replace_doubles, renamer_separator,
+        )
+        if template_flag:
+            flags.append(template_flag)
 
     if not flags:
         return None
@@ -1052,6 +1428,7 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
         'flags': flags,
         'flag_count': len(flags),
         'detected_edition': detected_edition if detected_edition else None,
+        'guessit_tokens': guessit_tokens,
         'identification': None,
         'recommended_action': None,
         'fixed': None,
@@ -1116,6 +1493,23 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
     media_by_imdb, files_by_media_id, media_by_title = load_cp_database(db_path)
     _log_info('Loaded %s movies from database' % len(media_by_imdb))
 
+    # Read renamer template once for template conformance check
+    renamer_template = None
+    renamer_replace_doubles = True
+    renamer_separator = ''
+    if _CP_AVAILABLE:
+        try:
+            renamer_template = Env.setting('file_name', section='renamer',
+                                           default='<thename><cd>.<ext>')
+            renamer_replace_doubles = Env.setting('replace_doubles',
+                                                   section='renamer', default=True)
+            renamer_separator = Env.setting('separator', section='renamer',
+                                            default='')
+            _log_info('Renamer template: %s' % renamer_template)
+        except Exception as e:
+            _log_warn('Could not read renamer settings: %s' % e)
+            renamer_template = None
+
     # Enumerate movie folders
     if scan_path:
         folders = [scan_path]
@@ -1151,6 +1545,9 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
                 folder_path, folder_name, media_by_imdb,
                 tier2=tier2, force_tier2=force_tier2,
                 media_by_title=media_by_title,
+                renamer_template=renamer_template,
+                renamer_replace_doubles=renamer_replace_doubles,
+                renamer_separator=renamer_separator,
             )
             return result, False
         except Exception as e:
@@ -1251,6 +1648,7 @@ VALID_FIX_ACTIONS = {
     'reassign_movie',
     'delete_wrong',
     'rename_edition',
+    'rename_template',
 }
 
 
@@ -1345,6 +1743,19 @@ def _apply_renamer_template(item, quality_override=None, edition_override=None):
     imdb_id = item.get('imdb_id', '') or ''
     year = item['expected'].get('year') or ''
 
+    # Guessit-derived tokens — fill from item if available, otherwise parse
+    gt = item.get('guessit_tokens')
+    if not gt:
+        gt = parse_guessit_tokens(old_file)
+
+    actual_res = item['actual'].get('resolution', '')
+    actual_width = ''
+    actual_height = ''
+    if 'x' in actual_res:
+        parts = actual_res.split('x')
+        actual_width = parts[0]
+        actual_height = parts[1] if len(parts) > 1 else ''
+
     replacements = {
         'ext': ext,
         'namethe': name_the.strip(),
@@ -1352,14 +1763,14 @@ def _apply_renamer_template(item, quality_override=None, edition_override=None):
         'year': str(year) if year else '',
         'first': name_the[0].upper() if name_the else '',
         'quality': quality,
-        'quality_type': '',
-        'video': '',
-        'audio': '',
-        'group': '',
-        'source': '',
-        'resolution_width': '',
-        'resolution_height': '',
-        'audio_channels': '',
+        'quality_type': gt.get('quality_type', ''),
+        'video': gt.get('video', ''),
+        'audio': gt.get('audio', ''),
+        'group': gt.get('group', ''),
+        'source': gt.get('source', ''),
+        'resolution_width': actual_width,
+        'resolution_height': actual_height,
+        'audio_channels': gt.get('audio_channels', ''),
         'imdb_id': imdb_id,
         'cd': '',
         'cd_nr': '',
@@ -1610,12 +2021,42 @@ def _preview_reassign_movie(item):
     }
 
 
+def _preview_rename_template(item):
+    """Generate preview for rename_template action.
+
+    Rebuilds filename from the renamer template using all available data
+    including guessit-parsed tokens from the current filename.
+    """
+    try:
+        new_file, new_path = _apply_renamer_template(item)
+    except ValueError as e:
+        return {'error': str(e)}
+
+    if new_path == item['file_path']:
+        return {'error': 'Rename would produce identical filename'}
+
+    return {
+        'item_id': item['item_id'],
+        'action': 'rename_template',
+        'changes': {
+            'filesystem': {
+                'old_path': item['file_path'],
+                'new_path': new_path,
+            },
+            'database': None,
+        },
+        'warnings': [],
+    }
+
+
 def generate_fix_preview(item, action):
     """Generate a fix preview for a flagged item.
 
     Returns a preview dict describing what changes would be made.
     """
-    if action == 'rename_resolution':
+    if action == 'rename_template':
+        return _preview_rename_template(item)
+    elif action == 'rename_resolution':
         return _preview_rename_resolution(item)
     elif action == 'rename_edition':
         return _preview_rename_edition(item)
@@ -1687,6 +2128,42 @@ def execute_fix_rename_edition(item):
         'old_path': old_path,
         'new_path': new_path,
         'edition': item.get('detected_edition', ''),
+    }
+
+
+def execute_fix_rename_template(item):
+    """Execute a template rename fix.
+
+    Rebuilds filename from the renamer template, preserving guessit-parsed
+    tokens from the current filename.  This is a superset of
+    rename_resolution and rename_edition — it fixes everything in one rename.
+
+    Returns (success, details_dict).
+    """
+    try:
+        new_file, new_path = _apply_renamer_template(item)
+    except ValueError as e:
+        return False, {'error': str(e)}
+
+    old_path = item['file_path']
+
+    if new_path == old_path:
+        return False, {'error': 'Rename would produce identical filename'}
+
+    if not os.path.isfile(old_path):
+        return False, {'error': 'File not found: %s' % old_path}
+
+    if os.path.exists(new_path):
+        return False, {'error': 'Destination already exists: %s' % new_path}
+
+    try:
+        os.rename(old_path, new_path)
+    except OSError as e:
+        return False, {'error': 'Rename failed: %s' % e}
+
+    return True, {
+        'old_path': old_path,
+        'new_path': new_path,
     }
 
 
@@ -1822,7 +2299,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'params': {
                 'offset': {'desc': 'Skip N items (default 0)'},
                 'limit': {'desc': 'Return N items (default 50, max 500)'},
-                'filter_check': {'desc': 'Filter by check type (comma-sep): resolution,title,runtime,tv_episode,edition'},
+                'filter_check': {'desc': 'Filter by check type (comma-sep): resolution,title,runtime,tv_episode,edition,template'},
                 'filter_severity': {'desc': 'Filter by severity: HIGH, MEDIUM, LOW'},
                 'filter_action': {'desc': 'Filter by recommended action'},
                 'filter_fixed': {'desc': 'true, false, all (default false)'},
@@ -1839,7 +2316,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'desc': 'Preview what a fix action would change (dry run)',
             'params': {
                 'item_id': {'desc': '12-char hex ID of the flagged item'},
-                'action': {'desc': 'Fix action: rename_resolution, reassign_movie, delete_wrong, rename_edition'},
+                'action': {'desc': 'Fix action: rename_template, rename_resolution, reassign_movie, delete_wrong, rename_edition'},
             },
         })
 
@@ -1847,7 +2324,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'desc': 'Execute a fix action on a flagged item',
             'params': {
                 'item_id': {'desc': '12-char hex ID of the flagged item'},
-                'action': {'desc': 'Fix action: rename_resolution, reassign_movie, delete_wrong, rename_edition'},
+                'action': {'desc': 'Fix action: rename_template, rename_resolution, reassign_movie, delete_wrong, rename_edition'},
                 'confirm': {'desc': 'Must be 1 to confirm execution'},
             },
         })
@@ -2285,7 +2762,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             return {'success': False, 'error': 'Item already fixed'}
 
         # Execute the fix
-        if action == 'rename_resolution':
+        if action == 'rename_template':
+            success, details = execute_fix_rename_template(item)
+        elif action == 'rename_resolution':
             success, details = execute_fix_rename_resolution(item)
         elif action == 'rename_edition':
             success, details = execute_fix_rename_edition(item)
@@ -2348,7 +2827,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 completed += 1
             else:
                 # Execute the fix
-                if action == 'rename_resolution':
+                if action == 'rename_template':
+                    success, details = execute_fix_rename_template(item)
+                elif action == 'rename_resolution':
                     success, details = execute_fix_rename_resolution(item)
                 elif action == 'rename_edition':
                     success, details = execute_fix_rename_edition(item)
