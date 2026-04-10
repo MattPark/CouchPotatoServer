@@ -932,6 +932,9 @@ def build_expected_filename(item, template, replace_doubles=True, separator=''):
                 pass
 
     edition = item.get('detected_edition', '') or ''
+    # Fallback: detect edition from filename when stored result has none
+    if not edition:
+        edition = get_edition(old_file)
     imdb_id = item.get('imdb_id', '') or ''
     year = item['expected'].get('year') or ''
 
@@ -1373,6 +1376,12 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
         # Still detect edition for metadata even if we don't flag it
         _, detected_edition = check_edition(meta['container_title'], filename)
 
+    # Fallback: detect edition from filename when container title had none
+    # This ensures files with {edition-X} in the filename preserve the edition
+    # during template comparison and rename operations
+    if not detected_edition:
+        detected_edition = get_edition(filename)
+
     # Build partial item for template check (needs all data populated)
     # We need this before the "no flags → return None" check because the
     # template check itself may be the only flag
@@ -1740,6 +1749,9 @@ def _apply_renamer_template(item, quality_override=None, edition_override=None):
             except (ValueError, IndexError):
                 pass
     edition = edition_override if edition_override is not None else item.get('detected_edition', '')
+    # Fallback: detect edition from filename when stored result has none
+    if not edition:
+        edition = get_edition(old_file)
     imdb_id = item.get('imdb_id', '') or ''
     year = item['expected'].get('year') or ''
 
