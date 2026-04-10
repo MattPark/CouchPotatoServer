@@ -83,31 +83,32 @@ var AuditSettingTab = new Class({
 	createScanControls: function(){
 		var self = this;
 
-		self.scan_toolbar = new Element('div.audit_controls').inject(self.audit_wrap);
+		// Reuse .scan_toolbar wrapper so .scan_btn etc. inherit existing styles
+		self.scan_toolbar = new Element('div.scan_toolbar').inject(self.audit_wrap);
 
-		var buttons_row = new Element('div.audit_buttons').inject(self.scan_toolbar);
+		var buttons_row = new Element('div.scan_buttons').inject(self.scan_toolbar);
 
-		self.tier1_btn = new Element('a.audit_btn.audit_tier1', {
+		self.tier1_btn = new Element('a.scan_btn.audit_tier1', {
 			'events': { 'click': self.startScan.bind(self, false) }
 		}).adopt(
-			new Element('span.audit_btn_icon.icon-search'),
-			new Element('span.audit_btn_label', { 'text': 'Tier 1 Scan' }),
-			new Element('span.audit_btn_desc', { 'text': 'Quick local scan: resolution, runtime, title, TV episodes, editions' })
+			new Element('span.scan_btn_icon.icon-search'),
+			new Element('span.scan_btn_label', { 'text': 'Tier 1 Scan' }),
+			new Element('span.scan_btn_desc', { 'text': 'Quick local scan: resolution, runtime, title, TV episodes, editions' })
 		).inject(buttons_row);
 
-		self.tier2_btn = new Element('a.audit_btn.audit_tier2', {
+		self.tier2_btn = new Element('a.scan_btn.audit_tier2', {
 			'events': { 'click': self.startScan.bind(self, true) }
 		}).adopt(
-			new Element('span.audit_btn_icon.icon-refresh'),
-			new Element('span.audit_btn_label', { 'text': 'Tier 1 + 2 Scan' }),
-			new Element('span.audit_btn_desc', { 'text': 'Full scan with CRC/srrDB identification (~20 min)' })
+			new Element('span.scan_btn_icon.icon-refresh'),
+			new Element('span.scan_btn_label', { 'text': 'Tier 1 + 2 Scan' }),
+			new Element('span.scan_btn_desc', { 'text': 'Full scan with CRC/srrDB identification (~20 min)' })
 		).inject(buttons_row);
 
-		self.cancel_btn = new Element('a.audit_btn.audit_cancel', {
+		self.cancel_btn = new Element('a.scan_btn.audit_cancel', {
 			'events': { 'click': self.cancelScan.bind(self) }
 		}).adopt(
-			new Element('span.audit_btn_icon.icon-cancel'),
-			new Element('span.audit_btn_label', { 'text': 'Cancel' })
+			new Element('span.scan_btn_icon.icon-cancel'),
+			new Element('span.scan_btn_label', { 'text': 'Cancel' })
 		).inject(buttons_row);
 		self.cancel_btn.setStyle('display', 'none');
 	},
@@ -115,14 +116,16 @@ var AuditSettingTab = new Class({
 	createProgressSection: function(){
 		var self = this;
 
-		self.progress_container = new Element('div.audit_progress').inject(self.audit_wrap);
+		// Reuse .scan_progress inside .scan_toolbar for existing progress styles
+		self.progress_container = new Element('div.scan_progress').inject(self.scan_toolbar);
 		self.progress_container.setStyle('display', 'none');
 	},
 
 	createSummaryDashboard: function(){
 		var self = this;
 
-		self.summary_container = new Element('div.audit_summary').inject(self.audit_wrap);
+		// Reuse .metadata_stats for the dark panel + stat styles
+		self.summary_container = new Element('div.metadata_stats').inject(self.audit_wrap);
 		self.summary_container.setStyle('display', 'none');
 	},
 
@@ -328,21 +331,23 @@ var AuditSettingTab = new Class({
 
 					var pct = p.total > 0 ? Math.round((p.scanned / p.total) * 100) : 0;
 
-					// Status line
-					new Element('div.audit_progress_status').adopt(
-						new Element('span.audit_progress_icon.icon-refresh.spinning'),
+					// Status line — reuse .scan_status / .scan_status_icon / .scan_live_count
+					new Element('div.scan_status').adopt(
+						new Element('span.scan_status_icon.icon-refresh.spinning'),
 						new Element('span', { 'text': 'Scanning library... ' }),
-						new Element('span.audit_progress_counts', {
+						new Element('span.scan_live_count', {
 							'text': p.scanned + ' / ' + p.total + ' (' + pct + '%) \u2014 ' + p.flagged + ' flagged'
 						})
 					).inject(self.progress_container);
 
-					// Progress bar
-					var bar_wrap = new Element('div.audit_progress_bar_wrap').inject(self.progress_container);
-					new Element('div.audit_progress_bar', {
+					// Progress bar — reuse .stats_bar_wrap / .stats_bar / .stats_bar_text
+					// Wrap in .metadata_stats so the existing selectors match
+					var bar_host = new Element('div.metadata_stats.audit_progress_bar_host').inject(self.progress_container);
+					var bar_wrap = new Element('div.stats_bar_wrap').inject(bar_host);
+					new Element('div.stats_bar.bar_ok', {
 						'styles': { 'width': pct + '%' }
 					}).inject(bar_wrap);
-					new Element('div.audit_progress_bar_text', {
+					new Element('div.stats_bar_text', {
 						'text': pct + '%'
 					}).inject(bar_wrap);
 				}
@@ -376,8 +381,8 @@ var AuditSettingTab = new Class({
 		self.summary_container.empty();
 		self.summary_container.setStyle('display', '');
 
-		// Stats grid row
-		var grid = new Element('div.audit_stats_grid').inject(self.summary_container);
+		// Stats grid row — reuse .stats_grid / .stat_item / .stat_value / .stat_label
+		var grid = new Element('div.stats_grid').inject(self.summary_container);
 
 		var stat_items = [
 			{ label: 'Scanned', value: stats.total_scanned || 0 },
@@ -388,9 +393,9 @@ var AuditSettingTab = new Class({
 		];
 
 		stat_items.each(function(item){
-			new Element('div.audit_stat_item').adopt(
-				new Element('div.audit_stat_value', { 'text': self.formatNumber(item.value) }),
-				new Element('div.audit_stat_label', { 'text': item.label })
+			new Element('div.stat_item').adopt(
+				new Element('div.stat_value', { 'text': self.formatNumber(item.value) }),
+				new Element('div.stat_label', { 'text': item.label })
 			).inject(grid);
 		});
 
@@ -668,7 +673,7 @@ var AuditSettingTab = new Class({
 			var action = item.recommended_action;
 
 			if(action && action !== 'none' && action !== 'needs_tier2' && action !== 'manual_review'){
-				new Element('a.audit_action_btn.audit_action_primary', {
+				new Element('a.audit_action_btn.primary', {
 					'text': self.actionLabel(action),
 					'events': { 'click': function(e){
 						e.stop();
@@ -681,7 +686,7 @@ var AuditSettingTab = new Class({
 			var alt_actions = self.getAlternativeActions(item);
 			alt_actions.each(function(alt){
 				if(alt === action) return;
-				new Element('a.audit_action_btn.audit_action_alt', {
+				new Element('a.audit_action_btn.secondary', {
 					'text': self.actionLabel(alt),
 					'events': { 'click': function(e){
 						e.stop();
@@ -971,12 +976,12 @@ var AuditSettingTab = new Class({
 		// Footer buttons
 		var footer = new Element('div.audit_modal_footer').inject(modal);
 
-		new Element('a.audit_action_btn.audit_action_cancel', {
+		new Element('a.audit_action_btn.secondary', {
 			'text': 'Cancel',
 			'events': { 'click': self.closePreviewModal.bind(self) }
 		}).inject(footer);
 
-		new Element('a.audit_action_btn.audit_action_confirm', {
+		new Element('a.audit_action_btn.primary', {
 			'text': 'Confirm & Execute',
 			'events': { 'click': function(e){
 				e.stop();

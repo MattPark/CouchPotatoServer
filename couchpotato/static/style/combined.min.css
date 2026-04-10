@@ -1106,33 +1106,9 @@ input[type=text],textarea{-webkit-appearance:none}
 .directory_list .actions:last-child>.cancel{opacity:.7}
 .directory_list .actions:last-child>.save{margin-right:0}
 .page.settings .audit_wrap{padding:10px 0 10px 20px}
-.page.settings .audit_controls{margin-bottom:10px}
-.page.settings .audit_buttons{display:flex;gap:10px;margin-bottom:10px}
-.page.settings .audit_btn{flex:1;display:flex;flex-wrap:wrap;align-items:center;padding:10px 20px;border:1px solid rgba(0,0,0,.15);border-radius:3px;cursor:pointer;transition:border-color 200ms,opacity 200ms}
-.dark .page.settings .audit_btn{border-color:rgba(255,255,255,.15)}
-.page.settings .audit_btn:hover{border-color:#ac0000}
-.dark .page.settings .audit_btn:hover{border-color:#f85c22}
-.page.settings .audit_btn.disabled{opacity:.4;pointer-events:none}
-.page.settings .audit_btn.audit_cancel{flex:0 0 auto;border-color:#f44336}
-.page.settings .audit_btn.audit_cancel:hover{border-color:#d32f2f}
-.page.settings .audit_btn .audit_btn_icon{font-size:1.4em;margin-right:10px;color:#ac0000}
-.dark .page.settings .audit_btn .audit_btn_icon{color:#f85c22}
-.page.settings .audit_btn .audit_btn_label{font-weight:700;font-size:1.05em}
-.page.settings .audit_btn .audit_btn_desc{width:100%;font-size:.85em;opacity:.6;margin-top:2px;padding-left:calc(1.4em + 10px)}
-.page.settings .audit_progress{padding:10px 0}
-.page.settings .audit_progress_status{padding:5px 0;font-weight:700}
-.page.settings .audit_progress_status .audit_progress_icon{margin-right:6px;color:#ac0000}
-.dark .page.settings .audit_progress_status .audit_progress_icon{color:#f85c22}
-.page.settings .audit_progress_status .audit_progress_counts{font-weight:400;opacity:.7}
-.page.settings .audit_progress_bar_wrap{position:relative;background:rgba(0,0,0,.2);border-radius:3px;height:22px;overflow:hidden;margin-top:5px}
-.page.settings .audit_progress_bar{height:100%;border-radius:3px;transition:width .3s ease;background:#4caf50}
-.page.settings .audit_progress_bar_text{position:absolute;top:0;left:0;right:0;text-align:center;line-height:22px;font-size:.75em;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.5)}
-.page.settings .audit_summary{padding:20px;margin-bottom:10px;background:rgba(0,0,0,.15);border-radius:3px}
-.page.settings .audit_stats_grid{display:flex;flex-wrap:wrap;gap:20px;margin-bottom:20px}
-.page.settings .audit_stat_item{display:flex;flex-direction:column;min-width:80px}
-.page.settings .audit_stat_value{font-size:1.4em;font-weight:700;color:#ac0000}
-.dark .page.settings .audit_stat_value{color:#f85c22}
-.page.settings .audit_stat_label{font-size:.8em;opacity:.6;text-transform:uppercase}
+.page.settings .scan_btn.audit_cancel{flex:0 0 auto;border-color:#f44336}
+.page.settings .scan_btn.audit_cancel:hover{border-color:#d32f2f}
+.page.settings .audit_progress_bar_host{margin-top:5px}
 .page.settings .audit_bars_title{font-weight:700;font-size:.9em;opacity:.7;text-transform:uppercase;margin-bottom:5px;margin-top:10px}
 .page.settings .audit_bar_row{display:flex;align-items:center;margin-bottom:4px}
 .page.settings .audit_bar_label{width:160px;font-size:.85em;opacity:.8}
@@ -1188,16 +1164,11 @@ input[type=text],textarea{-webkit-appearance:none}
 .page.settings .audit_item_actions{display:flex;gap:7px;margin-top:10px;padding-top:7px;border-top:1px solid rgba(0,0,0,.08)}
 .dark .page.settings .audit_item_actions{border-top-color:rgba(255,255,255,.08)}
 .page.settings .audit_action_btn{display:inline-block;padding:4px 12px;border-radius:3px;font-size:.85em;cursor:pointer;transition:opacity 200ms}
-.page.settings .audit_action_btn.audit_action_primary{background:#4caf50;color:#fff;font-weight:700}
-.page.settings .audit_action_btn.audit_action_primary:hover{opacity:.85}
-.page.settings .audit_action_btn.audit_action_alt{background:rgba(0,0,0,.1);opacity:.7}
-.dark .page.settings .audit_action_btn.audit_action_alt{background:rgba(255,255,255,.15)}
-.page.settings .audit_action_btn.audit_action_alt:hover{opacity:1}
-.page.settings .audit_action_btn.audit_action_cancel{background:rgba(0,0,0,.1);opacity:.7}
-.dark .page.settings .audit_action_btn.audit_action_cancel{background:rgba(255,255,255,.15)}
-.page.settings .audit_action_btn.audit_action_cancel:hover{opacity:1}
-.page.settings .audit_action_btn.audit_action_confirm{background:#4caf50;color:#fff;font-weight:700}
-.page.settings .audit_action_btn.audit_action_confirm:hover{opacity:.85}
+.page.settings .audit_action_btn.primary{background:#4caf50;color:#fff;font-weight:700}
+.page.settings .audit_action_btn.primary:hover{opacity:.85}
+.page.settings .audit_action_btn.secondary{background:rgba(0,0,0,.1);opacity:.7}
+.dark .page.settings .audit_action_btn.secondary{background:rgba(255,255,255,.15)}
+.page.settings .audit_action_btn.secondary:hover{opacity:1}
 .page.settings .audit_pagination{display:flex;align-items:center;justify-content:center;gap:20px;padding:10px 0}
 .page.settings .audit_page_btn{padding:4px 12px;border:1px solid rgba(0,0,0,.15);border-radius:3px;cursor:pointer;font-size:.85em}
 .dark .page.settings .audit_page_btn{border-color:rgba(255,255,255,.15)}
