@@ -101,10 +101,6 @@ RESOLUTION_HEIGHT_MAP = {
     '480i': 480,
 }
 
-# Tolerance: actual height can be within this percentage of expected
-# (slight crops like 1920x1072 are still "1080p")
-RESOLUTION_TOLERANCE_PCT = 0.05
-
 # Runtime tolerance: flag if delta exceeds BOTH thresholds
 RUNTIME_DELTA_MIN = 15       # minutes
 RUNTIME_DELTA_PCT = 0.20     # 20%
@@ -178,6 +174,7 @@ def load_cp_database(db_path):
     Returns:
         media_by_imdb: dict mapping IMDB ID → {title, year, runtime, _id}
         files_by_media_id: dict mapping media _id → list of file paths
+        media_by_title: dict mapping (normalized_title, year) → {title, year, runtime, _id, imdb_id}
     """
     with open(db_path, 'r') as f:
         data = json.load(f).get('_default', {})
@@ -206,7 +203,19 @@ def load_cp_database(db_path):
             if media_id and movie_files:
                 files_by_media_id.setdefault(media_id, []).extend(movie_files)
 
-    return media_by_imdb, files_by_media_id
+    # Build title+year index for IMDB enrichment
+    media_by_title = {}
+    for imdb_id, entry in media_by_imdb.items():
+        key = (normalize_title(entry['title']), entry.get('year', 0))
+        media_by_title[key] = {
+            'title': entry['title'],
+            'year': entry.get('year', 0),
+            'runtime': entry.get('runtime', 0),
+            '_id': entry.get('_id', ''),
+            'imdb_id': imdb_id,
+        }
+
+    return media_by_imdb, files_by_media_id, media_by_title
 
 
 # ---------------------------------------------------------------------------
@@ -395,18 +404,29 @@ def is_junk_title(title):
     return False
 
 
-def resolution_label_for_height(height):
-    """Convert a pixel height to a human-readable resolution label."""
+def resolution_label(width, height):
+    """Convert pixel dimensions to a human-readable resolution label.
+
+    Width takes priority because widescreen/letterbox crops reduce height
+    while the encode resolution stays the same (e.g. 1920x800 is 1080p,
+    not 720p).  Height is the fallback for non-standard widths (e.g.
+    1440x1080 4:3 content is still 1080p).
+    """
+    if width >= 3800:
+        return '2160p'
+    if width >= 1900:
+        return '1080p'
+    if width >= 1260:
+        return '720p'
     if height >= 2160:
         return '2160p'
-    elif height >= 1080:
+    if height >= 1080:
         return '1080p'
-    elif height >= 720:
+    if height >= 720:
         return '720p'
-    elif height >= 480:
+    if height >= 480:
         return '480p'
-    else:
-        return f'{height}p (SD)'
+    return f'{height}p (SD)'
 
 
 # ---------------------------------------------------------------------------
@@ -545,12 +565,12 @@ def compute_recommended_action(flags, identification=None):
 # Tier 1 checks
 # ---------------------------------------------------------------------------
 
-def check_resolution(claimed_label, actual_height):
-    """Check 1: Resolution mismatch (height-based).
+def check_resolution(claimed_label, actual_width, actual_height):
+    """Check 1: Resolution mismatch.
 
-    The 'p' in 1080p refers to vertical lines, so classification should
-    be based on height, not width.  This avoids false positives from 4:3
-    content (e.g. 1440x1080 is still 1080p).
+    Uses both width and height to classify the actual resolution.  Width is
+    the primary indicator because widescreen crops (e.g. 1920x800) reduce
+    height but the encode is still 1080p.
 
     Returns a flag dict or None.
     """
@@ -561,19 +581,15 @@ def check_resolution(claimed_label, actual_height):
     if expected_height is None:
         return None
 
-    # Allow small tolerance for slight crops (e.g. 1072 is close enough to 1080)
-    lower = expected_height * (1 - RESOLUTION_TOLERANCE_PCT)
+    actual_label = resolution_label(actual_width, actual_height)
+    expected_label = resolution_label(0, expected_height)
 
-    if actual_height < lower:
-        actual_label = resolution_label_for_height(actual_height)
-        expected_label = resolution_label_for_height(expected_height)
-
-        if actual_label != expected_label:
-            return {
-                'check': 'resolution',
-                'severity': 'HIGH',
-                'detail': f'Claimed {claimed_label}, actual height {actual_height}px (maps to {actual_label})',
-            }
+    if actual_label != expected_label:
+        return {
+            'check': 'resolution',
+            'severity': 'HIGH',
+            'detail': f'Claimed {claimed_label}, actual {actual_width}x{actual_height} (maps to {actual_label})',
+        }
 
     return None
 
@@ -926,7 +942,7 @@ def find_video_files(folder_path):
 
 
 def scan_movie_folder(folder_path, folder_name, media_by_imdb,
-                      tier2=False, force_tier2=False):
+                      tier2=False, force_tier2=False, media_by_title=None):
     """Scan a single movie folder and return audit results.
 
     Args:
@@ -935,6 +951,7 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
         media_by_imdb: Dict mapping IMDB ID → movie info from CP database
         tier2: Run Tier 2 identification on flagged files
         force_tier2: Force Tier 2 even for high-confidence Tier 1 flags
+        media_by_title: Dict mapping (normalized_title, year) → movie info
 
     Returns a dict with scan results or None if no issues found.
     """
@@ -959,6 +976,16 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
         db_entry = media_by_imdb[imdb_id]
         expected_runtime = db_entry.get('runtime', 0)
 
+    # Fallback: look up by title+year when IMDB ID not in filename
+    if not db_entry and media_by_title and folder_title and folder_year:
+        key = (normalize_title(folder_title), folder_year)
+        match = media_by_title.get(key)
+        if match:
+            if not imdb_id:
+                imdb_id = match['imdb_id']
+            db_entry = match
+            expected_runtime = match.get('runtime', 0)
+
     # Extract actual metadata from file
     meta = extract_file_meta(filepath)
 
@@ -966,8 +993,8 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
     flags = []
     container_title_parsed = None
 
-    # Check 1: Resolution (height-based)
-    flag = check_resolution(claimed_res, meta['resolution_height'])
+    # Check 1: Resolution (width + height)
+    flag = check_resolution(claimed_res, meta['resolution_width'], meta['resolution_height'])
     if flag:
         flags.append(flag)
 
@@ -1081,7 +1108,7 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
         dict with scan results
     """
     _log_info('Loading CP database from %s...' % db_path)
-    media_by_imdb, files_by_media_id = load_cp_database(db_path)
+    media_by_imdb, files_by_media_id, media_by_title = load_cp_database(db_path)
     _log_info('Loaded %s movies from database' % len(media_by_imdb))
 
     # Enumerate movie folders
@@ -1118,6 +1145,7 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
             result = scan_movie_folder(
                 folder_path, folder_name, media_by_imdb,
                 tier2=tier2, force_tier2=force_tier2,
+                media_by_title=media_by_title,
             )
             return result, False
         except Exception as e:
@@ -1231,18 +1259,20 @@ def _build_resolution_rename(item):
     if not claimed:
         raise ValueError('No claimed resolution in item')
 
+    actual_width = 0
     actual_height = 0
     actual_res = item['actual'].get('resolution', '')
     if 'x' in actual_res:
         try:
+            actual_width = int(actual_res.split('x')[0])
             actual_height = int(actual_res.split('x')[1])
         except (ValueError, IndexError):
             pass
 
     if not actual_height:
-        raise ValueError('Cannot determine actual height from resolution: %s' % actual_res)
+        raise ValueError('Cannot determine actual resolution from: %s' % actual_res)
 
-    actual_label = resolution_label_for_height(actual_height)
+    actual_label = resolution_label(actual_width, actual_height)
     if actual_label == claimed:
         raise ValueError('Resolution already matches: %s' % claimed)
 
@@ -1296,6 +1326,16 @@ def _apply_renamer_template(item, quality_override=None, edition_override=None):
             break
 
     quality = quality_override if quality_override else item['expected'].get('resolution', '')
+    # Derive quality from actual resolution when not claimed in filename
+    if not quality:
+        actual_res = item['actual'].get('resolution', '')
+        if 'x' in actual_res:
+            try:
+                w = int(actual_res.split('x')[0])
+                h = int(actual_res.split('x')[1])
+                quality = resolution_label(w, h)
+            except (ValueError, IndexError):
+                pass
     edition = edition_override if edition_override is not None else item.get('detected_edition', '')
     imdb_id = item.get('imdb_id', '') or ''
     year = item['expected'].get('year') or ''
@@ -1496,13 +1536,15 @@ def _preview_reassign_movie(item):
 
     # Use actual resolution for the new filename
     actual_res = item['actual'].get('resolution', '')
+    actual_width = 0
     actual_height = 0
     if 'x' in actual_res:
         try:
+            actual_width = int(actual_res.split('x')[0])
             actual_height = int(actual_res.split('x')[1])
         except (ValueError, IndexError):
             pass
-    res_label = resolution_label_for_height(actual_height) if actual_height else ''
+    res_label = resolution_label(actual_width, actual_height) if actual_height else ''
 
     parts = [new_folder]
     if res_label:
