@@ -1224,13 +1224,9 @@ VALID_FIX_ACTIONS = {
 def _build_resolution_rename(item):
     """Build the new filename for a resolution rename.
 
-    Replaces the claimed resolution label in the filename with the actual one.
+    Uses the renamer template with the corrected quality label.
     Returns (new_filename, new_path, actual_label) or raises ValueError.
     """
-    old_path = item['file_path']
-    old_file = item['file']
-    old_dir = os.path.dirname(old_path)
-
     claimed = item['expected'].get('resolution')
     if not claimed:
         raise ValueError('No claimed resolution in item')
@@ -1250,52 +1246,145 @@ def _build_resolution_rename(item):
     if actual_label == claimed:
         raise ValueError('Resolution already matches: %s' % claimed)
 
-    # Replace the claimed label in the filename (case-insensitive)
-    new_file = re.sub(re.escape(claimed), actual_label, old_file, count=1, flags=re.I)
-    if new_file == old_file:
-        raise ValueError('Could not replace %s in filename: %s' % (claimed, old_file))
+    # Preserve existing edition from filename if present
+    old_file = item['file']
+    existing_edition = get_edition(old_file)
+    edition = existing_edition if existing_edition else (item.get('detected_edition') or '')
 
-    new_path = os.path.join(old_dir, new_file)
+    new_file, new_path = _apply_renamer_template(
+        item, quality_override=actual_label, edition_override=edition
+    )
     return new_file, new_path, actual_label
+
+
+def _apply_renamer_template(item, quality_override=None, edition_override=None):
+    """Rebuild a filename from the renamer's file_name template.
+
+    Uses the renamer config settings (file_name template, replace_doubles,
+    separator) to construct the filename, exactly as the renamer would.
+
+    Args:
+        item: audit item dict with expected/actual/imdb_id fields
+        quality_override: if set, use this instead of the item's claimed quality
+        edition_override: if set, use this as the edition value
+
+    Returns (new_filename, new_path) or raises ValueError.
+    """
+    if not _CP_AVAILABLE:
+        raise ValueError('Renamer template requires CouchPotato environment')
+
+    template = Env.setting('file_name', section='renamer', default='<thename><cd>.<ext>')
+    replace_doubles = Env.setting('replace_doubles', section='renamer', default=True)
+    separator = Env.setting('separator', section='renamer', default='')
+
+    old_path = item['file_path']
+    old_dir = os.path.dirname(old_path)
+    old_file = item['file']
+    _, ext = os.path.splitext(old_file)
+    ext = ext.lstrip('.')
+
+    # Build replacements dict matching renamer.py lines 430-457
+    movie_name = item['expected'].get('title', '')
+    # Remove chars illegal in filenames
+    movie_name = re.sub(r'[\x00/\\:*?"<>|]', '', movie_name)
+
+    # Build "name_the" — put leading article at the end
+    name_the = movie_name
+    for prefix in ['the ', 'an ', 'a ']:
+        if prefix == movie_name[:len(prefix)].lower():
+            name_the = movie_name[len(prefix):] + ', ' + prefix.strip().capitalize()
+            break
+
+    quality = quality_override if quality_override else item['expected'].get('resolution', '')
+    edition = edition_override if edition_override is not None else item.get('detected_edition', '')
+    imdb_id = item.get('imdb_id', '') or ''
+    year = item['expected'].get('year') or ''
+
+    replacements = {
+        'ext': ext,
+        'namethe': name_the.strip(),
+        'thename': movie_name.strip(),
+        'year': str(year) if year else '',
+        'first': name_the[0].upper() if name_the else '',
+        'quality': quality,
+        'quality_type': '',
+        'video': '',
+        'audio': '',
+        'group': '',
+        'source': '',
+        'resolution_width': '',
+        'resolution_height': '',
+        'audio_channels': '',
+        'imdb_id': imdb_id,
+        'cd': '',
+        'cd_nr': '',
+        'mpaa': '',
+        'mpaa_only': 'Not Rated',
+        'category': '',
+        '3d': '',
+        '3d_type': '',
+        '3d_type_short': '',
+        'edition': edition,
+        'edition_plex': '{edition-%s}' % edition if edition else '',
+        'imdb_id_plex': '{imdb-%s}' % imdb_id if imdb_id else '',
+    }
+
+    # Apply template — same logic as renamer.doReplace()
+    replaced = template
+    # First pass: replace all tokens except thename/namethe
+    for key, val in replacements.items():
+        if key in ('thename', 'namethe'):
+            continue
+        if val is not None:
+            replaced = replaced.replace('<%s>' % key, str(val))
+        else:
+            replaced = replaced.replace('<%s>' % key, '')
+
+    # Clean up double separators if enabled
+    if replace_doubles:
+        replaced = replaced.lstrip('. ')
+        double_replaces = [
+            (r'\.+', '.'), (r'_+', '_'), (r'-+', '-'), (r'\s+', ' '), (r' \\', r'\\'), (' /', '/'),
+            (r'(\s\.)+', '.'), (r'(-\.)+', '.'), (r'(\s-[^\s])+', '-'), (' ]', ']'),
+        ]
+        for pattern, repl in double_replaces:
+            replaced = re.sub(pattern, repl, replaced)
+        replaced = replaced.rstrip(',_-/\\ ')
+
+    # Second pass: replace thename/namethe (after doubles cleanup)
+    for key, val in replacements.items():
+        if key in ('thename', 'namethe'):
+            replaced = replaced.replace('<%s>' % key, str(val))
+
+    # Remove illegal chars
+    replaced = re.sub(r'[\x00:*?"<>|]', '', replaced)
+
+    # Apply separator
+    if separator:
+        replaced = replaced.replace(' ', separator)
+
+    new_file = replaced
+    new_path = os.path.join(old_dir, new_file)
+    return new_file, new_path
 
 
 def _build_edition_rename(item):
     """Build the new filename for an edition rename.
 
-    Inserts the detected edition into the filename (before the resolution label).
+    Uses the renamer template to reconstruct the filename with the edition included.
     Returns (new_filename, new_path) or raises ValueError.
     """
-    old_path = item['file_path']
-    old_file = item['file']
-    old_dir = os.path.dirname(old_path)
-
     edition = item.get('detected_edition')
     if not edition:
         raise ValueError('No detected edition in item')
 
+    old_file = item['file']
     # Check if edition is already in the filename
     filename_edition = get_edition(old_file)
     if filename_edition:
         raise ValueError('Filename already has edition: %s' % filename_edition)
 
-    # Insert edition before the resolution label or before the IMDB ID
-    # Pattern: "Title (Year) [Edition] Resolution IMDBid.ext"
-    # Try to insert before resolution first
-    claimed = item['expected'].get('resolution', '')
-    if claimed and claimed in old_file:
-        new_file = old_file.replace(claimed, '%s %s' % (edition, claimed), 1)
-    else:
-        # Try before IMDB ID
-        imdb = item.get('imdb_id', '')
-        if imdb and imdb in old_file:
-            new_file = old_file.replace(imdb, '%s %s' % (edition, imdb), 1)
-        else:
-            # Insert before extension
-            base, ext = os.path.splitext(old_file)
-            new_file = '%s %s%s' % (base, edition, ext)
-
-    new_path = os.path.join(old_dir, new_file)
-    return new_file, new_path
+    return _apply_renamer_template(item, edition_override=edition)
 
 
 def _preview_rename_resolution(item):
