@@ -1248,11 +1248,6 @@
 
 	// Audit settings tab — Library Audit subtab
 	.audit_wrap {
-		padding: $padding/2 0 $padding/2 $padding;
-
-		@include media-phablet {
-			padding-left: $padding/2;
-		}
 	}
 
 	// Audit-specific modifier for scan_btn cancel

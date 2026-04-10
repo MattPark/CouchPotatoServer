@@ -1105,7 +1105,7 @@ input[type=text],textarea{-webkit-appearance:none}
 .directory_list .actions:last-child>.clear{left:20px;position:absolute;top:50%;-webkit-transform:translateY(-50%);transform:translateY(-50%);margin:0}
 .directory_list .actions:last-child>.cancel{opacity:.7}
 .directory_list .actions:last-child>.save{margin-right:0}
-.page.settings .audit_wrap{padding:10px 0 10px 20px}
+.page.settings .audit_wrap{}
 .page.settings .scan_btn.audit_cancel{flex:0 0 auto;border-color:#f44336}
 .page.settings .scan_btn.audit_cancel:hover{border-color:#d32f2f}
 .page.settings .audit_progress_bar_host{margin-top:5px}
