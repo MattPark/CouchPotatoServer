@@ -1105,3 +1105,131 @@ input[type=text],textarea{-webkit-appearance:none}
 .directory_list .actions:last-child>.clear{left:20px;position:absolute;top:50%;-webkit-transform:translateY(-50%);transform:translateY(-50%);margin:0}
 .directory_list .actions:last-child>.cancel{opacity:.7}
 .directory_list .actions:last-child>.save{margin-right:0}
+.page.settings .audit_wrap{padding:10px 0 10px 20px}
+.page.settings .audit_controls{margin-bottom:10px}
+.page.settings .audit_buttons{display:flex;gap:10px;margin-bottom:10px}
+.page.settings .audit_btn{flex:1;display:flex;flex-wrap:wrap;align-items:center;padding:10px 20px;border:1px solid rgba(0,0,0,.15);border-radius:3px;cursor:pointer;transition:border-color 200ms,opacity 200ms}
+.dark .page.settings .audit_btn{border-color:rgba(255,255,255,.15)}
+.page.settings .audit_btn:hover{border-color:#ac0000}
+.dark .page.settings .audit_btn:hover{border-color:#f85c22}
+.page.settings .audit_btn.disabled{opacity:.4;pointer-events:none}
+.page.settings .audit_btn.audit_cancel{flex:0 0 auto;border-color:#f44336}
+.page.settings .audit_btn.audit_cancel:hover{border-color:#d32f2f}
+.page.settings .audit_btn .audit_btn_icon{font-size:1.4em;margin-right:10px;color:#ac0000}
+.dark .page.settings .audit_btn .audit_btn_icon{color:#f85c22}
+.page.settings .audit_btn .audit_btn_label{font-weight:700;font-size:1.05em}
+.page.settings .audit_btn .audit_btn_desc{width:100%;font-size:.85em;opacity:.6;margin-top:2px;padding-left:calc(1.4em + 10px)}
+.page.settings .audit_progress{padding:10px 0}
+.page.settings .audit_progress_status{padding:5px 0;font-weight:700}
+.page.settings .audit_progress_status .audit_progress_icon{margin-right:6px;color:#ac0000}
+.dark .page.settings .audit_progress_status .audit_progress_icon{color:#f85c22}
+.page.settings .audit_progress_status .audit_progress_counts{font-weight:400;opacity:.7}
+.page.settings .audit_progress_bar_wrap{position:relative;background:rgba(0,0,0,.2);border-radius:3px;height:22px;overflow:hidden;margin-top:5px}
+.page.settings .audit_progress_bar{height:100%;border-radius:3px;transition:width .3s ease;background:#4caf50}
+.page.settings .audit_progress_bar_text{position:absolute;top:0;left:0;right:0;text-align:center;line-height:22px;font-size:.75em;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.5)}
+.page.settings .audit_summary{padding:20px;margin-bottom:10px;background:rgba(0,0,0,.15);border-radius:3px}
+.page.settings .audit_stats_grid{display:flex;flex-wrap:wrap;gap:20px;margin-bottom:20px}
+.page.settings .audit_stat_item{display:flex;flex-direction:column;min-width:80px}
+.page.settings .audit_stat_value{font-size:1.4em;font-weight:700;color:#ac0000}
+.dark .page.settings .audit_stat_value{color:#f85c22}
+.page.settings .audit_stat_label{font-size:.8em;opacity:.6;text-transform:uppercase}
+.page.settings .audit_bars_title{font-weight:700;font-size:.9em;opacity:.7;text-transform:uppercase;margin-bottom:5px;margin-top:10px}
+.page.settings .audit_bar_row{display:flex;align-items:center;margin-bottom:4px}
+.page.settings .audit_bar_label{width:160px;font-size:.85em;opacity:.8}
+.page.settings .audit_bar_wrap{flex:1;background:rgba(0,0,0,.2);border-radius:3px;height:18px;overflow:hidden;margin:0 10px}
+.page.settings .audit_bar_fill{height:100%;border-radius:3px;transition:width .3s ease}
+.page.settings .audit_bar_count{width:60px;text-align:right;font-size:.85em;font-weight:700}
+.page.settings .audit_action_summary{margin-top:10px}
+.page.settings .audit_filters{display:flex;flex-wrap:wrap;align-items:center;gap:5px;padding:10px 0;border-bottom:1px solid rgba(0,0,0,.1);margin-bottom:10px}
+.dark .page.settings .audit_filters{border-bottom-color:rgba(255,255,255,.1)}
+.page.settings .audit_filter_label{font-size:.85em;opacity:.7;margin-left:10px}
+.page.settings .audit_filter_label:first-child{margin-left:0}
+.page.settings .audit_filter_select{background:rgba(0,0,0,.1);border:1px solid rgba(0,0,0,.15);border-radius:3px;padding:4px 8px;font-size:.85em;color:inherit}
+.dark .page.settings .audit_filter_select{background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.15)}
+.page.settings .audit_filter_fixed{display:flex;align-items:center;cursor:pointer;margin-left:20px}
+.page.settings .audit_filter_checkbox{margin-right:4px}
+.page.settings .audit_items{min-height:100px}
+.page.settings .audit_no_items{text-align:center;padding:40px;opacity:.5;font-style:italic}
+.page.settings .audit_item{border:1px solid rgba(0,0,0,.1);border-radius:3px;margin-bottom:5px;overflow:hidden}
+.dark .page.settings .audit_item{border-color:rgba(255,255,255,.1)}
+.page.settings .audit_item.audit_item_fixed{opacity:.5}
+.page.settings .audit_item .audit_item_detail{display:none}
+.page.settings .audit_item.expanded .audit_item_detail{display:block}
+.page.settings .audit_item.expanded .audit_item_arrow{transform:rotate(90deg)}
+.page.settings .audit_item_header{display:flex;align-items:center;padding:7px 10px;cursor:pointer;gap:7px}
+.page.settings .audit_item_header:hover{background:rgba(0,0,0,.05)}
+.dark .page.settings .audit_item_header:hover{background:rgba(255,255,255,.05)}
+.page.settings .audit_item_arrow{font-size:.8em;opacity:.5;transition:transform 150ms;flex-shrink:0}
+.page.settings .audit_item_folder{flex:1;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.page.settings .audit_severity_badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:.7em;font-weight:700;text-transform:uppercase;flex-shrink:0}
+.page.settings .audit_severity_badge.audit_severity_high{background:rgba(244,67,54,.2);color:#f44336}
+.page.settings .audit_severity_badge.audit_severity_medium{background:rgba(255,152,0,.2);color:#ff9800}
+.page.settings .audit_item_flags{display:flex;gap:4px;flex-shrink:0}
+.page.settings .audit_flag_icon{display:inline-block;padding:1px 4px;border-radius:3px;font-size:.65em;font-weight:700;background:rgba(0,0,0,.1);opacity:.7}
+.dark .page.settings .audit_flag_icon{background:rgba(255,255,255,.1)}
+.page.settings .audit_action_badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:.7em;background:rgba(0,0,0,.1);opacity:.7;flex-shrink:0}
+.dark .page.settings .audit_action_badge{background:rgba(255,255,255,.1)}
+.page.settings .audit_fixed_badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:.7em;font-weight:700;background:rgba(76,175,80,.2);color:#4caf50;flex-shrink:0}
+.page.settings .audit_item_detail{padding:10px 20px;border-top:1px solid rgba(0,0,0,.08);background:rgba(0,0,0,.03)}
+.dark .page.settings .audit_item_detail{border-top-color:rgba(255,255,255,.08);background:rgba(255,255,255,.02)}
+.page.settings .audit_detail_row{display:flex;gap:10px;padding:2px 0}
+.page.settings .audit_detail_label{font-weight:700;font-size:.85em;min-width:50px;opacity:.7}
+.page.settings .audit_detail_value{font-size:.85em;word-break:break-all}
+.page.settings .audit_file_path{font-family:monospace;font-size:.8em}
+.page.settings .audit_detail_subtitle{font-weight:700;font-size:.85em;margin-top:7px;margin-bottom:4px;opacity:.7}
+.page.settings .audit_detail_flags{margin-top:7px}
+.page.settings .audit_flag_row{display:flex;align-items:center;gap:7px;padding:2px 0}
+.page.settings .audit_flag_check{font-weight:700;font-size:.85em;min-width:80px}
+.page.settings .audit_flag_detail{font-size:.85em;opacity:.8;flex:1}
+.page.settings .audit_detail_section{margin-top:5px}
+.page.settings .audit_kv_row{display:flex;gap:7px;padding:1px 0;font-size:.85em}
+.page.settings .audit_kv_key{font-weight:700;min-width:120px;opacity:.6}
+.page.settings .audit_kv_val{word-break:break-all}
+.page.settings .audit_item_actions{display:flex;gap:7px;margin-top:10px;padding-top:7px;border-top:1px solid rgba(0,0,0,.08)}
+.dark .page.settings .audit_item_actions{border-top-color:rgba(255,255,255,.08)}
+.page.settings .audit_action_btn{display:inline-block;padding:4px 12px;border-radius:3px;font-size:.85em;cursor:pointer;transition:opacity 200ms}
+.page.settings .audit_action_btn.audit_action_primary{background:#4caf50;color:#fff;font-weight:700}
+.page.settings .audit_action_btn.audit_action_primary:hover{opacity:.85}
+.page.settings .audit_action_btn.audit_action_alt{background:rgba(0,0,0,.1);opacity:.7}
+.dark .page.settings .audit_action_btn.audit_action_alt{background:rgba(255,255,255,.15)}
+.page.settings .audit_action_btn.audit_action_alt:hover{opacity:1}
+.page.settings .audit_action_btn.audit_action_cancel{background:rgba(0,0,0,.1);opacity:.7}
+.dark .page.settings .audit_action_btn.audit_action_cancel{background:rgba(255,255,255,.15)}
+.page.settings .audit_action_btn.audit_action_cancel:hover{opacity:1}
+.page.settings .audit_action_btn.audit_action_confirm{background:#4caf50;color:#fff;font-weight:700}
+.page.settings .audit_action_btn.audit_action_confirm:hover{opacity:.85}
+.page.settings .audit_pagination{display:flex;align-items:center;justify-content:center;gap:20px;padding:10px 0}
+.page.settings .audit_page_btn{padding:4px 12px;border:1px solid rgba(0,0,0,.15);border-radius:3px;cursor:pointer;font-size:.85em}
+.dark .page.settings .audit_page_btn{border-color:rgba(255,255,255,.15)}
+.page.settings .audit_page_btn:hover{border-color:#ac0000}
+.dark .page.settings .audit_page_btn:hover{border-color:#f85c22}
+.page.settings .audit_page_info{font-size:.85em;opacity:.7}
+.page.settings .audit_batch_bar{display:flex;align-items:center;gap:10px;padding:10px;margin-top:10px;background:rgba(0,0,0,.08);border-radius:3px}
+.dark .page.settings .audit_batch_bar{background:rgba(255,255,255,.05)}
+.page.settings .audit_batch_label{font-weight:700;font-size:.85em;opacity:.7}
+.page.settings .audit_batch_btn{display:inline-block;padding:4px 12px;border:1px solid rgba(0,0,0,.15);border-radius:3px;cursor:pointer;font-size:.85em;transition:border-color 200ms}
+.dark .page.settings .audit_batch_btn{border-color:rgba(255,255,255,.15)}
+.page.settings .audit_batch_btn:hover{border-color:#ac0000}
+.dark .page.settings .audit_batch_btn:hover{border-color:#f85c22}
+.page.settings .audit_batch_progress{display:flex;align-items:center;font-weight:700}
+.page.settings .audit_batch_progress_text{margin-left:6px}
+.audit_modal_overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:1000;display:flex;align-items:center;justify-content:center}
+.audit_modal{background:#fff;border-radius:3px;width:90%;max-width:700px;max-height:80vh;overflow:auto;box-shadow:0 8px 32px rgba(0,0,0,.3)}
+.dark .audit_modal{background:#2a2a2a}
+.audit_modal_header{display:flex;align-items:center;justify-content:space-between;padding:10px 20px;border-bottom:1px solid rgba(0,0,0,.1)}
+.dark .audit_modal_header{border-bottom-color:rgba(255,255,255,.1)}
+.audit_modal_header h3{margin:0;font-size:1.1em}
+.audit_modal_header .audit_modal_close{cursor:pointer;opacity:.5;font-size:1.2em}
+.audit_modal_header .audit_modal_close:hover{opacity:1}
+.audit_modal_body{padding:20px}
+.audit_preview_section{margin-bottom:10px}
+.audit_preview_title{font-weight:700;font-size:.9em;margin-bottom:5px}
+.audit_preview_row{display:flex;gap:10px;padding:4px 0;font-size:.85em}
+.audit_preview_label{font-weight:700;min-width:50px;opacity:.7}
+.audit_preview_old{font-family:monospace;font-size:.9em;color:#f44336;word-break:break-all}
+.audit_preview_new{font-family:monospace;font-size:.9em;color:#4caf50;word-break:break-all}
+.audit_preview_note{font-size:.85em;opacity:.6;font-style:italic;padding:4px 0}
+.audit_preview_warnings{background:rgba(244,67,54,.1);border-radius:3px;padding:10px}
+.audit_preview_warning{font-size:.85em;color:#f44336;padding:2px 0}
+.audit_modal_footer{display:flex;justify-content:flex-end;gap:7px;padding:10px 20px;border-top:1px solid rgba(0,0,0,.1)}
+.dark .audit_modal_footer{border-top-color:rgba(255,255,255,.1)}

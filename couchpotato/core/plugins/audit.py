@@ -2332,7 +2332,35 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         }
 
 
+
+
 # ---------------------------------------------------------------------------
+# Settings config — registers the "Audit" subtab under Settings > Manage
+# ---------------------------------------------------------------------------
+
+config = [{
+    'name': 'audit',
+    'groups': [
+        {
+            'tab': 'manage',
+            'subtab': 'audit',
+            'subtab_label': 'Audit',
+            'label': 'Library Audit',
+            'description': 'Scan your library for quality and identity issues.',
+            'options': [
+                {
+                    'name': 'default_workers',
+                    'default': 4,
+                    'type': 'int',
+                    'label': 'Scan Workers',
+                    'description': 'Number of parallel scan threads (1-16).',
+                },
+            ],
+        },
+    ],
+}]
+
+
 # CLI
 # ---------------------------------------------------------------------------
 
