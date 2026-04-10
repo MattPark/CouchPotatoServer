@@ -2388,6 +2388,13 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'desc': 'Get progress of a running batch fix operation',
         })
 
+        addApiView('audit.identify', self.identifyView, docs={
+            'desc': 'Run Tier 2 identification on a single flagged item',
+            'params': {
+                'item_id': {'desc': '12-char hex ID of the flagged item'},
+            },
+        })
+
         addEvent('audit.run_scan', self._run_scan)
         addEvent('audit.run_batch_fix', self._run_batch_fix)
 
@@ -2832,6 +2839,68 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'action': action,
             'item_id': item_id,
             'details': details,
+        }
+
+    def identifyView(self, item_id=None, **kwargs):
+        """API handler: run Tier 2 identification on a single flagged item.
+
+        Runs identify_flagged_file() on the item, updates identification and
+        recommended_action in-place, persists results, and returns the updated
+        item data.
+        """
+        if not item_id:
+            return {'success': False, 'error': 'item_id is required'}
+
+        item = self._find_item(item_id)
+        if not item:
+            return {'success': False, 'error': 'Item not found: %s' % item_id}
+
+        filepath = item.get('file_path', '')
+        if not filepath or not os.path.isfile(filepath):
+            return {
+                'success': False,
+                'error': 'File not found: %s' % filepath,
+            }
+
+        # Get container_title_parsed from item data
+        actual = item.get('actual', {})
+        container_title_parsed = actual.get('container_title_parsed')
+
+        flags = item.get('flags', [])
+
+        log.info('Running Tier 2 identification on %s', (item.get('folder', item_id),))
+
+        try:
+            identification = identify_flagged_file(
+                filepath, flags, container_title_parsed
+            )
+        except Exception as e:
+            log.error('Tier 2 identification failed for %s: %s', (item_id, e))
+            return {'success': False, 'error': 'Identification failed: %s' % str(e)}
+
+        # Update item in-place
+        item['identification'] = identification
+
+        # Recompute recommended action with the new identification data
+        item['recommended_action'] = compute_recommended_action(
+            flags, identification
+        )
+
+        # Persist
+        self._save_results()
+
+        log.info('Tier 2 result for %s: method=%s action=%s', (
+            item.get('folder', item_id),
+            identification.get('method', ''),
+            item['recommended_action'],
+        ))
+
+        return {
+            'success': True,
+            'item_id': item_id,
+            'identification': identification,
+            'recommended_action': item['recommended_action'],
+            'item': item,
         }
 
     def _run_batch_fix(self, action, items, dry_run=False):
