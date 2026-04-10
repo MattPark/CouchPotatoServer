@@ -1367,6 +1367,8 @@ def _apply_renamer_template(item, quality_override=None, edition_override=None):
         'edition': edition,
         'edition_plex': '{edition-%s}' % edition if edition else '',
         'imdb_id_plex': '{imdb-%s}' % imdb_id if imdb_id else '',
+        'imdb_id_emby': '[imdbid-%s]' % imdb_id if imdb_id else '',
+        'imdb_id_kodi': '{imdb=%s}' % imdb_id if imdb_id else '',
     }
 
     # Apply template — same logic as renamer.doReplace()

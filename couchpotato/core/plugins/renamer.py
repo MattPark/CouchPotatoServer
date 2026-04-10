@@ -454,6 +454,8 @@ class Renamer(Plugin):
                     'edition': group['meta_data'].get('edition', ''),
                     'edition_plex': '{edition-%s}' % group['meta_data']['edition'] if group['meta_data'].get('edition') else '',
                     'imdb_id_plex': '{imdb-%s}' % group['identifier'] if group.get('identifier') else '',
+                    'imdb_id_emby': '[imdbid-%s]' % group['identifier'] if group.get('identifier') else '',
+                    'imdb_id_kodi': '{imdb=%s}' % group['identifier'] if group.get('identifier') else '',
                 }
 
                 if replacements['mpaa_only'] not in ('G', 'PG', 'PG-13', 'R', 'NC-17'):
@@ -1501,11 +1503,25 @@ rename_options = {
         'edition': "Edition (Director's Cut)",
         'edition_plex': "Plex Edition {edition-Director's Cut}",
         'imdb_id_plex': 'Plex IMDB {imdb-tt0123456}',
+        'imdb_id_emby': 'Emby/Jellyfin IMDB [imdbid-tt0123456]',
+        'imdb_id_kodi': 'Kodi IMDB {imdb=tt0123456}',
     },
     'presets': {
         'Plex Recommended': {
+            'folder_name': '<namethe> (<year>)',
+            'file_name': '<thename> (<year>) <edition_plex> <quality> <3d> <3d_type_short> <cd> <imdb_id_plex>.<ext>',
+        },
+        'Emby': {
             'folder_name': '<thename> (<year>)',
-            'file_name': '<thename> (<year>) <edition_plex> <imdb_id_plex>.<ext>',
+            'file_name': '<thename> (<year>) <quality> <3d> <3d_type_short> <cd> <imdb_id_emby>.<ext>',
+        },
+        'Jellyfin': {
+            'folder_name': '<thename> (<year>)',
+            'file_name': '<thename> (<year>) <quality> <3d> <3d_type_short> <cd> <imdb_id_emby>.<ext>',
+        },
+        'Kodi': {
+            'folder_name': '<thename> (<year>)',
+            'file_name': '<thename> (<year>) <quality> <3d> <3d_type_short> <cd> <imdb_id_kodi>.<ext>',
         },
     },
 }
