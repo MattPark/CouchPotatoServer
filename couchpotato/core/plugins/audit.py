@@ -1266,9 +1266,13 @@ def check_template(item, template, replace_doubles=True, separator=''):
 
     detail_parts = ', '.join(differences) if differences else 'filename format mismatch'
 
+    # LOW = purely cosmetic formatting (title/year/quality all present, has IMDB)
+    # MEDIUM = missing substantive tokens or no IMDB to confirm identity
+    severity = 'LOW' if (not differences and imdb_id) else 'MEDIUM'
+
     return {
         'check': 'template',
-        'severity': 'MEDIUM',
+        'severity': severity,
         'detail': '%s (expected: %s)' % (detail_parts.capitalize(), expected),
     }
 
@@ -2896,12 +2900,18 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 if check_set & {f['check'] for f in i.get('flags', [])}
             ]
 
-        # Filter by severity
+        # Filter by severity (max severity semantics — an item's severity
+        # is the highest severity across all its flags, so filtering by LOW
+        # only returns items where every flag is LOW)
         if filter_severity:
             sev_set = {s.strip().upper() for s in filter_severity.split(',')}
+            sev_order = {'LOW': 0, 'MEDIUM': 1, 'HIGH': 2}
+            target_levels = {sev_order.get(s, 1) for s in sev_set}
             items = [
                 i for i in items
-                if sev_set & {f['severity'] for f in i.get('flags', [])}
+                if max((sev_order.get(f['severity'], 1)
+                        for f in i.get('flags', [])), default=1)
+                   in target_levels
             ]
 
         # Filter by recommended action

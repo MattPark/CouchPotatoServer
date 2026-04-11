@@ -158,7 +158,8 @@ var AuditSettingTab = new Class({
 		}).adopt(
 			new Element('option', { 'value': '', 'text': 'All' }),
 			new Element('option', { 'value': 'HIGH', 'text': 'High' }),
-			new Element('option', { 'value': 'MEDIUM', 'text': 'Medium' })
+			new Element('option', { 'value': 'MEDIUM', 'text': 'Medium' }),
+			new Element('option', { 'value': 'LOW', 'text': 'Low' })
 		).inject(filters);
 
 		// Action filter
