@@ -691,8 +691,17 @@ def check_resolution(claimed_label, actual_width, actual_height):
     return None
 
 
-def check_runtime(actual_duration_min, expected_runtime_min):
+def check_runtime(actual_duration_min, expected_runtime_min, edition='',
+                   container_title=''):
     """Check 2: Runtime mismatch.
+
+    Edition-aware: when a non-theatrical edition is detected (Extended,
+    Director's Cut, Unrated, etc.) and the file is LONGER than expected,
+    suppress the flag — extended editions are expected to run longer than
+    the standard TMDB runtime.  If the file is shorter than expected even
+    with an edition tag, still flag it (likely truncated).
+
+    The edition can come from the filename or from the container title.
 
     Returns a flag dict or None.
     """
@@ -704,6 +713,14 @@ def check_runtime(actual_duration_min, expected_runtime_min):
 
     # Flag only if BOTH absolute and percentage thresholds are exceeded
     if delta > RUNTIME_DELTA_MIN and pct > RUNTIME_DELTA_PCT:
+        # Edition-aware suppression: if file has a non-theatrical edition
+        # and runs LONGER than TMDB, suppress the flag
+        is_longer = actual_duration_min > expected_runtime_min
+        if is_longer:
+            effective_edition = _get_effective_edition(edition, container_title)
+            if effective_edition and effective_edition.lower() != 'theatrical':
+                return None
+
         return {
             'check': 'runtime',
             'severity': 'HIGH',
@@ -715,6 +732,36 @@ def check_runtime(actual_duration_min, expected_runtime_min):
         }
 
     return None
+
+
+# Regex for edition hints in container titles — used when no edition was
+# detected from the filename itself.
+_CONTAINER_EDITION_RE = re.compile(
+    r'\b(extended|director.?s?\s*cut|unrated|uncut|special\s+edition|'
+    r'assembly\s*cut|ultimate|redux|final\s+cut|international\s+cut|'
+    r'alternate\s+cut|uncensored|criterion|remaster(?:ed)?|'
+    r'theatrical(?:\s+cut)?|limited|deluxe|superbit|imax)\b',
+    re.IGNORECASE,
+)
+
+
+def _get_effective_edition(edition, container_title):
+    """Return the best-guess edition from filename edition or container title.
+
+    Args:
+        edition: Edition string detected from the filename (may be empty).
+        container_title: Raw container title from mediainfo (may be empty).
+
+    Returns:
+        Edition string or '' if no edition detected.
+    """
+    if edition:
+        return edition
+    if container_title:
+        m = _CONTAINER_EDITION_RE.search(container_title)
+        if m:
+            return m.group(1)
+    return ''
 
 
 def check_container_title(container_title, folder_title, folder_year):
@@ -1467,8 +1514,26 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
     if flag:
         flags.append(flag)
 
-    # Check 2: Runtime
-    flag = check_runtime(meta['duration_min'], expected_runtime)
+    # Detect edition early — needed by runtime check for edition-aware suppression
+    detected_edition = ''
+    if has_edition_in_template or not renamer_template:
+        edition_flag, detected_edition = check_edition(meta['container_title'], filename)
+    else:
+        # Still detect edition for metadata even if we don't flag it
+        edition_flag, detected_edition = check_edition(meta['container_title'], filename)
+        edition_flag = None  # suppress the flag when template has no edition token
+
+    # Fallback: detect edition from filename when container title had none
+    # This ensures files with {edition-X} in the filename preserve the edition
+    # during template comparison and rename operations
+    if not detected_edition:
+        detected_edition = get_edition(filename)
+
+    # Check 2: Runtime (edition-aware — suppresses flag for non-theatrical
+    # editions that run longer than TMDB runtime)
+    flag = check_runtime(meta['duration_min'], expected_runtime,
+                         edition=detected_edition,
+                         container_title=meta['container_title'])
     if flag:
         flags.append(flag)
 
@@ -1484,21 +1549,9 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
     if flag:
         flags.append(flag)
 
-    # Check 5: Edition mismatch — skip if template has no edition token
-    detected_edition = ''
-    if has_edition_in_template or not renamer_template:
-        edition_flag, detected_edition = check_edition(meta['container_title'], filename)
-        if edition_flag:
-            flags.append(edition_flag)
-    else:
-        # Still detect edition for metadata even if we don't flag it
-        _, detected_edition = check_edition(meta['container_title'], filename)
-
-    # Fallback: detect edition from filename when container title had none
-    # This ensures files with {edition-X} in the filename preserve the edition
-    # during template comparison and rename operations
-    if not detected_edition:
-        detected_edition = get_edition(filename)
+    # Check 5: Edition mismatch (flag was computed above, apply here)
+    if edition_flag:
+        flags.append(edition_flag)
 
     # Build partial item for template check (needs all data populated)
     # We need this before the "no flags → return None" check because the
