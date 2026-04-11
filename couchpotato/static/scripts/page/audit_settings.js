@@ -1009,7 +1009,38 @@ var AuditSettingTab = new Class({
 			var db = preview.changes.database;
 			var db_section = new Element('div.audit_preview_section').inject(body);
 			new Element('div.audit_preview_title', { 'text': 'Database Changes' }).inject(db_section);
-			self.renderKeyValues(db_section, db);
+
+			// Render all db fields except reset_status (handled by dropdown)
+			Object.each(db, function(val, key){
+				if(key === 'reset_status') return;
+				if(val === null || val === undefined) return;
+				if(typeof val === 'object'){
+					val = JSON.stringify(val);
+				}
+				new Element('div.audit_kv_row').adopt(
+					new Element('span.audit_kv_key', { 'text': key + ':' }),
+					new Element('span.audit_kv_val', { 'text': String(val) })
+				).inject(db_section);
+			});
+
+			// Status dropdown for reset_status
+			if(db.reset_status){
+				var status_row = new Element('div.audit_status_row').inject(db_section);
+				new Element('span.audit_status_label', { 'text': 'Original movie status:' }).inject(status_row);
+				var status_select = new Element('select.audit_status_select', {
+					'events': { 'click': function(e){ e.stop(); } }
+				}).inject(status_row);
+				var default_status = db.reset_status['default'] || 'wanted';
+				[
+					{ value: 'wanted', text: 'Set to Wanted' },
+					{ value: 'done', text: 'Set to Done' },
+					{ value: 'nochange', text: 'No change' }
+				].each(function(opt){
+					var attrs = { 'value': opt.value, 'text': opt.text };
+					if(opt.value === default_status) attrs['selected'] = 'selected';
+					new Element('option', attrs).inject(status_select);
+				});
+			}
 		}
 
 		// Warnings
@@ -1033,16 +1064,22 @@ var AuditSettingTab = new Class({
 			'text': 'Confirm & Execute',
 			'events': { 'click': function(e){
 				e.stop();
-				self.executeFix(item_id, action);
+				var reset_status = status_select ? status_select.get('value') : '';
+				self.executeFix(item_id, action, reset_status);
 			}}
 		}).inject(footer);
 	},
 
-	executeFix: function(item_id, action){
+	executeFix: function(item_id, action, reset_status){
 		var self = this;
 
+		var data = { 'item_id': item_id, 'action': action, 'confirm': 1 };
+		if(reset_status){
+			data['reset_status'] = reset_status;
+		}
+
 		Api.request('audit.fix', {
-			'data': { 'item_id': item_id, 'action': action, 'confirm': 1 },
+			'data': data,
 			'onComplete': function(json){
 				self.closePreviewModal();
 

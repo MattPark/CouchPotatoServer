@@ -59,7 +59,7 @@ except ImportError:
 # Plugin integration — only available when running inside CouchPotato
 try:
     from couchpotato.api import addApiView
-    from couchpotato.core.event import addEvent, fireEventAsync
+    from couchpotato.core.event import addEvent, fireEvent, fireEventAsync
     from couchpotato.core.logger import CPLog
     from couchpotato.core.plugins.base import Plugin
     from couchpotato.environment import Env
@@ -2318,7 +2318,8 @@ def _preview_delete_wrong(item):
                 },
                 'reset_status': {
                     'movie': item['expected'].get('title', ''),
-                    'new_status': 'wanted',
+                    'default': 'wanted',
+                    'options': ['wanted', 'done', 'nochange'],
                 },
             },
         },
@@ -2419,7 +2420,8 @@ def _preview_reassign_movie(item):
                 },
                 'reset_status': {
                     'movie': item['expected'].get('title', ''),
-                    'new_status': 'wanted',
+                    'default': 'wanted',
+                    'options': ['wanted', 'done', 'nochange'],
                 },
             },
         },
@@ -3137,6 +3139,74 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             item['file_path'] = details['new_path']
         self._save_results()
 
+    def _apply_reset_status(self, item, reset_status):
+        """Apply a status change to the original movie in the CP database.
+
+        Args:
+            item: The audit item dict (has imdb_id, expected title/year).
+            reset_status: 'wanted' to set movie to active (wanted), or
+                          'done' to set movie to done.
+
+        Returns a dict describing what happened.
+        """
+        if not _CP_AVAILABLE:
+            return {'applied': False, 'reason': 'Not running inside CouchPotato'}
+
+        imdb_id = item.get('imdb_id', '')
+        movie_title = item.get('expected', {}).get('title', 'Unknown')
+
+        if not imdb_id:
+            log.warning('Cannot apply reset_status — no IMDB ID for %s', (movie_title,))
+            return {'applied': False, 'reason': 'No IMDB ID for movie'}
+
+        try:
+            # Find the movie in CP's database by IMDB ID
+            media = fireEvent(
+                'media.with_identifiers',
+                {'imdb': imdb_id},
+                with_doc=True,
+                single=True,
+            )
+
+            if not media:
+                log.warning('Cannot apply reset_status — movie not in CP database: %s (%s)',
+                            (movie_title, imdb_id))
+                return {'applied': False, 'reason': 'Movie not found in CP database'}
+
+            doc = media.get('doc', media) if isinstance(media, dict) else media
+            media_id = doc.get('_id')
+            old_status = doc.get('status', 'unknown')
+
+            if reset_status == 'wanted':
+                new_db_status = 'active'
+            elif reset_status == 'done':
+                new_db_status = 'done'
+            else:
+                return {'applied': False, 'reason': 'Unknown reset_status: %s' % reset_status}
+
+            if old_status == new_db_status:
+                log.info('Movie %s already has status %s, no change needed',
+                         (movie_title, old_status))
+                return {'applied': True, 'old_status': old_status,
+                        'new_status': new_db_status, 'changed': False}
+
+            # Update the movie status directly via get_db
+            from couchpotato import get_db
+            db = get_db()
+            m = db.get('id', media_id)
+            m['status'] = new_db_status
+            db.update(m)
+
+            log.info('Reset status for %s (%s): %s -> %s',
+                     (movie_title, imdb_id, old_status, new_db_status))
+
+            return {'applied': True, 'old_status': old_status,
+                    'new_status': new_db_status, 'changed': True}
+
+        except Exception as e:
+            log.error('Failed to apply reset_status for %s: %s', (movie_title, e))
+            return {'applied': False, 'reason': 'Error: %s' % e}
+
     def fixPreviewView(self, item_id=None, action=None, **kwargs):
         """API handler: preview what a fix action would change."""
         if not item_id:
@@ -3160,8 +3230,15 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         return {'success': True, 'preview': preview}
 
-    def fixView(self, item_id=None, action=None, confirm='0', **kwargs):
-        """API handler: execute a fix action on a flagged item."""
+    def fixView(self, item_id=None, action=None, confirm='0', reset_status=None, **kwargs):
+        """API handler: execute a fix action on a flagged item.
+
+        Args:
+            reset_status: What to do with the original movie's status after
+                delete/reassign.  One of 'wanted' (set to active/wanted),
+                'done' (keep as done), or 'nochange' (leave as-is).  Only
+                relevant for delete_wrong and reassign_movie actions.
+        """
         if not item_id:
             return {'success': False, 'error': 'item_id is required'}
         if not action or action not in VALID_FIX_ACTIONS:
@@ -3199,6 +3276,11 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         if not success:
             log.error('Fix %s failed for %s: %s', (action, item_id, details.get('error', '')))
             return {'success': False, 'error': details.get('error', 'Unknown error')}
+
+        # Apply status change for delete/reassign actions
+        if action in ('delete_wrong', 'reassign_movie') and reset_status and reset_status != 'nochange':
+            status_result = self._apply_reset_status(item, reset_status)
+            details['status_change'] = status_result
 
         # Mark as fixed
         self._mark_fixed(item, action, details)
