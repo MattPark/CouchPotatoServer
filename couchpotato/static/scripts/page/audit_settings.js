@@ -1032,13 +1032,16 @@ var AuditSettingTab = new Class({
 					'events': { 'click': function(e){ e.stop(); } }
 				}).inject(status_row);
 				var default_status = db.reset_status['default'] || 'wanted';
-				[
-					{ value: 'wanted', text: 'Set to Wanted' },
-					{ value: 'done', text: 'Set to Done' },
-					{ value: 'nochange', text: 'No change' }
-				].each(function(opt){
-					var attrs = { 'value': opt.value, 'text': opt.text };
-					if(opt.value === default_status) attrs['selected'] = 'selected';
+				var status_labels = {
+					'wanted': 'Set to Wanted',
+					'done': 'Set to Done',
+					'nochange': 'No change',
+					'remove': 'Remove from database'
+				};
+				var options = db.reset_status['options'] || ['wanted', 'done', 'nochange'];
+				options.each(function(val){
+					var attrs = { 'value': val, 'text': status_labels[val] || val };
+					if(val === default_status) attrs['selected'] = 'selected';
 					new Element('option', attrs).inject(status_select);
 				});
 			}

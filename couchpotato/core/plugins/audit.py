@@ -2315,15 +2315,10 @@ def _preview_delete_wrong(item):
                 'folder_cleanup': folder_path,
             },
             'database': {
-                'remove_release': {
-                    'movie': item['expected'].get('title', ''),
-                    'year': item['expected'].get('year'),
-                    'imdb': item.get('imdb_id', ''),
-                },
                 'reset_status': {
                     'movie': item['expected'].get('title', ''),
                     'default': 'wanted',
-                    'options': ['wanted', 'done', 'nochange'],
+                    'options': ['wanted', 'done', 'nochange', 'remove'],
                 },
             },
         },
@@ -3154,8 +3149,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         Args:
             item: The audit item dict (has imdb_id, expected title/year).
-            reset_status: 'wanted' to set movie to active (wanted), or
-                          'done' to set movie to done.
+            reset_status: 'wanted' to set movie to active (wanted),
+                          'done' to set movie to done, or
+                          'remove' to fully delete the movie from the database.
 
         Returns a dict describing what happened.
         """
@@ -3186,6 +3182,14 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             doc = media.get('doc', media) if isinstance(media, dict) else media
             media_id = doc.get('_id')
             old_status = doc.get('status', 'unknown')
+
+            # Full removal — delete movie and all release records
+            if reset_status == 'remove':
+                fireEvent('media.delete', media_id, delete_from='all', single=True)
+                log.info('Removed movie %s (%s) from database',
+                         (movie_title, imdb_id))
+                return {'applied': True, 'old_status': old_status,
+                        'new_status': 'removed', 'changed': True}
 
             if reset_status == 'wanted':
                 new_db_status = 'active'
