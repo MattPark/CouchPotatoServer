@@ -1959,6 +1959,106 @@ def _apply_renamer_template(item, quality_override=None, edition_override=None):
     return new_file, new_path
 
 
+def _apply_folder_template(title, year):
+    """Build a folder name from the renamer's folder_name template.
+
+    Uses the same token replacement logic as the renamer to produce folder names
+    that match the library convention (e.g. '<namethe> (<year>)').
+
+    Args:
+        title: Movie title (raw, will be sanitized)
+        year: Movie year (int or str, may be None)
+
+    Returns:
+        Sanitized folder name string.
+    """
+    if not _CP_AVAILABLE:
+        safe = re.sub(r'[\x00/\\:*?"<>|]', '', title)
+        return '%s (%s)' % (safe, year) if year else safe
+
+    template = Env.setting('folder_name', section='renamer', default='<namethe> (<year>)')
+    replace_doubles = Env.setting('replace_doubles', section='renamer', default=True)
+    foldersep = Env.setting('foldersep', section='renamer', default='')
+
+    # Sanitize title for filesystem
+    safe_title = re.sub(r'[\x00/\\:*?"<>|]', '', title)
+
+    # Build "name_the" — put leading article at the end
+    name_the = safe_title
+    for prefix in ['the ', 'an ', 'a ']:
+        if prefix == safe_title[:len(prefix)].lower():
+            name_the = safe_title[len(prefix):] + ', ' + prefix.strip().capitalize()
+            break
+
+    replacements = {
+        'thename': safe_title.strip(),
+        'namethe': name_the.strip(),
+        'year': str(year) if year else '',
+        'first': name_the[0].upper() if name_the else '',
+        'quality': '',
+        'quality_type': '',
+        'video': '',
+        'audio': '',
+        'group': '',
+        'source': '',
+        'resolution_width': '',
+        'resolution_height': '',
+        'audio_channels': '',
+        'imdb_id': '',
+        'cd': '',
+        'cd_nr': '',
+        'mpaa': '',
+        'mpaa_only': '',
+        'category': '',
+        '3d': '',
+        '3d_type': '',
+        '3d_type_short': '',
+        'edition': '',
+        'edition_plex': '',
+        'imdb_id_plex': '',
+        'imdb_id_emby': '',
+        'imdb_id_kodi': '',
+    }
+
+    replaced = template
+    # First pass: replace all tokens except thename/namethe
+    for key, val in replacements.items():
+        if key in ('thename', 'namethe'):
+            continue
+        if val is not None:
+            replaced = replaced.replace('<%s>' % key, str(val))
+        else:
+            replaced = replaced.replace('<%s>' % key, '')
+
+    # Clean up double separators
+    if replace_doubles:
+        replaced = replaced.lstrip('. ')
+        double_replaces = [
+            (r'\(\s*\)', ''),
+            (r'\[\s*\]', ''),
+            (r'\{\s*\}', ''),
+            (r'\.+', '.'), (r'_+', '_'), (r'-+', '-'), (r'\s+', ' '), (r' \\', r'\\'), (' /', '/'),
+            (r'(\s\.)+', '.'), (r'(-\.)+', '.'), (r'(\s-[^\s])+', '-'), (' ]', ']'),
+        ]
+        for pattern, repl in double_replaces:
+            replaced = re.sub(pattern, repl, replaced)
+        replaced = replaced.rstrip(',_-/\\ ')
+
+    # Second pass: replace thename/namethe
+    for key, val in replacements.items():
+        if key in ('thename', 'namethe'):
+            replaced = replaced.replace('<%s>' % key, str(val))
+
+    # Remove any remaining illegal chars
+    replaced = re.sub(r'[\x00:*?"<>|]', '', replaced)
+
+    # Apply folder separator
+    if foldersep:
+        replaced = replaced.replace(' ', foldersep)
+
+    return replaced.strip()
+
+
 def _build_edition_rename(item):
     """Build the new filename for an edition rename.
 
@@ -2079,12 +2179,6 @@ def _preview_reassign_movie(item):
     if not id_title:
         return {'error': 'Tier 2 did not identify a title'}
 
-    # Build destination folder name: "Title (Year)" or "Title, The (Year)"
-    if id_year:
-        new_folder = '%s (%s)' % (id_title, id_year)
-    else:
-        new_folder = id_title
-
     # Determine the movies root from the old path
     # old_path: /media/Movies/FolderName/file.mkv → movies_dir = /media/Movies
     old_path = item['file_path']
@@ -2114,12 +2208,18 @@ def _preview_reassign_movie(item):
             except (ValueError, IndexError):
                 pass
         res_label = resolution_label(actual_width, actual_height) if actual_height else ''
-        parts = [new_folder]
+        safe_title = re.sub(r'[\x00/\\:*?"<>|]', '', id_title)
+        parts = [safe_title]
+        if id_year:
+            parts[0] = '%s (%s)' % (safe_title, id_year)
         if res_label:
             parts.append(res_label)
         if id_imdb:
             parts.append(id_imdb)
         new_file = ' '.join(parts) + ext
+
+    # Build destination folder name using renamer's folder_name template
+    new_folder = _apply_folder_template(id_title, id_year)
 
     new_folder_path = os.path.join(movies_dir, new_folder)
     new_path = os.path.join(new_folder_path, new_file)
