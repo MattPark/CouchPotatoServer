@@ -1172,6 +1172,13 @@ input[type=text],textarea{-webkit-appearance:none}
 .page.settings .audit_action_btn.audit_tier2_btn{background:#1976d2;color:#fff;margin-left:8px}
 .page.settings .audit_action_btn.audit_tier2_btn:hover{opacity:.85}
 .page.settings .audit_action_btn.audit_tier2_running{opacity:.5;cursor:wait}
+.page.settings .audit_action_btn.audit_delete_btn{background:#c62828;color:#fff;margin-left:8px}
+.page.settings .audit_action_btn.audit_delete_btn:hover{opacity:.85}
+.page.settings .audit_action_btn.audit_reassign_btn{background:#1976d2;color:#fff;padding:4px 12px}
+.page.settings .audit_action_btn.audit_reassign_btn:hover{opacity:.85}
+.page.settings .audit_reassign_row{display:flex;align-items:center;gap:8px;margin-top:8px}
+.page.settings .audit_imdb_input{padding:4px 8px;border:1px solid rgba(0,0,0,.2);border-radius:3px;font-size:.85em;width:120px;font-family:monospace}
+.dark .page.settings .audit_imdb_input{background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.2);color:#fff}
 .page.settings .audit_pagination{display:flex;align-items:center;justify-content:center;gap:20px;padding:10px 0}
 .page.settings .audit_page_btn{padding:4px 12px;border:1px solid rgba(0,0,0,.15);border-radius:3px;cursor:pointer;font-size:.85em}
 .dark .page.settings .audit_page_btn{border-color:rgba(255,255,255,.15)}

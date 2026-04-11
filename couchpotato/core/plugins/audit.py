@@ -737,8 +737,16 @@ def check_container_title(container_title, folder_title, folder_year):
     # (e.g. "EVO", "g33k", "Manning", "Dread-Team", "ultimate-force").
     # Real scene names include a year.  Allow longer titles through since they
     # could be actual movie names (e.g. "What keeps you alive").
+    # Don't flag as a title mismatch, but DO return the parsed metadata so
+    # Tier 2 Strategy A can still attempt identification from it.
     if not meta_year and len(meta_title.split()) <= 3:
-        return None, None
+        parsed_meta = {
+            'title': meta_title,
+            'year': meta_year,
+            'screen_size': parsed.get('screen_size'),
+            'raw': container_title,
+        }
+        return None, parsed_meta
 
     parsed_meta = {
         'title': meta_title,
@@ -1217,9 +1225,25 @@ def identify_flagged_file(filepath, flags, container_title_parsed):
     if container_title_parsed and container_title_parsed.get('title'):
         meta = container_title_parsed
         title = meta['title']
-        # Only use if title or year differs from what was expected,
-        # AND the title isn't a junk encoder/group name
+        # Use the container title for identification if it looks like a real
+        # movie name (not junk) and doesn't match the folder title.  We check
+        # title_flag presence OR a direct mismatch because the short-no-year
+        # heuristic may suppress the title flag while still passing parsed
+        # metadata through for identification.
         has_title_flag = any(f['check'] == 'title' for f in flags)
+        if not has_title_flag:
+            # No title flag — check if the container title actually differs
+            # from the folder name (the flag may have been suppressed)
+            folder_name = os.path.basename(os.path.dirname(filepath))
+            m = FOLDER_RE.match(folder_name)
+            folder_title = m.group(1).strip() if m else folder_name
+            has_title_flag = not titles_match(title, folder_title)
+        # Skip single-word titles without a year — almost always encoder/group
+        # names (Dread-Team, ultimate-force) rather than real movie titles.
+        # Multi-word titles without a year (e.g. "Jimmy Vestvood") are more
+        # likely to be real movie names and worth trying.
+        if not meta.get('year') and len(title.split()) <= 1:
+            has_title_flag = False
         if has_title_flag and not is_junk_title(title) and len(title) > 3:
             identification = {
                 'method': 'container_title',
@@ -1282,6 +1306,77 @@ def identify_flagged_file(filepath, flags, container_title_parsed):
         }
 
     return identification
+
+
+# TMDB API key fallback (base64-encoded, same as CP's built-in default)
+_TMDB_API_KEYS = [
+    'ZTIyNGZlNGYzZmVjNWY3YjU1NzA2NDFmN2NkM2RmM2E=',
+    'ZjZiZDY4N2ZmYTYzY2QyODJiNmZmMmM2ODc3ZjI2Njk=',
+]
+
+
+def lookup_imdb_id(imdb_id, db_path=None):
+    """Look up a movie by IMDB ID.
+
+    First checks the local CP database, then falls back to the TMDB API.
+
+    Returns a dict with 'title', 'year', 'imdb_id' or None if not found.
+    """
+    import base64
+    import random
+
+    # Strategy 1: local CP database
+    if db_path:
+        try:
+            media_by_imdb, _, _ = load_cp_database(db_path)
+            if imdb_id in media_by_imdb:
+                entry = media_by_imdb[imdb_id]
+                return {
+                    'title': entry['title'],
+                    'year': entry.get('year'),
+                    'imdb_id': imdb_id,
+                    'source': 'cp_database',
+                }
+        except Exception:
+            pass
+
+    # Strategy 2: TMDB find API
+    if requests:
+        try:
+            api_key = base64.b64decode(
+                random.choice(_TMDB_API_KEYS)
+            ).decode('utf-8')
+            resp = requests.get(
+                'https://api.themoviedb.org/3/find/%s' % imdb_id,
+                params={
+                    'api_key': api_key,
+                    'external_source': 'imdb_id',
+                },
+                timeout=15,
+            )
+            if resp.ok:
+                data = resp.json()
+                movies = data.get('movie_results', [])
+                if movies:
+                    movie = movies[0]
+                    year = None
+                    release_date = movie.get('release_date', '')
+                    if release_date and len(release_date) >= 4:
+                        try:
+                            year = int(release_date[:4])
+                        except ValueError:
+                            pass
+                    return {
+                        'title': movie.get('title', ''),
+                        'year': year,
+                        'imdb_id': imdb_id,
+                        'tmdb_id': movie.get('id'),
+                        'source': 'tmdb',
+                    }
+        except Exception:
+            pass
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1974,7 +2069,7 @@ def _preview_reassign_movie(item):
         return {'error': 'No tier 2 identification data — run a tier 2 scan first'}
 
     method = ident.get('method', '')
-    if method not in ('container_title', 'srrdb_crc'):
+    if method not in ('container_title', 'srrdb_crc', 'manual'):
         return {'error': 'Tier 2 identification method "%s" cannot determine correct movie' % method}
 
     id_title = ident.get('identified_title', '')
@@ -2395,6 +2490,14 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             },
         })
 
+        addApiView('audit.reassign', self.reassignView, docs={
+            'desc': 'Manually reassign a flagged item to a different movie by IMDB ID',
+            'params': {
+                'item_id': {'desc': '12-char hex ID of the flagged item'},
+                'imdb_id': {'desc': 'IMDB ID of the correct movie (e.g. tt1234567)'},
+            },
+        })
+
         addEvent('audit.run_scan', self._run_scan)
         addEvent('audit.run_batch_fix', self._run_batch_fix)
 
@@ -2714,7 +2817,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             if not ident:
                 continue
             method = ident.get('method', '')
-            if method in ('container_title', 'srrdb_crc'):
+            if method in ('container_title', 'srrdb_crc', 'manual'):
                 tier2_identified += 1
             elif method == 'crc_not_found':
                 tier2_unidentified += 1
@@ -2901,6 +3004,82 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'identification': identification,
             'recommended_action': item['recommended_action'],
             'item': item,
+        }
+
+    def reassignView(self, item_id=None, imdb_id=None, **kwargs):
+        """API handler: manually reassign a flagged item by IMDB ID.
+
+        Looks up the movie by IMDB ID (CP database, then TMDB fallback),
+        sets the identification data on the item, recomputes the recommended
+        action, and returns a reassign_movie preview.
+        """
+        if not item_id:
+            return {'success': False, 'error': 'item_id is required'}
+        if not imdb_id:
+            return {'success': False, 'error': 'imdb_id is required'}
+
+        # Validate IMDB ID format
+        imdb_id = imdb_id.strip()
+        if not re.match(r'^tt\d{5,}$', imdb_id):
+            return {
+                'success': False,
+                'error': 'Invalid IMDB ID format (expected tt1234567): %s' % imdb_id,
+            }
+
+        item = self._find_item(item_id)
+        if not item:
+            return {'success': False, 'error': 'Item not found: %s' % item_id}
+
+        if item.get('fixed'):
+            return {'success': False, 'error': 'Item already fixed'}
+
+        # Look up movie info by IMDB ID
+        db_path = self._get_db_path()
+        movie_info = lookup_imdb_id(imdb_id, db_path=db_path)
+        if not movie_info:
+            return {
+                'success': False,
+                'error': 'Could not find movie for IMDB ID %s (not in CP database or TMDB)' % imdb_id,
+            }
+
+        log.info('Manual reassign for %s -> %s (%s) via %s', (
+            item.get('folder', item_id),
+            movie_info['title'],
+            movie_info.get('year', '?'),
+            movie_info.get('source', 'unknown'),
+        ))
+
+        # Set identification data
+        identification = {
+            'method': 'manual',
+            'identified_title': movie_info['title'],
+            'identified_year': movie_info.get('year'),
+            'identified_imdb': imdb_id,
+            'confidence': 'high',
+            'source': 'manual (%s)' % movie_info.get('source', 'lookup'),
+        }
+        item['identification'] = identification
+
+        # Recompute recommended action
+        item['recommended_action'] = compute_recommended_action(
+            item.get('flags', []), identification
+        )
+
+        # Persist
+        self._save_results()
+
+        # Generate preview
+        preview = _preview_reassign_movie(item)
+        if 'error' in preview:
+            return {'success': False, 'error': preview['error']}
+
+        return {
+            'success': True,
+            'item_id': item_id,
+            'identification': identification,
+            'recommended_action': item['recommended_action'],
+            'preview': preview,
+            'movie_info': movie_info,
         }
 
     def _run_batch_fix(self, action, items, dry_run=False):

@@ -1640,6 +1640,44 @@
 			opacity: .5;
 			cursor: wait;
 		}
+
+		&.audit_delete_btn {
+			background: #c62828;
+			color: #fff;
+			margin-left: 8px;
+
+			&:hover { opacity: .85; }
+		}
+
+		&.audit_reassign_btn {
+			background: #1976d2;
+			color: #fff;
+			padding: 4px 12px;
+
+			&:hover { opacity: .85; }
+		}
+	}
+
+	.audit_reassign_row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-top: 8px;
+	}
+
+	.audit_imdb_input {
+		padding: 4px 8px;
+		border: 1px solid rgba(0,0,0,.2);
+		border-radius: $border_radius;
+		font-size: .85em;
+		width: 120px;
+		font-family: monospace;
+
+		@include theme-dark {
+			background: rgba(255,255,255,.1);
+			border-color: rgba(255,255,255,.2);
+			color: #fff;
+		}
 	}
 
 	// Pagination
