@@ -740,7 +740,7 @@ _CONTAINER_EDITION_RE = re.compile(
     r'\b(extended|director.?s?\s*cut|unrated|uncut|special\s+edition|'
     r'assembly\s*cut|ultimate|redux|final\s+cut|international\s+cut|'
     r'alternate\s+cut|uncensored|criterion|remaster(?:ed)?|'
-    r'theatrical(?:\s+cut)?|limited|deluxe|superbit|imax)\b',
+    r'theatrical(?:\s+cut)?|deluxe|superbit|imax)\b',
     re.IGNORECASE,
 )
 
@@ -762,6 +762,115 @@ def _get_effective_edition(edition, container_title):
         if m:
             return m.group(1)
     return ''
+
+
+def _parse_edition_from_release(release_name):
+    """Parse edition info from a srrDB release name or container title source.
+
+    Unlike get_edition(), this searches the ENTIRE string (not just after the
+    year) because release names like 'Apocalypse.Now.Redux.1979...' have the
+    edition keyword before the year.  Uses the same EDITION_MAP keywords.
+
+    Returns the edition string (e.g. "Extended Edition") or ''.
+    """
+    if not release_name:
+        return ''
+    words = re.split(r'\W+', release_name.lower())
+    joined = '.'.join(words)
+
+    for key, tags in EDITION_MAP.items():
+        for tag in tags:
+            if isinstance(tag, tuple) and '.'.join(tag) in joined:
+                return key
+            elif isinstance(tag, str) and tag.lower() in words:
+                return key
+
+    # Fallback: catch arbitrary "<Word(s)> Cut" or "<Word(s)> Edition"
+    m = re.search(
+        r'[\.\s_\-]((?:[a-z]+[\.\s_\-]){0,2}(?:[a-z]+))[\.\s_\-](cut|edition)'
+        r'(?=[\.\s_\-]|$)',
+        release_name, re.IGNORECASE
+    )
+    if m:
+        name_part = re.sub(r'[\._\-]', ' ', m.group(1)).strip()
+        kind = m.group(2)
+        last_word = name_part.split()[-1].lower() if name_part else ''
+        if last_word and last_word not in EDITION_EXCLUDE:
+            return '%s %s' % (name_part.title(), kind.title())
+
+    return ''
+
+
+def _backfill_edition_from_tier2(result):
+    """Backfill detected_edition from tier 2 identification source.
+
+    After tier 2 identification, the srrDB release name or container title
+    source may contain edition info that wasn't available during tier 1.
+    This function:
+      1. Parses the identification source for edition keywords
+      2. Sets detected_edition on the item if not already set
+      3. If the edition is non-theatrical and the file runs longer than
+         expected, removes the runtime flag (false positive for extended cuts)
+      4. Adds an edition mismatch flag if the edition isn't in the filename
+
+    Args:
+        result: The audit item dict (modified in-place).
+
+    Returns:
+        The backfilled edition string, or '' if nothing was backfilled.
+    """
+    ident = result.get('identification')
+    if not ident:
+        return ''
+
+    # Only backfill if we don't already have an edition
+    if result.get('detected_edition'):
+        return ''
+
+    source = ident.get('source', '')
+    if not source:
+        return ''
+
+    edition = _parse_edition_from_release(source)
+    if not edition:
+        return ''
+
+    result['detected_edition'] = edition
+
+    # If non-theatrical edition and file runs LONGER, suppress runtime flag
+    if edition.lower() != 'theatrical':
+        actual_duration = result.get('actual', {}).get('duration_min', 0)
+        expected_runtime = result.get('expected', {}).get('runtime_min', 0)
+        if (actual_duration and expected_runtime
+                and actual_duration > expected_runtime):
+            old_count = len(result.get('flags', []))
+            result['flags'] = [
+                f for f in result.get('flags', [])
+                if f['check'] != 'runtime'
+            ]
+            if len(result['flags']) != old_count:
+                result['flag_count'] = len(result['flags'])
+
+    # Add edition mismatch flag if edition not in filename
+    filename = result.get('file', '')
+    filename_edition = get_edition(filename)
+    if not filename_edition:
+        # Check that we don't already have an edition flag
+        has_edition_flag = any(
+            f['check'] == 'edition' for f in result.get('flags', [])
+        )
+        if not has_edition_flag:
+            result['flags'].append({
+                'check': 'edition',
+                'severity': 'MEDIUM',
+                'detail': (
+                    'Edition "%s" found in release name but not in filename'
+                    % edition
+                ),
+            })
+            result['flag_count'] = len(result['flags'])
+
+    return edition
 
 
 def check_container_title(container_title, folder_title, folder_year):
@@ -1635,6 +1744,11 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
                 'reason': 'high_confidence_tier1',
                 'detail': 'Tier 1 flags sufficient; use force_tier2=1 to override',
             }
+
+        # Backfill edition from tier 2 source (srrDB release name or
+        # container title).  This can suppress false-positive runtime flags
+        # for extended/director's cuts and add edition mismatch flags.
+        _backfill_edition_from_tier2(result)
 
     # Compute recommended action from flags + identification
     result['recommended_action'] = compute_recommended_action(
@@ -3137,9 +3251,14 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         # Update item in-place
         item['identification'] = identification
 
+        # Backfill edition from tier 2 source (srrDB release name or
+        # container title).  This can suppress false-positive runtime flags
+        # for extended/director's cuts and add edition mismatch flags.
+        _backfill_edition_from_tier2(item)
+
         # Recompute recommended action with the new identification data
         item['recommended_action'] = compute_recommended_action(
-            flags, identification
+            item.get('flags', []), identification
         )
 
         # Persist
