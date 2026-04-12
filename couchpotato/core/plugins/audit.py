@@ -401,6 +401,8 @@ def extract_file_meta(filepath):
     general = None
     video = None
     for t in tracks:
+        if not isinstance(t, dict):
+            continue
         ttype = t.get('@type', '')
         if ttype == 'General' and general is None:
             general = t
@@ -1548,9 +1550,10 @@ def find_video_files(folder_path):
     files = []
     try:
         for entry in os.listdir(folder_path):
+            full_path = os.path.join(folder_path, entry)
             ext = os.path.splitext(entry)[1].lower()
-            if ext in VIDEO_EXTENSIONS:
-                files.append(os.path.join(folder_path, entry))
+            if ext in VIDEO_EXTENSIONS and os.path.isfile(full_path):
+                files.append(full_path)
     except OSError:
         pass
     return files
