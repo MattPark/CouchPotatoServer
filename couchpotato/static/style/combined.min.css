@@ -1140,6 +1140,7 @@ input[type=text],textarea{-webkit-appearance:none}
 .page.settings .audit_severity_badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:.7em;font-weight:700;text-transform:uppercase;flex-shrink:0}
 .page.settings .audit_severity_badge.audit_severity_high{background:rgba(244,67,54,.2);color:#f44336}
 .page.settings .audit_severity_badge.audit_severity_medium{background:rgba(255,152,0,.2);color:#ff9800}
+.page.settings .audit_severity_badge.audit_severity_low{background:rgba(76,175,80,.2);color:#4caf50}
 .page.settings .audit_item_flags{display:flex;gap:4px;flex-shrink:0}
 .page.settings .audit_flag_icon{display:inline-block;padding:1px 4px;border-radius:3px;font-size:.65em;font-weight:700;background:rgba(0,0,0,.1);opacity:.7}
 .dark .page.settings .audit_flag_icon{background:rgba(255,255,255,.1)}

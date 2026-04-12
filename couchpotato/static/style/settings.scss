@@ -1454,6 +1454,11 @@
 			background: rgba(255,152,0,.2);
 			color: #ff9800;
 		}
+
+		&.audit_severity_low {
+			background: rgba(76,175,80,.2);
+			color: #4caf50;
+		}
 	}
 
 	.audit_item_flags {
