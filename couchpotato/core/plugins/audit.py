@@ -1105,6 +1105,25 @@ def parse_guessit_tokens(filename):
     }
 
 
+def _title_to_thename(title):
+    """Convert a title from namethe format back to thename format.
+
+    Reverses the article-at-end convention used in folder names:
+        'Monster, The'              → 'The Monster'
+        'Affair To Remember, An'    → 'An Affair To Remember'
+        'Christmas Carol, A'        → 'A Christmas Carol'
+        'The Monster'               → 'The Monster'  (already correct)
+        'Some Movie, No Article'    → 'Some Movie, No Article'  (unchanged)
+
+    Only moves 'The', 'An', or 'A' — other trailing comma phrases are left as-is.
+    """
+    for article in ['The', 'An', 'A']:
+        suffix = ', ' + article
+        if title.endswith(suffix):
+            return article + ' ' + title[:-len(suffix)]
+    return title
+
+
 def build_expected_filename(item, template, replace_doubles=True, separator=''):
     """Build the expected filename from renamer template and item data.
 
@@ -1118,7 +1137,10 @@ def build_expected_filename(item, template, replace_doubles=True, separator=''):
     _, ext = os.path.splitext(old_file)
     ext = ext.lstrip('.')
 
-    movie_name = item['expected'].get('title', '')
+    # Use db_title (original form) when available; reverse-transform namethe
+    # folder titles as fallback so <thename> and <namethe> resolve correctly
+    movie_name = (item['expected'].get('db_title')
+                  or _title_to_thename(item['expected'].get('title', '')))
     movie_name = re.sub(r'[\x00/\\:*?"<>|]', '', movie_name)
 
     name_the = movie_name
@@ -2039,7 +2061,10 @@ def _apply_renamer_template(item, quality_override=None, edition_override=None):
     ext = ext.lstrip('.')
 
     # Build replacements dict matching renamer.py lines 430-457
-    movie_name = item['expected'].get('title', '')
+    # Use db_title (original form) when available; reverse-transform namethe
+    # folder titles as fallback so <thename> and <namethe> resolve correctly
+    movie_name = (item['expected'].get('db_title')
+                  or _title_to_thename(item['expected'].get('title', '')))
     # Remove chars illegal in filenames
     movie_name = re.sub(r'[\x00/\\:*?"<>|]', '', movie_name)
 
