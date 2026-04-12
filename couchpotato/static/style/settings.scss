@@ -1381,6 +1381,7 @@
 		border-radius: $border_radius;
 		margin-bottom: $padding/4;
 		overflow: hidden;
+		transition: opacity .3s ease;
 
 		@include theme-dark {
 			border-color: rgba(255,255,255,.1);
@@ -1648,6 +1649,14 @@
 
 		&.audit_delete_btn {
 			background: #c62828;
+			color: #fff;
+			margin-left: 8px;
+
+			&:hover { opacity: .85; }
+		}
+
+		&.audit_ignore_btn {
+			background: #757575;
 			color: #fff;
 			margin-left: 8px;
 

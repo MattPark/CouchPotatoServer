@@ -392,6 +392,7 @@ var AuditSettingTab = new Class({
 			{ label: 'Flagged', value: stats.total_flagged || 0 },
 			{ label: 'Clean', value: stats.total_clean || 0 },
 			{ label: 'Fixed', value: stats.total_fixed || 0 },
+			{ label: 'Ignored', value: stats.total_ignored || 0 },
 			{ label: 'Errors', value: stats.total_errors || 0 }
 		];
 
@@ -719,6 +720,15 @@ var AuditSettingTab = new Class({
 				'events': { 'click': function(e){
 					e.stop();
 					self.showFixPreview(item.item_id, 'delete_wrong');
+				}}
+			}).inject(actions_row);
+
+			// Ignore button
+			new Element('a.audit_action_btn.audit_ignore_btn', {
+				'text': 'Ignore',
+				'events': { 'click': function(e){
+					e.stop();
+					self.ignoreItem(item.item_id, card);
 				}}
 			}).inject(actions_row);
 
@@ -1094,6 +1104,30 @@ var AuditSettingTab = new Class({
 					self.loadStats();
 				} else {
 					alert('Fix failed: ' + (json ? json.error || 'Unknown error' : 'No response'));
+				}
+			}
+		});
+	},
+
+	ignoreItem: function(item_id, card){
+		var self = this;
+
+		if(!confirm('Ignore this item? It won\'t appear in results until the file changes.')){
+			return;
+		}
+
+		Api.request('audit.ignore', {
+			'data': { 'item_id': item_id },
+			'onComplete': function(json){
+				if(json && json.success){
+					// Remove card with fade animation
+					card.setStyle('opacity', 0);
+					(function(){
+						card.destroy();
+						self.loadStats();
+					}).delay(300);
+				} else {
+					alert('Ignore failed: ' + (json ? json.error || 'Unknown error' : 'No response'));
 				}
 			}
 		});

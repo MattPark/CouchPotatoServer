@@ -34,6 +34,9 @@ API (when running inside CouchPotato):
   GET /api/{key}/audit.fix?item_id=&action=&confirm=1
   GET /api/{key}/audit.fix.batch?action=&filter_check=&confirm=1&dry_run=1
   GET /api/{key}/audit.fix.progress
+  GET /api/{key}/audit.ignore?item_id=&reason=
+  GET /api/{key}/audit.unignore?fingerprint=
+  GET /api/{key}/audit.ignored
 """
 
 import argparse
@@ -592,6 +595,22 @@ def get_edition(filename):
 def compute_item_id(file_path):
     """Compute a stable ID for a flagged item: SHA256 of file_path, 12 hex chars."""
     return hashlib.sha256(file_path.encode('utf-8')).hexdigest()[:12]
+
+
+def compute_file_fingerprint(file_path):
+    """Compute a fingerprint for a file: file_size + SHA256 of first 64KB.
+
+    Returns '<size>:<sha256hex16>' or None if file is unreadable.
+    ~1ms per file.
+    """
+    try:
+        size = os.path.getsize(file_path)
+        h = hashlib.sha256()
+        with open(file_path, 'rb') as f:
+            h.update(f.read(65536))
+        return '%d:%s' % (size, h.hexdigest()[:16])
+    except (OSError, IOError):
+        return None
 
 
 def compute_recommended_action(flags, identification=None):
@@ -1745,6 +1764,7 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
 
     result = {
         'item_id': compute_item_id(filepath),
+        'file_fingerprint': compute_file_fingerprint(filepath),
         'folder': folder_name,
         'file': filename,
         'file_path': filepath,
@@ -2721,6 +2741,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
     in_progress = False
     last_report = None
     _cancel = [False]   # mutable list so the scan loop can observe changes
+    ignored = {}        # fingerprint -> {reason, ignored_at, item_id, title}
 
     # Fix progress tracking
     fix_in_progress = False
@@ -2815,6 +2836,25 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             },
         })
 
+        addApiView('audit.ignore', self.ignoreView, docs={
+            'desc': 'Ignore a flagged item so it no longer appears in results',
+            'params': {
+                'item_id': {'desc': '12-char hex ID of the flagged item'},
+                'reason': {'desc': 'Optional reason for ignoring'},
+            },
+        })
+
+        addApiView('audit.unignore', self.unignoreView, docs={
+            'desc': 'Un-ignore a previously ignored item',
+            'params': {
+                'fingerprint': {'desc': 'File fingerprint of the ignored item'},
+            },
+        })
+
+        addApiView('audit.ignored', self.ignoredView, docs={
+            'desc': 'List all currently ignored items',
+        })
+
         addEvent('audit.run_scan', self._run_scan)
         addEvent('audit.run_batch_fix', self._run_batch_fix)
 
@@ -2830,6 +2870,36 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         """Get the path to the append-only audit actions log."""
         data_dir = Env.get('data_dir')
         return os.path.join(data_dir, 'audit_actions.jsonl')
+
+    def _get_ignored_path(self):
+        """Get the path to the ignored items file."""
+        data_dir = Env.get('data_dir')
+        return os.path.join(data_dir, 'audit_ignored.json')
+
+    def _load_ignored(self):
+        """Load ignored items from disk."""
+        path = self._get_ignored_path()
+        if not os.path.isfile(path):
+            self.ignored = {}
+            return
+        try:
+            with open(path, 'r') as f:
+                self.ignored = json.load(f)
+            log.info('Loaded %s ignored audit items from %s', (len(self.ignored), path))
+        except Exception as e:
+            log.error('Failed to load ignored audit items: %s', (e,))
+            self.ignored = {}
+
+    def _save_ignored(self):
+        """Persist ignored items to disk."""
+        path = self._get_ignored_path()
+        try:
+            tmp_path = path + '.tmp'
+            with open(tmp_path, 'w') as f:
+                json.dump(self.ignored, f)
+            os.replace(tmp_path, path)
+        except Exception as e:
+            log.error('Failed to save ignored audit items: %s', (e,))
 
     def _save_results(self):
         """Persist last_report to disk."""
@@ -2951,6 +3021,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         # Reconcile any pending actions from the append-only log
         self._reconcile_actions()
 
+        # Load ignored items
+        self._load_ignored()
+
     def _get_movies_dir(self):
         """Get the first library directory from manage settings."""
         dirs = Env.setting('library', section='manage', default=[])
@@ -3025,6 +3098,11 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             return []
 
         items = self.last_report.get('flagged', [])
+
+        # Filter out ignored items (by fingerprint)
+        if self.ignored:
+            items = [i for i in items
+                     if i.get('file_fingerprint') not in self.ignored]
 
         # Filter by fixed status
         if filter_fixed == 'true':
@@ -3203,7 +3281,16 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         if not self.last_report:
             return {'stats': None}
 
-        flagged = self.last_report.get('flagged', [])
+        all_flagged = self.last_report.get('flagged', [])
+
+        # Separate ignored items
+        total_ignored = 0
+        flagged = []
+        for item in all_flagged:
+            if self.ignored and item.get('file_fingerprint') in self.ignored:
+                total_ignored += 1
+            else:
+                flagged.append(item)
 
         # Count by check type
         check_counts = {}
@@ -3255,15 +3342,88 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 'total_clean': total_scanned - total_flagged,
                 'total_errors': self.last_report.get('total_errors', 0),
                 'total_fixed': total_fixed,
+                'total_ignored': total_ignored,
                 'checks': check_counts,
                 'severity': severity_counts,
                 'actions': action_counts,
                 'tier2': {
                     'identified': tier2_identified,
                     'unidentified': tier2_unidentified,
-                    'skipped': tier2_skipped,
+                     'skipped': tier2_skipped,
                 },
             },
+        }
+
+    def ignoreView(self, item_id=None, reason='', **kwargs):
+        """API handler: ignore a flagged item by its file fingerprint."""
+        if not item_id:
+            return {'success': False, 'error': 'item_id is required'}
+
+        item = self._find_item(item_id)
+        if not item:
+            return {'success': False, 'error': 'Item not found: %s' % item_id}
+
+        fingerprint = item.get('file_fingerprint')
+        if not fingerprint:
+            # Compute fingerprint on-the-fly for items from older scans
+            filepath = item.get('file_path', '')
+            if filepath and os.path.isfile(filepath):
+                fingerprint = compute_file_fingerprint(filepath)
+                item['file_fingerprint'] = fingerprint
+            if not fingerprint:
+                return {'success': False, 'error': 'Could not compute fingerprint'}
+
+        self.ignored[fingerprint] = {
+            'reason': reason or '',
+            'ignored_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+            'item_id': item_id,
+            'title': '%s / %s' % (item.get('folder', ''), item.get('file', '')),
+        }
+        self._save_ignored()
+
+        log.info('Ignored audit item %s (fingerprint %s): %s',
+                 (item_id, fingerprint, item.get('folder', '')))
+
+        return {
+            'success': True,
+            'fingerprint': fingerprint,
+            'total_ignored': len(self.ignored),
+        }
+
+    def unignoreView(self, fingerprint=None, **kwargs):
+        """API handler: un-ignore a previously ignored item."""
+        if not fingerprint:
+            return {'success': False, 'error': 'fingerprint is required'}
+
+        if fingerprint not in self.ignored:
+            return {'success': False, 'error': 'Fingerprint not found in ignored list'}
+
+        removed = self.ignored.pop(fingerprint)
+        self._save_ignored()
+
+        log.info('Un-ignored audit item (fingerprint %s): %s',
+                 (fingerprint, removed.get('title', '')))
+
+        return {
+            'success': True,
+            'total_ignored': len(self.ignored),
+        }
+
+    def ignoredView(self, **kwargs):
+        """API handler: list all currently ignored items."""
+        items = []
+        for fp, info in self.ignored.items():
+            items.append({
+                'fingerprint': fp,
+                'title': info.get('title', ''),
+                'reason': info.get('reason', ''),
+                'ignored_at': info.get('ignored_at', ''),
+                'item_id': info.get('item_id', ''),
+            })
+        items.sort(key=lambda x: x.get('ignored_at', ''), reverse=True)
+        return {
+            'ignored': items,
+            'total': len(items),
         }
 
     def _find_item(self, item_id):
