@@ -2780,6 +2780,11 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         data_dir = Env.get('data_dir')
         return os.path.join(data_dir, 'audit_results.json')
 
+    def _get_actions_path(self):
+        """Get the path to the append-only audit actions log."""
+        data_dir = Env.get('data_dir')
+        return os.path.join(data_dir, 'audit_actions.jsonl')
+
     def _save_results(self):
         """Persist last_report to disk."""
         if not self.last_report:
@@ -2794,6 +2799,95 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         except Exception as e:
             log.error('Failed to save audit results: %s', (e,))
 
+    def _append_action(self, item, action, details, success=True):
+        """Append a single fix action to the audit actions log.
+
+        Uses append-only writes (O(1) regardless of total report size)
+        instead of re-serializing the entire audit_results.json on each fix.
+        Actions are reconciled into the main report on startup and at the
+        end of batch operations.
+        """
+        actions_path = self._get_actions_path()
+        record = {
+            'item_id': item.get('item_id', ''),
+            'folder': item.get('folder', ''),
+            'action': action,
+            'success': success,
+            'timestamp': time.time(),
+            'details': details,
+        }
+        try:
+            with open(actions_path, 'a') as f:
+                f.write(json.dumps(record) + '\n')
+        except Exception as e:
+            log.error('Failed to append audit action: %s', (e,))
+
+    def _reconcile_actions(self):
+        """Replay the append-only actions log into the in-memory report.
+
+        Called on startup (after _load_results) and at the end of batch
+        operations.  Applies any un-reconciled fix actions to the in-memory
+        last_report, saves the full report once, then truncates the actions
+        log file.
+        """
+        actions_path = self._get_actions_path()
+        if not os.path.isfile(actions_path):
+            return
+        if not self.last_report or 'flagged' not in self.last_report:
+            return
+
+        # Build lookup by item_id for O(1) matching
+        items_by_id = {}
+        for item in self.last_report['flagged']:
+            iid = item.get('item_id', '')
+            if iid:
+                items_by_id[iid] = item
+
+        applied = 0
+        try:
+            with open(actions_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if not record.get('success', False):
+                        continue  # Skip failed actions during reconciliation
+                    item_id = record.get('item_id', '')
+                    if item_id in items_by_id:
+                        item = items_by_id[item_id]
+                        if not item.get('fixed'):
+                            item['fixed'] = {
+                                'action': record.get('action', ''),
+                                'timestamp': record.get('timestamp', 0),
+                                'details': record.get('details', {}),
+                            }
+                            new_path = record.get('details', {}).get('new_path')
+                            if new_path:
+                                item['file_path'] = new_path
+                            applied += 1
+        except Exception as e:
+            log.error('Failed to read audit actions log: %s', (e,))
+            return
+
+        if applied:
+            log.info('Reconciled %s actions from action log', (applied,))
+            self._save_results()
+
+        # Truncate the actions file
+        self._truncate_actions()
+
+    def _truncate_actions(self):
+        """Truncate the audit actions log file."""
+        actions_path = self._get_actions_path()
+        try:
+            open(actions_path, 'w').close()
+        except OSError:
+            pass
+
     def _load_results(self):
         """Load persisted results from disk on startup."""
         results_path = self._get_results_path()
@@ -2807,6 +2901,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         except Exception as e:
             log.error('Failed to load audit results: %s', (e,))
             self.last_report = None
+
+        # Reconcile any pending actions from the append-only log
+        self._reconcile_actions()
 
     def _get_movies_dir(self):
         """Get the first library directory from manage settings."""
@@ -3136,7 +3233,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         return None
 
     def _mark_fixed(self, item, action, details):
-        """Mark a flagged item as fixed and persist."""
+        """Mark a flagged item as fixed and persist via append-only log."""
         item['fixed'] = {
             'action': action,
             'timestamp': time.time(),
@@ -3145,7 +3242,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         # Update the file_path if it changed (for subsequent operations)
         if 'new_path' in details:
             item['file_path'] = details['new_path']
-        self._save_results()
+        # Append to actions log (O(1)) instead of rewriting full report
+        self._append_action(item, action, details)
 
     def _apply_reset_status(self, item, reset_status):
         """Apply a status change to the original movie in the CP database.
@@ -3510,6 +3608,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                     failed += 1
                     log.error('Batch fix failed for %s: %s',
                               (item.get('folder', ''), details.get('error', '')))
+                    self._append_action(item, action, details, success=False)
 
                 results.append({
                     'item_id': item.get('item_id', ''),
@@ -3531,8 +3630,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         }
 
         if not dry_run:
-            # Save results after batch completes
+            # Save results after batch completes and clear the actions log
             self._save_results()
+            self._truncate_actions()
 
         return results
 
