@@ -163,6 +163,10 @@ EDITION_MAP = {
     "Black & Chrome": [('black', 'chrome'), ('black', 'and', 'chrome')],
 }
 
+# Short single-word tags that are ambiguous and must only match AFTER
+# the year position to avoid false positives (e.g. 'dc' matching DC Comics)
+EDITION_AFTER_YEAR_ONLY = {'dc'}
+
 # Words that should not be treated as edition names when followed by Cut/Edition
 EDITION_EXCLUDE = {
     'blu', 'ray', 'web', 'hd', 'sd', 'uhd', 'dvd', 'bd', 'hdr', 'tax',
@@ -773,6 +777,9 @@ def _parse_edition_from_release(release_name):
     year) because release names like 'Apocalypse.Now.Redux.1979...' have the
     edition keyword before the year.  Uses the same EDITION_MAP keywords.
 
+    Tags in EDITION_AFTER_YEAR_ONLY (e.g. 'dc') are only matched after the
+    year to avoid false positives like 'DC' in 'DC Comics' movie titles.
+
     Returns the edition string (e.g. "Extended Edition") or ''.
     """
     if not release_name:
@@ -780,12 +787,26 @@ def _parse_edition_from_release(release_name):
     words = re.split(r'\W+', release_name.lower())
     joined = '.'.join(words)
 
+    # Find year position for gating ambiguous tags
+    year_idx = 0
+    for i, w in enumerate(words):
+        if re.match(r'^(19|20)\d{2}$', w):
+            year_idx = i
+            break
+    after_year_words = words[year_idx:] if year_idx else []
+
     for key, tags in EDITION_MAP.items():
         for tag in tags:
             if isinstance(tag, tuple) and '.'.join(tag) in joined:
                 return key
-            elif isinstance(tag, str) and tag.lower() in words:
-                return key
+            elif isinstance(tag, str):
+                tag_lower = tag.lower()
+                if tag_lower in EDITION_AFTER_YEAR_ONLY:
+                    # Ambiguous tag — only match after the year
+                    if after_year_words and tag_lower in after_year_words:
+                        return key
+                elif tag_lower in words:
+                    return key
 
     # Fallback: catch arbitrary "<Word(s)> Cut" or "<Word(s)> Edition"
     m = re.search(
