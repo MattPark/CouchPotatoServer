@@ -723,12 +723,26 @@ var AuditSettingTab = new Class({
 				}}
 			}).inject(actions_row);
 
-			// Ignore button
-			new Element('a.audit_action_btn.audit_ignore_btn', {
+			// Ignore button (two-click confirm: first click arms, second click executes)
+			var ignore_btn = new Element('a.audit_action_btn.audit_ignore_btn', {
 				'text': 'Ignore',
 				'events': { 'click': function(e){
 					e.stop();
-					self.ignoreItem(item.item_id, card);
+					if(ignore_btn.hasClass('confirming')){
+						self.ignoreItem(item.item_id, card);
+					} else {
+						ignore_btn.addClass('confirming');
+						ignore_btn.set('text', 'Confirm?');
+						// Reset on any outside click
+						var reset = function(ev){
+							if(ev.target !== ignore_btn){
+								ignore_btn.removeClass('confirming');
+								ignore_btn.set('text', 'Ignore');
+								document.body.removeEvent('click', reset);
+							}
+						};
+						document.body.addEvent('click', reset);
+					}
 				}}
 			}).inject(actions_row);
 
@@ -1111,10 +1125,6 @@ var AuditSettingTab = new Class({
 
 	ignoreItem: function(item_id, card){
 		var self = this;
-
-		if(!confirm('Ignore this item? It won\'t appear in results until the file changes.')){
-			return;
-		}
 
 		Api.request('audit.ignore', {
 			'data': { 'item_id': item_id },

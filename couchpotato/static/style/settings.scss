@@ -1661,6 +1661,11 @@
 			margin-left: 8px;
 
 			&:hover { opacity: .85; }
+
+			&.confirming {
+				background: #c62828;
+				animation: audit-pulse .6s ease-in-out infinite alternate;
+			}
 		}
 
 		&.audit_reassign_btn {
@@ -2054,4 +2059,9 @@
 			}
 		}
 	}
+}
+
+@keyframes audit-pulse {
+	from { opacity: 1; }
+	to { opacity: .7; }
 }
