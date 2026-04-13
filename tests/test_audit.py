@@ -9,6 +9,7 @@ Tests cover:
   - False positive protection (Cut Bank, Uncut Gems, DC Comics, etc.)
   - Plex {edition-X} tag extraction
   - EDITION_AFTER_YEAR_ONLY gating
+  - compute_recommended_action(): same-title / year correction logic
 """
 
 from couchpotato.core.plugins.audit import (
@@ -16,6 +17,7 @@ from couchpotato.core.plugins.audit import (
     _parse_edition_from_release,
     _detect_edition_from_words,
     _edition_fallback_regex,
+    compute_recommended_action,
 )
 import re
 
@@ -557,3 +559,229 @@ class TestEditionIntegration:
             'X-Men.Days.of.Future.Past.2014.THE.ROGUE.CUT.1080p.BluRay.mkv'
         )
         assert result == 'Rogue Cut'
+
+
+# ===========================================================================
+# compute_recommended_action — same-title / year correction logic
+# ===========================================================================
+
+class TestComputeRecommendedAction:
+    """Tests for compute_recommended_action() with expected data."""
+
+    # Helper to build flags and identification dicts
+    @staticmethod
+    def _flags(*checks):
+        return [{'check': c, 'severity': 'MEDIUM', 'detail': 'test'} for c in checks]
+
+    @staticmethod
+    def _ident(method, title=None, year=None, imdb=None):
+        d = {'method': method}
+        if title:
+            d['identified_title'] = title
+        if year:
+            d['identified_year'] = year
+        if imdb:
+            d['identified_imdb'] = imdb
+        return d
+
+    @staticmethod
+    def _expected(title='Test Movie', year=2020, db_title=None):
+        return {
+            'title': title,
+            'year': year,
+            'db_title': db_title,
+            'resolution': '1080p',
+        }
+
+    # -- Basic behavior (no expected data — backward compatibility) --
+
+    def test_no_expected_imdb_returns_reassign(self):
+        """Without expected data, IMDB match → reassign (backward compat)."""
+        flags = self._flags('title')
+        ident = self._ident('container_title', title='Foo', imdb='tt1234567')
+        assert compute_recommended_action(flags, ident) == 'reassign_movie'
+
+    def test_no_expected_title_only_returns_reassign(self):
+        """Without expected data, title-only match → reassign (backward compat)."""
+        flags = self._flags('title')
+        ident = self._ident('container_title', title='Foo')
+        assert compute_recommended_action(flags, ident) == 'reassign_movie'
+
+    # -- Same title, same year → fall through to flag-based logic --
+
+    def test_same_title_same_year_template_flag(self):
+        """Same title + same year with template flag → rename_template."""
+        flags = self._flags('title', 'template')
+        ident = self._ident('container_title', title='Test Movie', year=2020)
+        expected = self._expected('Test Movie', 2020)
+        assert compute_recommended_action(flags, ident, expected) == 'rename_template'
+
+    def test_same_title_same_year_no_template_flag(self):
+        """Same title + same year without template flag, only title flag → needs_tier2 fallthrough."""
+        # With only a title flag and identification present, it falls through
+        # to flag-based logic.  'title' without 'template' and WITH identification
+        # → needs_tier2 (but identification is present so it skips the tier2 check)
+        # Actually: no template flag + title flag + identification present
+        # → falls through tier 2 block → 'title' in checks → needs_tier2 if no ident,
+        #   but ident is present, so hits the general 'title' check
+        flags = self._flags('title')
+        ident = self._ident('container_title', title='Test Movie', year=2020)
+        expected = self._expected('Test Movie', 2020)
+        # Falls through tier 2 (same title/year), then hits 'title' in checks
+        # at line 796 → needs_tier2 (since no template flag)
+        result = compute_recommended_action(flags, ident, expected)
+        assert result == 'needs_tier2'
+
+    def test_same_title_same_year_resolution_flag(self):
+        """Same title + same year with resolution flag → rename_resolution."""
+        flags = self._flags('resolution')
+        ident = self._ident('container_title', title='Test Movie', year=2020)
+        expected = self._expected('Test Movie', 2020)
+        assert compute_recommended_action(flags, ident, expected) == 'rename_resolution'
+
+    # -- Same title, year within ±1 → rename_template --
+
+    def test_same_title_year_off_by_one_high(self):
+        """Same title, identified year 1 higher → rename_template."""
+        flags = self._flags('title')
+        ident = self._ident('container_title', title='55 Steps', year=2018)
+        expected = self._expected('55 Steps', 2017)
+        assert compute_recommended_action(flags, ident, expected) == 'rename_template'
+
+    def test_same_title_year_off_by_one_low(self):
+        """Same title, identified year 1 lower → rename_template."""
+        flags = self._flags('title')
+        ident = self._ident('container_title', title='The Matrix', year=1998)
+        expected = self._expected('The Matrix', 1999)
+        assert compute_recommended_action(flags, ident, expected) == 'rename_template'
+
+    def test_same_title_year_off_by_one_srrdb(self):
+        """Same title, year ±1 via srrdb_crc method → rename_template."""
+        flags = self._flags('title')
+        ident = self._ident('srrdb_crc', title='Blade Runner', year=2016, imdb='tt1234')
+        expected = self._expected('Blade Runner', 2017)
+        assert compute_recommended_action(flags, ident, expected) == 'rename_template'
+
+    # -- Same title, year beyond ±1 → reassign_movie (likely a remake) --
+
+    def test_same_title_year_diff_two(self):
+        """Same title, year off by 2 → reassign_movie (could be remake)."""
+        flags = self._flags('title')
+        ident = self._ident('container_title', title='Dune', year=2021)
+        expected = self._expected('Dune', 2019)
+        assert compute_recommended_action(flags, ident, expected) == 'reassign_movie'
+
+    def test_same_title_year_diff_large(self):
+        """Same title, large year difference → reassign_movie (remake)."""
+        flags = self._flags('title')
+        ident = self._ident('container_title', title='Dune', year=2021)
+        expected = self._expected('Dune', 1984)
+        assert compute_recommended_action(flags, ident, expected) == 'reassign_movie'
+
+    # -- Different title → reassign_movie --
+
+    def test_different_title_returns_reassign(self):
+        """Different titles → reassign_movie regardless of year."""
+        flags = self._flags('title')
+        ident = self._ident('container_title', title='Blade Runner', year=2017)
+        expected = self._expected('Blade Runner 2049', 2017)
+        assert compute_recommended_action(flags, ident, expected) == 'reassign_movie'
+
+    def test_completely_different_title(self):
+        """Completely different movie → reassign_movie."""
+        flags = self._flags('title')
+        ident = self._ident('container_title', title='The Avengers', year=2012, imdb='tt0848228')
+        expected = self._expected('Iron Man', 2008)
+        assert compute_recommended_action(flags, ident, expected) == 'reassign_movie'
+
+    # -- IMDB-only identification (no title) → reassign_movie --
+
+    def test_imdb_only_no_title(self):
+        """IMDB-only match without identified title → reassign_movie."""
+        flags = self._flags('title')
+        ident = self._ident('container_title', imdb='tt0848228')
+        expected = self._expected('Iron Man', 2008)
+        assert compute_recommended_action(flags, ident, expected) == 'reassign_movie'
+
+    # -- Non-identification methods --
+
+    def test_crc_not_found_returns_manual(self):
+        """CRC not found → manual_review."""
+        flags = self._flags('title')
+        ident = self._ident('crc_not_found')
+        expected = self._expected()
+        assert compute_recommended_action(flags, ident, expected) == 'manual_review'
+
+    def test_tv_episode_detected(self):
+        """TV episode detected → delete_wrong."""
+        flags = self._flags('title')
+        ident = self._ident('tv_episode_detected')
+        expected = self._expected()
+        assert compute_recommended_action(flags, ident, expected) == 'delete_wrong'
+
+    def test_skipped_falls_through(self):
+        """Skipped method falls through to flag-based logic."""
+        flags = self._flags('template')
+        ident = self._ident('skipped')
+        expected = self._expected()
+        assert compute_recommended_action(flags, ident, expected) == 'rename_template'
+
+    # -- TV episode flag (no identification needed) --
+
+    def test_tv_episode_flag(self):
+        """TV episode flag → delete_wrong regardless of other flags."""
+        flags = self._flags('tv_episode', 'title')
+        assert compute_recommended_action(flags) == 'delete_wrong'
+
+    # -- No identification, flag-based --
+
+    def test_no_ident_title_flag(self):
+        """Title flag without identification → needs_tier2."""
+        flags = self._flags('title')
+        assert compute_recommended_action(flags) == 'needs_tier2'
+
+    def test_no_ident_template_and_title(self):
+        """Template + title without identification → needs_tier2."""
+        flags = self._flags('template', 'title')
+        assert compute_recommended_action(flags) == 'needs_tier2'
+
+    def test_no_ident_template_only(self):
+        """Template flag alone without identification → rename_template."""
+        flags = self._flags('template')
+        assert compute_recommended_action(flags) == 'rename_template'
+
+    def test_no_ident_resolution_only(self):
+        """Resolution flag alone → rename_resolution."""
+        flags = self._flags('resolution')
+        assert compute_recommended_action(flags) == 'rename_resolution'
+
+    def test_no_ident_edition_only(self):
+        """Edition flag alone → rename_edition."""
+        flags = self._flags('edition')
+        assert compute_recommended_action(flags) == 'rename_edition'
+
+    # -- Same title, no year on either side → falls through --
+
+    def test_same_title_no_years(self):
+        """Same title, neither side has year → falls through (confirmed)."""
+        flags = self._flags('resolution')
+        ident = self._ident('container_title', title='Test Movie')
+        expected = self._expected('Test Movie', year=None)
+        assert compute_recommended_action(flags, ident, expected) == 'rename_resolution'
+
+    def test_same_title_only_ident_has_year(self):
+        """Same title, only identification has year → falls through (can't compare)."""
+        flags = self._flags('template')
+        ident = self._ident('container_title', title='Test Movie', year=2020)
+        expected = self._expected('Test Movie', year=None)
+        assert compute_recommended_action(flags, ident, expected) == 'rename_template'
+
+    # -- db_title preference --
+
+    def test_uses_db_title_for_comparison(self):
+        """Uses db_title when available for title comparison."""
+        flags = self._flags('title')
+        ident = self._ident('container_title', title='The Monster', year=2017)
+        # folder title is "Monster, The" but db_title is "The Monster"
+        expected = self._expected('Monster, The', 2016, db_title='The Monster')
+        assert compute_recommended_action(flags, ident, expected) == 'rename_template'

@@ -729,7 +729,7 @@ def compute_file_fingerprint(file_path):
         return None
 
 
-def compute_recommended_action(flags, identification=None):
+def compute_recommended_action(flags, identification=None, expected=None):
     """Derive the recommended fix action from flags and identification data.
 
     Returns one of:
@@ -741,6 +741,13 @@ def compute_recommended_action(flags, identification=None):
         'needs_tier2'        — title/runtime mismatch, needs tier 2 identification
         'manual_review'      — tier 2 ran but couldn't identify
         'none'               — no action needed (tier 2 confirmed same movie)
+
+    Args:
+        flags: list of flag dicts with 'check' keys
+        identification: tier 2 identification dict (optional)
+        expected: item['expected'] dict with title/year/db_title (optional).
+            When provided, allows same-title detection so year-only
+            mismatches get 'rename_template' instead of 'reassign_movie'.
     """
     checks = {f['check'] for f in flags}
 
@@ -757,12 +764,35 @@ def compute_recommended_action(flags, identification=None):
             return 'delete_wrong'
 
         if method in ('container_title', 'srrdb_crc'):
-            # Tier 2 found a match — is it the same movie or different?
-            id_imdb = identification.get('identified_imdb')
-            if id_imdb:
-                return 'reassign_movie'
             id_title = identification.get('identified_title', '')
-            if id_title:
+            id_imdb = identification.get('identified_imdb')
+
+            # When we have expected data AND an identified title, compare them
+            # to distinguish "same movie, wrong year" from "different movie"
+            if id_title and expected:
+                exp_title = expected.get('db_title') or expected.get('title', '')
+                if titles_match(id_title, exp_title):
+                    # Same movie title — check year
+                    id_year = identification.get('identified_year')
+                    exp_year = expected.get('year')
+                    if (id_year and exp_year
+                            and str(id_year) != str(exp_year)):
+                        # Year differs — only treat as rename if within ±1
+                        # (beyond that is likely a remake = different movie)
+                        if abs(int(id_year) - int(exp_year)) <= 1:
+                            return 'rename_template'
+                        else:
+                            return 'reassign_movie'
+                    # Same title, same year (or can't compare) — tier 2
+                    # confirmed identity.  Fall through to flag-based logic
+                    # which will handle any remaining template/res/edition flags.
+                    pass
+                else:
+                    # Different title — genuinely a different movie
+                    return 'reassign_movie'
+            elif id_imdb or id_title:
+                # No expected data to compare (backward compat) or IMDB-only
+                # match — assume reassign
                 return 'reassign_movie'
 
         if method == 'crc_not_found':
@@ -1927,7 +1957,7 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
 
     # Compute recommended action from flags + identification
     result['recommended_action'] = compute_recommended_action(
-        flags, result['identification']
+        flags, result['identification'], result.get('expected')
     )
 
     return result
@@ -2610,27 +2640,60 @@ def _preview_rename_template(item):
 
     Rebuilds filename from the renamer template using all available data
     including guessit-parsed tokens from the current filename.
+
+    When the expected year (e.g. corrected by tier 2) produces a different
+    folder name than the current folder, a folder rename is included in the
+    preview so the entire path is corrected in one operation.
     """
     try:
         new_file, new_path = _apply_renamer_template(item)
     except ValueError as e:
         return {'error': str(e)}
 
-    if new_path == item['file_path']:
+    old_path = item['file_path']
+    old_folder_path = os.path.dirname(old_path)
+    old_folder_name = os.path.basename(old_folder_path)
+
+    # Check if the folder also needs renaming (e.g. year correction)
+    exp = item.get('expected', {})
+    exp_title = exp.get('db_title') or exp.get('title', '')
+    exp_year = exp.get('year')
+    folder_rename = False
+    new_folder_path = None
+
+    if exp_title:
+        expected_folder = _apply_folder_template(exp_title, exp_year)
+        if expected_folder != old_folder_name:
+            folder_rename = True
+            movies_dir = os.path.dirname(old_folder_path)
+            new_folder_path = os.path.join(movies_dir, expected_folder)
+            # Update new_path to be inside the new folder
+            new_path = os.path.join(new_folder_path, new_file)
+
+    if new_path == old_path:
         return {'error': 'Rename would produce identical filename'}
 
-    return {
+    result = {
         'item_id': item['item_id'],
         'action': 'rename_template',
         'changes': {
             'filesystem': {
-                'old_path': item['file_path'],
+                'old_path': old_path,
                 'new_path': new_path,
             },
             'database': None,
         },
         'warnings': [],
     }
+
+    if folder_rename:
+        result['changes']['filesystem']['folder_rename'] = {
+            'old_folder': old_folder_path,
+            'new_folder': new_folder_path,
+        }
+        result['changes']['filesystem']['old_folder_cleanup'] = True
+
+    return result
 
 
 def generate_fix_preview(item, action):
@@ -2722,6 +2785,9 @@ def execute_fix_rename_template(item):
     tokens from the current filename.  This is a superset of
     rename_resolution and rename_edition — it fixes everything in one rename.
 
+    When the expected data produces a different folder name (e.g. year
+    correction from tier 2), the folder is also renamed/moved.
+
     Returns (success, details_dict).
     """
     try:
@@ -2730,6 +2796,23 @@ def execute_fix_rename_template(item):
         return False, {'error': str(e)}
 
     old_path = item['file_path']
+    old_folder_path = os.path.dirname(old_path)
+    old_folder_name = os.path.basename(old_folder_path)
+
+    # Determine if folder also needs renaming
+    exp = item.get('expected', {})
+    exp_title = exp.get('db_title') or exp.get('title', '')
+    exp_year = exp.get('year')
+    folder_rename = False
+    new_folder_path = None
+
+    if exp_title:
+        expected_folder = _apply_folder_template(exp_title, exp_year)
+        if expected_folder != old_folder_name:
+            folder_rename = True
+            movies_dir = os.path.dirname(old_folder_path)
+            new_folder_path = os.path.join(movies_dir, expected_folder)
+            new_path = os.path.join(new_folder_path, new_file)
 
     if new_path == old_path:
         return False, {'error': 'Rename would produce identical filename'}
@@ -2740,15 +2823,49 @@ def execute_fix_rename_template(item):
     if os.path.exists(new_path):
         return False, {'error': 'Destination already exists: %s' % new_path}
 
-    try:
-        os.rename(old_path, new_path)
-    except OSError as e:
-        return False, {'error': 'Rename failed: %s' % e}
+    if folder_rename:
+        # Create new folder, move file, clean up old folder
+        try:
+            os.makedirs(new_folder_path, exist_ok=True)
+        except OSError as e:
+            return False, {'error': 'Cannot create folder %s: %s' % (new_folder_path, e)}
 
-    return True, {
-        'old_path': old_path,
-        'new_path': new_path,
-    }
+        try:
+            shutil.move(old_path, new_path)
+        except (OSError, shutil.Error) as e:
+            return False, {'error': 'Move failed: %s' % e}
+
+        # Clean up old folder if no video files remain
+        folder_cleaned = False
+        try:
+            remaining = os.listdir(old_folder_path)
+            video_remaining = [f for f in remaining
+                              if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS]
+            if not video_remaining:
+                shutil.rmtree(old_folder_path, ignore_errors=True)
+                folder_cleaned = True
+        except OSError:
+            pass
+
+        return True, {
+            'old_path': old_path,
+            'new_path': new_path,
+            'folder_renamed': True,
+            'old_folder': old_folder_path,
+            'new_folder': new_folder_path,
+            'folder_cleaned': folder_cleaned,
+        }
+    else:
+        # Simple file rename within same directory
+        try:
+            os.rename(old_path, new_path)
+        except OSError as e:
+            return False, {'error': 'Rename failed: %s' % e}
+
+        return True, {
+            'old_path': old_path,
+            'new_path': new_path,
+        }
 
 
 def execute_fix_delete_wrong(item):
@@ -3556,6 +3673,10 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         # Update the file_path if it changed (for subsequent operations)
         if 'new_path' in details:
             item['file_path'] = details['new_path']
+            item['file'] = os.path.basename(details['new_path'])
+        # Update folder name if it changed (e.g. year correction)
+        if details.get('folder_renamed') and details.get('new_folder'):
+            item['folder'] = os.path.basename(details['new_folder'])
         # Append to actions log (O(1)) instead of rewriting full report
         self._append_action(item, action, details)
 
@@ -3774,8 +3895,28 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         # Recompute recommended action with the new identification data
         item['recommended_action'] = compute_recommended_action(
-            item.get('flags', []), identification
+            item.get('flags', []), identification, item.get('expected')
         )
+
+        # When tier 2 confirms same title but different year (±1),
+        # compute_recommended_action returns 'rename_template'.  Update the
+        # expected year so _apply_renamer_template builds the correct filename
+        # and add a template flag so the UI shows what changed.
+        if item['recommended_action'] == 'rename_template':
+            id_year = identification.get('identified_year')
+            exp = item.get('expected', {})
+            exp_year = exp.get('year')
+            if id_year and exp_year and str(id_year) != str(exp_year):
+                item['expected']['year'] = id_year
+                existing_checks = {f['check'] for f in item.get('flags', [])}
+                if 'template' not in existing_checks:
+                    item['flags'].append({
+                        'check': 'template',
+                        'severity': 'MEDIUM',
+                        'detail': 'Year corrected from %s to %s based on tier 2 identification' % (
+                            exp_year, id_year),
+                    })
+                    item['flag_count'] = len(item['flags'])
 
         # Persist
         self._save_results()
@@ -3854,8 +3995,25 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         # Recompute recommended action
         item['recommended_action'] = compute_recommended_action(
-            item.get('flags', []), identification
+            item.get('flags', []), identification, item.get('expected')
         )
+
+        # Same-title year correction: update expected year for template rename
+        if item['recommended_action'] == 'rename_template':
+            id_year = identification.get('identified_year')
+            exp = item.get('expected', {})
+            exp_year = exp.get('year')
+            if id_year and exp_year and str(id_year) != str(exp_year):
+                item['expected']['year'] = id_year
+                existing_checks = {f['check'] for f in item.get('flags', [])}
+                if 'template' not in existing_checks:
+                    item['flags'].append({
+                        'check': 'template',
+                        'severity': 'MEDIUM',
+                        'detail': 'Year corrected from %s to %s based on tier 2 identification' % (
+                            exp_year, id_year),
+                    })
+                    item['flag_count'] = len(item['flags'])
 
         # Persist
         self._save_results()
