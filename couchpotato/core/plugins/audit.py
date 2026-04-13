@@ -164,17 +164,31 @@ EDITION_MAP = {
     'Ultimate Cut': [('ultimate', 'cut'), ('ultimate', 'edition')],
     'Rogue Cut': [('rogue', 'cut')],
     "Black & Chrome": [('black', 'chrome'), ('black', 'and', 'chrome')],
+    'Uncut': ['uncut'],
 }
 
 # Short single-word tags that are ambiguous and must only match AFTER
-# the year position to avoid false positives (e.g. 'dc' matching DC Comics)
-EDITION_AFTER_YEAR_ONLY = {'dc'}
+# the year position to avoid false positives (e.g. 'dc' matching DC Comics,
+# 'uncut' matching movie titles like "Uncut Gems" or "Possessor Uncut")
+EDITION_AFTER_YEAR_ONLY = {'dc', 'uncut'}
 
 # Words that should not be treated as edition names when followed by Cut/Edition
 EDITION_EXCLUDE = {
     'blu', 'ray', 'web', 'hd', 'sd', 'uhd', 'dvd', 'bd', 'hdr', 'tax',
     'pay', 'price', 'budget', 'the', 'a', 'an', 'no', 'rough', 'first',
     'clean',
+}
+
+# Technical/quality words that stop compound edition extension.
+# If scanning forward from a known edition keyword and we hit one of these,
+# the compound ends (e.g. "UNRATED.1080p" → Unrated, not "Unrated 1080p Cut").
+_COMPOUND_STOP = {
+    '1080p', '720p', '480p', '2160p', '4k',
+    'bluray', 'brrip', 'webrip', 'web', 'dl', 'hdrip', 'dvdrip',
+    'x264', 'x265', 'h264', 'h265', 'hevc', 'avc',
+    'dts', 'ac3', 'aac', 'flac', 'remux',
+    'mkv', 'mp4', 'avi',
+    'hdr', 'hdr10', 'dv', 'dolby',
 }
 
 # ---------------------------------------------------------------------------
@@ -530,6 +544,122 @@ def resolution_label(width, height):
 # Edition detection (ported from scanner.py:getEdition)
 # ---------------------------------------------------------------------------
 
+def _detect_edition_from_words(words, after_year_only=True, year_idx=0):
+    """Core edition detection logic using a multi-pass approach.
+
+    Pass 1: Find EDITION_MAP tuple matches (multi-word known patterns like
+            'directors.cut') and single-word matches, recording word positions.
+    Pass 2: For each single-word match, try to extend into a compound edition
+            ending in Cut/Edition (e.g. 'UNRATED.PRODUCERS.CUT').
+    Pass 3: Pick the best candidate — earliest position wins; at same position
+            tuple > compound > standalone.
+    Pass 4: Fallback regex for unknown '<word(s)> Cut/Edition' patterns.
+
+    Args:
+        words: list of lowercase tokens from the filename/release name
+        after_year_only: if True, restrict search to words at/after year_idx
+        year_idx: index of the year token in words (0 if not found)
+
+    Returns:
+        edition string (e.g. "Director's Cut", "Unrated Producers Cut") or ''.
+    """
+    if after_year_only:
+        search_words = words[year_idx:]
+        offset = year_idx  # to map back to absolute positions in words
+    else:
+        search_words = words
+        offset = 0
+
+    search_joined = '.'.join(search_words)
+
+    # Words after the year (for EDITION_AFTER_YEAR_ONLY gating)
+    after_year_words = words[year_idx:] if year_idx else []
+
+    # ---- Pass 1: collect all EDITION_MAP matches with positions ----
+    # Each candidate: (start_pos, span, canonical_name, match_type)
+    # match_type: 0=tuple (best), 1=compound, 2=standalone (worst)
+    candidates = []
+
+    for key, tags in EDITION_MAP.items():
+        for tag in tags:
+            if isinstance(tag, tuple):
+                tag_str = '.'.join(tag)
+                idx = search_joined.find(tag_str)
+                if idx >= 0:
+                    # Convert char position to word position
+                    word_pos = search_joined[:idx].count('.') if idx > 0 else 0
+                    span = len(tag)
+                    candidates.append((word_pos + offset, span, key, 0))
+            elif isinstance(tag, str):
+                tag_lower = tag.lower()
+                # EDITION_AFTER_YEAR_ONLY gating
+                if tag_lower in EDITION_AFTER_YEAR_ONLY:
+                    if not (after_year_words and tag_lower in after_year_words):
+                        continue
+                # Find all positions of this single-word tag
+                for i, w in enumerate(search_words):
+                    if w == tag_lower:
+                        candidates.append((i + offset, 1, key, 2))
+
+    # ---- Pass 2: compound extension for single-word matches ----
+    # For each standalone match (type 2), look forward for Cut/Edition
+    compound_candidates = []
+    for start_pos, span, canon_name, mtype in candidates:
+        if mtype != 2:
+            continue
+        # Scan forward up to 3 words looking for 'cut' or 'edition'
+        for ahead in range(1, 4):
+            look_idx = start_pos + ahead
+            if look_idx >= len(words):
+                break
+            w = words[look_idx]
+            if w in _COMPOUND_STOP:
+                break  # hit a tech word, stop extending
+            if w in ('cut', 'edition'):
+                # Build compound from start_pos through look_idx
+                compound_words = words[start_pos:look_idx + 1]
+                compound_name = ' '.join(w2.title() for w2 in compound_words)
+                compound_span = look_idx - start_pos + 1
+                compound_candidates.append(
+                    (start_pos, compound_span, compound_name, 1)
+                )
+                break  # take the first Cut/Edition found
+
+    candidates.extend(compound_candidates)
+
+    if candidates:
+        # ---- Pass 3: pick the best candidate ----
+        # Sort by: (start_pos ASC, match_type ASC, -span DESC)
+        # match_type: 0=tuple > 1=compound > 2=standalone
+        candidates.sort(key=lambda c: (c[0], c[3], -c[1]))
+        return candidates[0][2]
+
+    return ''
+
+
+def _edition_fallback_regex(text, after_year_text=None):
+    """Fallback: catch unknown '<word(s)> Cut/Edition' patterns via regex.
+
+    Only called when _detect_edition_from_words found nothing.
+    Searches after_year_text if provided, otherwise full text.
+
+    Returns edition string or ''.
+    """
+    search_text = after_year_text if after_year_text is not None else text
+    m = re.search(
+        r'[\.\s_\-]((?:[a-z]+[\.\s_\-]){0,1}(?:[a-z]+))[\.\s_\-](cut|edition)'
+        r'(?=[\.\s_\-]|$)',
+        search_text, re.IGNORECASE
+    )
+    if m:
+        name_part = re.sub(r'[\._\-]', ' ', m.group(1)).strip()
+        kind = m.group(2)
+        last_word = name_part.split()[-1].lower() if name_part else ''
+        if last_word and last_word not in EDITION_EXCLUDE:
+            return '%s %s' % (name_part.title(), kind.title())
+    return ''
+
+
 def get_edition(filename):
     """Detect edition/cut info from a filename or release name.
 
@@ -538,6 +668,10 @@ def get_edition(filename):
 
     Only searches AFTER the year in the filename to avoid false positives
     when edition words appear in the movie title.
+
+    Uses the multi-pass _detect_edition_from_words() algorithm for compound
+    edition detection (e.g. "Unrated Producers Cut"), then falls back to
+    _edition_fallback_regex() for unknown patterns.
 
     Returns the edition string (e.g. "Director's Cut") or empty string.
     """
@@ -557,35 +691,17 @@ def get_edition(filename):
             year_idx = i
             break
 
-    # Restrict search to words at/after year position
-    search_words = words[year_idx:]
-    search_joined = '.'.join(search_words)
+    # Multi-pass detection: tuple matches, compound extension, best-pick
+    result = _detect_edition_from_words(words, after_year_only=True,
+                                        year_idx=year_idx)
+    if result:
+        return result
 
-    # Check known editions first
-    for key, tags in EDITION_MAP.items():
-        for tag in tags:
-            if isinstance(tag, tuple) and '.'.join(tag) in search_joined:
-                return key
-            elif isinstance(tag, str) and tag.lower() in search_words:
-                return key
-
-    # Fallback: catch arbitrary "<Word(s)> Cut" or "<Word(s)> Edition" patterns
+    # Fallback regex for unknown patterns — restrict to after the year
     basename = os.path.basename(filename)
-    # Restrict fallback to after the year too
     year_match = re.search(r'[\.\s_\-]((?:19|20)\d{2})[\.\s_\-]', basename)
-    search_basename = basename[year_match.start():] if year_match else basename
-    m = re.search(
-        r'[\.\s_\-]((?:[a-z]+[\.\s_\-]){0,2}(?:[a-z]+))[\.\s_\-](cut|edition)(?=[\.\s_\-]|$)',
-        search_basename, re.IGNORECASE
-    )
-    if m:
-        name_part = re.sub(r'[\._\-]', ' ', m.group(1)).strip()
-        kind = m.group(2)
-        last_word = name_part.split()[-1].lower() if name_part else ''
-        if last_word and last_word not in EDITION_EXCLUDE:
-            return '%s %s' % (name_part.title(), kind.title())
-
-    return ''
+    after_year_text = basename[year_match.start():] if year_match else basename
+    return _edition_fallback_regex(basename, after_year_text=after_year_text)
 
 
 # ---------------------------------------------------------------------------
@@ -796,15 +912,19 @@ def _parse_edition_from_release(release_name):
     year) because release names like 'Apocalypse.Now.Redux.1979...' have the
     edition keyword before the year.  Uses the same EDITION_MAP keywords.
 
-    Tags in EDITION_AFTER_YEAR_ONLY (e.g. 'dc') are only matched after the
-    year to avoid false positives like 'DC' in 'DC Comics' movie titles.
+    Tags in EDITION_AFTER_YEAR_ONLY (e.g. 'dc', 'uncut') are only matched
+    after the year to avoid false positives like 'DC' in 'DC Comics' titles
+    or 'Uncut' in 'Uncut Gems'.
+
+    Uses the multi-pass _detect_edition_from_words() algorithm for compound
+    edition detection (e.g. "Unrated Producers Cut"), then falls back to
+    _edition_fallback_regex() for unknown patterns.
 
     Returns the edition string (e.g. "Extended Edition") or ''.
     """
     if not release_name:
         return ''
     words = re.split(r'\W+', release_name.lower())
-    joined = '.'.join(words)
 
     # Find year position for gating ambiguous tags
     year_idx = 0
@@ -812,35 +932,16 @@ def _parse_edition_from_release(release_name):
         if re.match(r'^(19|20)\d{2}$', w):
             year_idx = i
             break
-    after_year_words = words[year_idx:] if year_idx else []
 
-    for key, tags in EDITION_MAP.items():
-        for tag in tags:
-            if isinstance(tag, tuple) and '.'.join(tag) in joined:
-                return key
-            elif isinstance(tag, str):
-                tag_lower = tag.lower()
-                if tag_lower in EDITION_AFTER_YEAR_ONLY:
-                    # Ambiguous tag — only match after the year
-                    if after_year_words and tag_lower in after_year_words:
-                        return key
-                elif tag_lower in words:
-                    return key
+    # Multi-pass detection: search full string (after_year_only=False)
+    # but still pass year_idx so EDITION_AFTER_YEAR_ONLY gating works
+    result = _detect_edition_from_words(words, after_year_only=False,
+                                        year_idx=year_idx)
+    if result:
+        return result
 
-    # Fallback: catch arbitrary "<Word(s)> Cut" or "<Word(s)> Edition"
-    m = re.search(
-        r'[\.\s_\-]((?:[a-z]+[\.\s_\-]){0,2}(?:[a-z]+))[\.\s_\-](cut|edition)'
-        r'(?=[\.\s_\-]|$)',
-        release_name, re.IGNORECASE
-    )
-    if m:
-        name_part = re.sub(r'[\._\-]', ' ', m.group(1)).strip()
-        kind = m.group(2)
-        last_word = name_part.split()[-1].lower() if name_part else ''
-        if last_word and last_word not in EDITION_EXCLUDE:
-            return '%s %s' % (name_part.title(), kind.title())
-
-    return ''
+    # Fallback regex — search entire release name
+    return _edition_fallback_regex(release_name)
 
 
 def _backfill_edition_from_tier2(result):
@@ -2426,6 +2527,7 @@ def _preview_reassign_movie(item):
     reassign_item = dict(item)
     reassign_item['expected'] = dict(item.get('expected', {}))
     reassign_item['expected']['title'] = id_title
+    reassign_item['expected']['db_title'] = id_title
     reassign_item['expected']['year'] = id_year
     reassign_item['imdb_id'] = id_imdb
 
