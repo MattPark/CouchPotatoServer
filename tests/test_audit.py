@@ -682,20 +682,17 @@ class TestComputeRecommendedAction:
         assert compute_recommended_action(flags, ident, expected) == 'rename_template'
 
     def test_same_title_same_year_no_template_flag(self):
-        """Same title + same year without template flag, only title flag → needs_tier2 fallthrough."""
-        # With only a title flag and identification present, it falls through
-        # to flag-based logic.  'title' without 'template' and WITH identification
-        # → needs_tier2 (but identification is present so it skips the tier2 check)
-        # Actually: no template flag + title flag + identification present
-        # → falls through tier 2 block → 'title' in checks → needs_tier2 if no ident,
-        #   but ident is present, so hits the general 'title' check
+        """Same title + same year, only title flag, identification confirms identity → none.
+
+        When tier 2 (or manual) identification confirms the same movie and
+        there are no actionable flags (template/resolution/edition), the
+        title flag is just a container metadata discrepancy — nothing to fix.
+        """
         flags = self._flags('title')
         ident = self._ident('container_title', title='Test Movie', year=2020)
         expected = self._expected('Test Movie', 2020)
-        # Falls through tier 2 (same title/year), then hits 'title' in checks
-        # at line 796 → needs_tier2 (since no template flag)
         result = compute_recommended_action(flags, ident, expected)
-        assert result == 'needs_tier2'
+        assert result == 'none'
 
     def test_same_title_same_year_resolution_flag(self):
         """Same title + same year with resolution flag → rename_resolution."""

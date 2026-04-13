@@ -768,7 +768,7 @@ def compute_recommended_action(flags, identification=None, expected=None):
         if method == 'tv_episode_detected':
             return 'delete_wrong'
 
-        if method in ('container_title', 'srrdb_crc'):
+        if method in ('container_title', 'srrdb_crc', 'manual'):
             id_title = identification.get('identified_title', '')
             id_imdb = identification.get('identified_imdb')
 
@@ -827,9 +827,14 @@ def compute_recommended_action(flags, identification=None, expected=None):
     if 'edition' in checks and checks - {'edition', 'resolution'} == set():
         return 'rename_resolution'
 
-    # Title or runtime mismatch without tier 2 — needs identification
+    # Title or runtime mismatch without tier 2 — needs identification.
+    # But if identification already ran and confirmed the same movie,
+    # there's nothing to fix (e.g., container metadata has a different
+    # year but the filename is already correct).
     if 'title' in checks or 'runtime' in checks:
-        return 'needs_tier2'
+        if not identification:
+            return 'needs_tier2'
+        return 'none'
 
     return 'manual_review'
 
