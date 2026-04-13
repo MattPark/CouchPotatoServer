@@ -1053,8 +1053,20 @@ def _backfill_edition_from_tier2(result):
     return edition
 
 
-def check_container_title(container_title, folder_title, folder_year):
+def check_container_title(container_title, folder_title, folder_year,
+                          imdb_year=None):
     """Check 3: Container title mismatch.
+
+    Args:
+        container_title: The title embedded in the video container metadata.
+        folder_title: The movie title parsed from the folder name.
+        folder_year: The year parsed from the folder name.
+        imdb_year: The authoritative year from the CP database (sourced from
+            IMDB/TMDB).  When provided and the title matches but the year is
+            off by exactly ±1, the IMDB year is used to adjudicate:
+            - folder year matches IMDB → suppress the flag (false positive)
+            - container year matches IMDB → keep as HIGH (folder may be wrong)
+            - neither matches → downgrade to LOW
 
     Returns a flag dict or None.  Also returns parsed metadata (title, year)
     for use in Tier 2 identification.
@@ -1115,6 +1127,25 @@ def check_container_title(container_title, folder_title, folder_year):
         }, parsed_meta
 
     if not year_same:
+        year_diff = abs(meta_year - folder_year)
+        if year_diff == 1:
+            verdict = _check_year_against_imdb(meta_year, folder_year, imdb_year)
+            if verdict == 'suppress':
+                # Folder year matches IMDB — container just uses a different
+                # year convention (production vs. theatrical release).
+                return None, parsed_meta
+            elif verdict == 'downgrade':
+                return {
+                    'check': 'title',
+                    'severity': 'LOW',
+                    'detail': (
+                        f"Container year {meta_year} "
+                        f"vs folder year {folder_year} "
+                        f"(title matches, ±1 year — ambiguous)"
+                    ),
+                }, parsed_meta
+            # verdict == 'keep' — fall through to HIGH flag below
+
         return {
             'check': 'title',
             'severity': 'HIGH',
@@ -1125,6 +1156,96 @@ def check_container_title(container_title, folder_title, folder_year):
         }, parsed_meta
 
     return None, parsed_meta
+
+
+def _check_year_against_imdb(container_year, folder_year, imdb_year):
+    """Decide whether a ±1 year title flag should be kept, removed, or downgraded.
+
+    When the container title and folder agree on the movie but disagree on the
+    year by exactly 1 (production year vs. theatrical release), use the IMDB/
+    TMDB year from the CP database to adjudicate:
+
+    Returns:
+        'suppress'  — folder year matches IMDB → flag is a false positive
+        'keep'      — container year matches IMDB → folder may be wrong
+        'downgrade' — neither matches, or no IMDB data → ambiguous, LOW severity
+    """
+    if not imdb_year:
+        return 'downgrade'
+    if folder_year == imdb_year:
+        return 'suppress'
+    if container_year == imdb_year:
+        return 'keep'
+    return 'downgrade'
+
+
+def _revalidate_year_flags(item, imdb_year):
+    """Re-evaluate ±1 year title flags using newly available IMDB data.
+
+    Called after Tier 2 identification provides an IMDB year that wasn't
+    available during Tier 1.  Mutates the item's flags list in place:
+    removes suppressed flags and downgrades ambiguous ones.
+
+    Args:
+        item: The scan result dict (must have 'flags', 'expected', 'flag_count').
+        imdb_year: The authoritative year from IMDB/TMDB identification.
+
+    Returns True if any flag was removed or modified, False otherwise.
+    """
+    if not imdb_year:
+        return False
+
+    flags = item.get('flags', [])
+    folder_year = item.get('expected', {}).get('year')
+    if not folder_year:
+        return False
+
+    modified = False
+    to_remove = []
+
+    for i, flag in enumerate(flags):
+        if flag.get('check') != 'title':
+            continue
+        detail = flag.get('detail', '')
+        if 'title matches' not in detail:
+            continue
+
+        # Extract container year from detail string like
+        # "Container year 2018 vs folder year 2019 (title matches)"
+        m = re.search(r'Container year (\d{4}) vs folder year (\d{4})', detail)
+        if not m:
+            continue
+
+        container_year = int(m.group(1))
+        flag_folder_year = int(m.group(2))
+        year_diff = abs(container_year - flag_folder_year)
+
+        if year_diff != 1:
+            continue
+
+        verdict = _check_year_against_imdb(container_year, flag_folder_year,
+                                           imdb_year)
+        if verdict == 'suppress':
+            to_remove.append(i)
+            modified = True
+        elif verdict == 'downgrade':
+            flag['severity'] = 'LOW'
+            flag['detail'] = (
+                f"Container year {container_year} "
+                f"vs folder year {flag_folder_year} "
+                f"(title matches, ±1 year — ambiguous)"
+            )
+            modified = True
+        # 'keep' — no change
+
+    # Remove suppressed flags in reverse order to maintain indices
+    for i in reversed(to_remove):
+        flags.pop(i)
+
+    if modified:
+        item['flag_count'] = len(flags)
+
+    return modified
 
 
 def check_tv_episode(container_title):
@@ -1859,7 +1980,8 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
 
     # Check 3: Container title
     flag, container_title_parsed = check_container_title(
-        meta['container_title'], folder_title, folder_year
+        meta['container_title'], folder_title, folder_year,
+        imdb_year=db_entry.get('year') if db_entry else None,
     )
     if flag:
         flags.append(flag)
@@ -1961,6 +2083,18 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
         # container title).  This can suppress false-positive runtime flags
         # for extended/director's cuts and add edition mismatch flags.
         _backfill_edition_from_tier2(result)
+
+        # Post-tier-2: re-evaluate ±1 year title flags.  During tier 1 the
+        # IMDB year may not have been available (no db_entry), but tier 2
+        # identification may have found one via srrDB/container title lookup.
+        if not db_entry:
+            ident = result.get('identification') or {}
+            id_year = ident.get('identified_year')
+            if id_year:
+                removed = _revalidate_year_flags(result, id_year)
+                if removed and not result['flags']:
+                    # All flags were suppressed — item is clean
+                    return None
 
     # Compute recommended action from flags + identification
     result['recommended_action'] = compute_recommended_action(
@@ -3899,6 +4033,13 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         # container title).  This can suppress false-positive runtime flags
         # for extended/director's cuts and add edition mismatch flags.
         _backfill_edition_from_tier2(item)
+
+        # Re-evaluate ±1 year title flags with the IMDB year from tier 2
+        # identification.  This may suppress false-positive year flags that
+        # were created during tier 1 when no IMDB data was available.
+        id_year = identification.get('identified_year')
+        if id_year:
+            _revalidate_year_flags(item, id_year)
 
         # Recompute recommended action with the new identification data
         item['recommended_action'] = compute_recommended_action(

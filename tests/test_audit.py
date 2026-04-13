@@ -10,6 +10,9 @@ Tests cover:
   - Plex {edition-X} tag extraction
   - EDITION_AFTER_YEAR_ONLY gating
   - compute_recommended_action(): same-title / year correction logic
+  - _check_year_against_imdb(): ±1 year IMDB adjudication
+  - check_container_title(): container title mismatch with IMDB year validation
+  - _revalidate_year_flags(): post-tier-2 flag re-evaluation
 """
 
 from couchpotato.core.plugins.audit import (
@@ -18,6 +21,9 @@ from couchpotato.core.plugins.audit import (
     _detect_edition_from_words,
     _edition_fallback_regex,
     compute_recommended_action,
+    _check_year_against_imdb,
+    check_container_title,
+    _revalidate_year_flags,
 )
 import re
 
@@ -844,3 +850,267 @@ class TestComputeRecommendedAction:
         # folder title is "Monster, The" but db_title is "The Monster"
         expected = self._expected('Monster, The', 2016, db_title='The Monster')
         assert compute_recommended_action(flags, ident, expected) == 'rename_template'
+
+
+# ---------------------------------------------------------------------------
+# _check_year_against_imdb() tests
+# ---------------------------------------------------------------------------
+
+class TestCheckYearAgainstImdb:
+    """Tests for the ±1 year IMDB adjudication helper."""
+
+    def test_folder_matches_imdb_suppress(self):
+        """Folder year matches IMDB → suppress (false positive)."""
+        assert _check_year_against_imdb(2018, 2019, 2019) == 'suppress'
+
+    def test_folder_matches_imdb_suppress_reverse(self):
+        """Folder year matches IMDB, container is +1 → suppress."""
+        assert _check_year_against_imdb(2020, 2019, 2019) == 'suppress'
+
+    def test_container_matches_imdb_keep(self):
+        """Container year matches IMDB → keep (folder may be wrong)."""
+        assert _check_year_against_imdb(2018, 2019, 2018) == 'keep'
+
+    def test_container_matches_imdb_keep_reverse(self):
+        """Container year matches IMDB, container is +1 → keep."""
+        assert _check_year_against_imdb(2020, 2019, 2020) == 'keep'
+
+    def test_neither_matches_downgrade(self):
+        """Neither year matches IMDB → downgrade to LOW."""
+        assert _check_year_against_imdb(2018, 2019, 2020) == 'downgrade'
+
+    def test_no_imdb_year_downgrade(self):
+        """No IMDB year available → downgrade."""
+        assert _check_year_against_imdb(2018, 2019, None) == 'downgrade'
+
+    def test_no_imdb_year_zero_downgrade(self):
+        """IMDB year is 0 (missing data) → downgrade."""
+        assert _check_year_against_imdb(2018, 2019, 0) == 'downgrade'
+
+
+# ---------------------------------------------------------------------------
+# check_container_title() with imdb_year tests
+# ---------------------------------------------------------------------------
+
+class TestCheckContainerTitleImdbYear:
+    """Tests for check_container_title() with IMDB year validation."""
+
+    # -- ±1 year, same title, IMDB confirms folder --
+
+    def test_year_off_by_1_imdb_confirms_folder_suppressed(self):
+        """Same title, year off by 1, IMDB matches folder → no flag."""
+        # Container says 2018, folder says 2019, IMDB says 2019
+        flag, meta = check_container_title(
+            'The Movie 2018 1080p BluRay', 'The Movie', 2019, imdb_year=2019,
+        )
+        assert flag is None
+        assert meta is not None
+        assert meta['title'] == 'The Movie'
+
+    def test_year_off_by_1_reverse_imdb_confirms_folder_suppressed(self):
+        """Same title, container +1, IMDB matches folder → no flag."""
+        flag, meta = check_container_title(
+            'The Movie 2020 1080p BluRay', 'The Movie', 2019, imdb_year=2019,
+        )
+        assert flag is None
+
+    # -- ±1 year, same title, IMDB confirms container --
+
+    def test_year_off_by_1_imdb_confirms_container_high(self):
+        """Same title, year off by 1, IMDB matches container → HIGH flag."""
+        flag, meta = check_container_title(
+            'The Movie 2018 1080p BluRay', 'The Movie', 2019, imdb_year=2018,
+        )
+        assert flag is not None
+        assert flag['severity'] == 'HIGH'
+        assert flag['check'] == 'title'
+        assert '2018' in flag['detail']
+        assert '2019' in flag['detail']
+
+    # -- ±1 year, same title, no IMDB data --
+
+    def test_year_off_by_1_no_imdb_low(self):
+        """Same title, year off by 1, no IMDB → LOW flag."""
+        flag, meta = check_container_title(
+            'The Movie 2018 1080p BluRay', 'The Movie', 2019, imdb_year=None,
+        )
+        assert flag is not None
+        assert flag['severity'] == 'LOW'
+        assert 'ambiguous' in flag['detail']
+
+    def test_year_off_by_1_imdb_zero_low(self):
+        """Same title, year off by 1, IMDB year is 0 → LOW flag."""
+        flag, meta = check_container_title(
+            'The Movie 2018 1080p BluRay', 'The Movie', 2019, imdb_year=0,
+        )
+        assert flag is not None
+        assert flag['severity'] == 'LOW'
+
+    # -- ±1 year, same title, IMDB matches neither --
+
+    def test_year_off_by_1_imdb_matches_neither_low(self):
+        """Same title, year off by 1, IMDB matches neither → LOW."""
+        flag, meta = check_container_title(
+            'The Movie 2018 1080p BluRay', 'The Movie', 2019, imdb_year=2020,
+        )
+        assert flag is not None
+        assert flag['severity'] == 'LOW'
+        assert 'ambiguous' in flag['detail']
+
+    # -- Year off by >1, same title → always HIGH regardless of IMDB --
+
+    def test_year_off_by_2_still_high(self):
+        """Same title, year off by 2 → HIGH even if IMDB matches folder."""
+        flag, meta = check_container_title(
+            'The Movie 2017 1080p BluRay', 'The Movie', 2019, imdb_year=2019,
+        )
+        assert flag is not None
+        assert flag['severity'] == 'HIGH'
+        assert 'title matches' in flag['detail']
+
+    def test_year_off_by_3_still_high(self):
+        """Same title, year off by 3 → HIGH regardless."""
+        flag, meta = check_container_title(
+            'The Movie 2016 1080p BluRay', 'The Movie', 2019, imdb_year=2019,
+        )
+        assert flag is not None
+        assert flag['severity'] == 'HIGH'
+
+    # -- Different title cases are unchanged --
+
+    def test_different_title_different_year_high(self):
+        """Different title AND year → HIGH (unchanged, ignores imdb_year)."""
+        flag, meta = check_container_title(
+            'Other Movie 2018 1080p BluRay', 'The Movie', 2019, imdb_year=2019,
+        )
+        assert flag is not None
+        assert flag['severity'] == 'HIGH'
+
+    def test_different_title_same_year_medium(self):
+        """Different title, same year → MEDIUM (unchanged)."""
+        flag, meta = check_container_title(
+            'Other Movie 2019 1080p BluRay', 'The Movie', 2019, imdb_year=2019,
+        )
+        assert flag is not None
+        assert flag['severity'] == 'MEDIUM'
+
+    # -- Same title, same year → no flag (unchanged) --
+
+    def test_same_title_same_year_no_flag(self):
+        """Same title, same year → no flag (unchanged)."""
+        flag, meta = check_container_title(
+            'The Movie 2019 1080p BluRay', 'The Movie', 2019, imdb_year=2019,
+        )
+        assert flag is None
+
+    # -- No imdb_year param at all (backward compatibility) --
+
+    def test_no_imdb_year_param_year_off_by_1_low(self):
+        """No imdb_year param → ±1 year gets LOW severity."""
+        flag, meta = check_container_title(
+            'The Movie 2018 1080p BluRay', 'The Movie', 2019,
+        )
+        assert flag is not None
+        assert flag['severity'] == 'LOW'
+
+
+# ---------------------------------------------------------------------------
+# _revalidate_year_flags() tests
+# ---------------------------------------------------------------------------
+
+class TestRevalidateYearFlags:
+    """Tests for post-tier-2 ±1 year flag re-evaluation."""
+
+    @staticmethod
+    def _item(flags, folder_year=2019):
+        return {
+            'flags': list(flags),
+            'flag_count': len(flags),
+            'expected': {'year': folder_year},
+        }
+
+    @staticmethod
+    def _year_flag(container_year, folder_year, severity='HIGH'):
+        return {
+            'check': 'title',
+            'severity': severity,
+            'detail': (
+                f"Container year {container_year} "
+                f"vs folder year {folder_year} (title matches)"
+            ),
+        }
+
+    def test_suppress_when_imdb_matches_folder(self):
+        """Flag removed when IMDB year matches folder year."""
+        flag = self._year_flag(2018, 2019)
+        item = self._item([flag], folder_year=2019)
+        result = _revalidate_year_flags(item, 2019)
+        assert result is True
+        assert len(item['flags']) == 0
+        assert item['flag_count'] == 0
+
+    def test_keep_when_imdb_matches_container(self):
+        """Flag kept as HIGH when IMDB year matches container year."""
+        flag = self._year_flag(2018, 2019)
+        item = self._item([flag], folder_year=2019)
+        result = _revalidate_year_flags(item, 2018)
+        assert result is False
+        assert len(item['flags']) == 1
+        assert item['flags'][0]['severity'] == 'HIGH'
+
+    def test_downgrade_when_imdb_matches_neither(self):
+        """Flag downgraded to LOW when IMDB matches neither year."""
+        flag = self._year_flag(2018, 2019)
+        item = self._item([flag], folder_year=2019)
+        result = _revalidate_year_flags(item, 2020)
+        assert result is True
+        assert len(item['flags']) == 1
+        assert item['flags'][0]['severity'] == 'LOW'
+        assert 'ambiguous' in item['flags'][0]['detail']
+
+    def test_no_imdb_year_noop(self):
+        """No IMDB year → no changes."""
+        flag = self._year_flag(2018, 2019)
+        item = self._item([flag], folder_year=2019)
+        result = _revalidate_year_flags(item, None)
+        assert result is False
+        assert len(item['flags']) == 1
+
+    def test_non_year_flags_untouched(self):
+        """Non-title flags are not affected."""
+        res_flag = {'check': 'resolution', 'severity': 'HIGH', 'detail': 'wrong res'}
+        year_flag = self._year_flag(2018, 2019)
+        item = self._item([res_flag, year_flag], folder_year=2019)
+        _revalidate_year_flags(item, 2019)
+        assert len(item['flags']) == 1
+        assert item['flags'][0]['check'] == 'resolution'
+
+    def test_year_off_by_more_than_1_untouched(self):
+        """Flags with year off by >1 are not affected."""
+        flag = self._year_flag(2016, 2019)
+        item = self._item([flag], folder_year=2019)
+        result = _revalidate_year_flags(item, 2019)
+        assert result is False
+        assert len(item['flags']) == 1
+        assert item['flags'][0]['severity'] == 'HIGH'
+
+    def test_title_flag_without_title_matches_untouched(self):
+        """Title flags without 'title matches' in detail are not affected."""
+        flag = {
+            'check': 'title',
+            'severity': 'HIGH',
+            'detail': "Container title 'Other Movie (2018)' vs folder 'The Movie (2019)'",
+        }
+        item = self._item([flag], folder_year=2019)
+        result = _revalidate_year_flags(item, 2019)
+        assert result is False
+        assert len(item['flags']) == 1
+
+    def test_flag_count_updated_after_suppress(self):
+        """flag_count is updated after suppression."""
+        res_flag = {'check': 'resolution', 'severity': 'HIGH', 'detail': 'wrong res'}
+        year_flag = self._year_flag(2018, 2019)
+        item = self._item([res_flag, year_flag], folder_year=2019)
+        assert item['flag_count'] == 2
+        _revalidate_year_flags(item, 2019)
+        assert item['flag_count'] == 1
