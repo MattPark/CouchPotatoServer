@@ -7,6 +7,7 @@ var AuditSettingTab = new Class({
 	items_container: null,
 	batch_bar: null,
 	preview_modal: null,
+	_expand_next: false,
 
 	tier1_btn: null,
 	tier2_btn: null,
@@ -566,12 +567,21 @@ var AuditSettingTab = new Class({
 		items.each(function(item){
 			self.renderItem(item);
 		});
+
+		// Auto-expand the new top card if the previous top card was acted on
+		if(self._expand_next){
+			self._expand_next = false;
+			var first = self.items_container.getFirst('.audit_item');
+			if(first) first.addClass('expanded');
+		}
 	},
 
 	renderItem: function(item){
 		var self = this;
 
-		var card = new Element('div.audit_item').inject(self.items_container);
+		var card = new Element('div.audit_item', {
+			'data-item-id': item.item_id
+		}).inject(self.items_container);
 		if(item.fixed) card.addClass('audit_item_fixed');
 
 		// Header (collapsed view)
@@ -1108,6 +1118,12 @@ var AuditSettingTab = new Class({
 			data['reset_status'] = reset_status;
 		}
 
+		// Check if we're acting on the top card before the list reloads
+		var first = self.items_container.getFirst('.audit_item');
+		if(first && first.get('data-item-id') === item_id){
+			self._expand_next = true;
+		}
+
 		Api.request('audit.fix', {
 			'data': data,
 			'onComplete': function(json){
@@ -1125,6 +1141,12 @@ var AuditSettingTab = new Class({
 
 	ignoreItem: function(item_id, card){
 		var self = this;
+
+		// Check if we're acting on the top card before it gets removed
+		var first = self.items_container.getFirst('.audit_item');
+		if(first && first === card){
+			self._expand_next = true;
+		}
 
 		Api.request('audit.ignore', {
 			'data': { 'item_id': item_id },
