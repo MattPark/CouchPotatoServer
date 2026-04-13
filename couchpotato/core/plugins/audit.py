@@ -1285,6 +1285,8 @@ def build_expected_filename(item, template, replace_doubles=True, separator=''):
     if not edition:
         edition = get_edition(old_file)
     imdb_id = item.get('imdb_id', '') or ''
+    if not imdb_id:
+        imdb_id = (item.get('identification') or {}).get('identified_imdb', '') or ''
     year = item['expected'].get('year') or ''
 
     # Guessit-derived tokens
@@ -1390,6 +1392,8 @@ def check_template(item, template, replace_doubles=True, separator=''):
 
     # Check IMDB presence
     imdb_id = item.get('imdb_id', '') or ''
+    if not imdb_id:
+        imdb_id = (item.get('identification') or {}).get('identified_imdb', '') or ''
     if imdb_id:
         # Check if any IMDB token is in the template
         has_imdb_token = any(
@@ -2212,6 +2216,8 @@ def _apply_renamer_template(item, quality_override=None, edition_override=None):
     if not edition:
         edition = get_edition(old_file)
     imdb_id = item.get('imdb_id', '') or ''
+    if not imdb_id:
+        imdb_id = (item.get('identification') or {}).get('identified_imdb', '') or ''
     year = item['expected'].get('year') or ''
 
     # Guessit-derived tokens — fill from item if available, otherwise parse
@@ -3756,6 +3762,11 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         # Update item in-place
         item['identification'] = identification
 
+        # Backfill imdb_id so template rendering has it
+        id_imdb = identification.get('identified_imdb', '')
+        if id_imdb and not item.get('imdb_id'):
+            item['imdb_id'] = id_imdb
+
         # Backfill edition from tier 2 source (srrDB release name or
         # container title).  This can suppress false-positive runtime flags
         # for extended/director's cuts and add edition mismatch flags.
@@ -3836,6 +3847,10 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'source': 'manual (%s)' % movie_info.get('source', 'lookup'),
         }
         item['identification'] = identification
+
+        # Backfill imdb_id so template rendering has it
+        if imdb_id and not item.get('imdb_id'):
+            item['imdb_id'] = imdb_id
 
         # Recompute recommended action
         item['recommended_action'] = compute_recommended_action(
