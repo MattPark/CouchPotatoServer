@@ -1167,9 +1167,8 @@ input[type=text],textarea{-webkit-appearance:none}
 .page.settings .audit_action_btn{display:inline-block;padding:4px 12px;border-radius:3px;font-size:.85em;cursor:pointer;transition:opacity 200ms}
 .page.settings .audit_action_btn.primary{background:#4caf50;color:#fff;font-weight:700}
 .page.settings .audit_action_btn.primary:hover{opacity:.85}
-.page.settings .audit_action_btn.secondary{background:rgba(0,0,0,.1);opacity:.7}
-.dark .page.settings .audit_action_btn.secondary{background:rgba(255,255,255,.15)}
-.page.settings .audit_action_btn.secondary:hover{opacity:1}
+.page.settings .audit_action_btn.secondary{background:#1976d2;color:#fff}
+.page.settings .audit_action_btn.secondary:hover{opacity:.85}
 .page.settings .audit_action_btn.audit_tier2_btn{background:#1976d2;color:#fff;margin-left:8px}
 .page.settings .audit_action_btn.audit_tier2_btn:hover{opacity:.85}
 .page.settings .audit_action_btn.audit_tier2_running{opacity:.5;cursor:wait}

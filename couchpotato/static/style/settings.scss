@@ -1624,14 +1624,10 @@
 		}
 
 		&.secondary {
-			background: rgba(0,0,0,.1);
-			opacity: .7;
+			background: #1976d2;
+			color: #fff;
 
-			@include theme-dark {
-				background: rgba(255,255,255,.15);
-			}
-
-			&:hover { opacity: 1; }
+			&:hover { opacity: .85; }
 		}
 
 		&.audit_tier2_btn {
