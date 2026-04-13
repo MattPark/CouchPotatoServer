@@ -2591,7 +2591,7 @@ def _preview_reassign_movie(item):
                 'reset_status': {
                     'movie': item['expected'].get('title', ''),
                     'default': 'wanted',
-                    'options': ['wanted', 'done', 'nochange'],
+                    'options': ['wanted', 'done', 'nochange', 'remove'],
                 },
             },
         },
