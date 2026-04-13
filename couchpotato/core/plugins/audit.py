@@ -1042,7 +1042,7 @@ def _backfill_edition_from_tier2(result):
         if not has_edition_flag:
             result['flags'].append({
                 'check': 'edition',
-                'severity': 'MEDIUM',
+                'severity': 'LOW',
                 'detail': (
                     'Edition "%s" found in release name but not in filename'
                     % edition
@@ -1287,10 +1287,12 @@ def check_edition(container_title, filename):
     filename_edition = get_edition(filename)
 
     if not filename_edition:
-        # Container has edition, filename doesn't — missing from name
+        # Container has edition, filename doesn't — missing from name.
+        # LOW severity: this is a cosmetic naming issue; the file is the
+        # right movie, just missing an edition tag.
         return {
             'check': 'edition',
-            'severity': 'MEDIUM',
+            'severity': 'LOW',
             'detail': (
                 f"Container title has edition '{container_edition}' "
                 f"but filename does not"
@@ -1594,8 +1596,10 @@ def check_template(item, template, replace_doubles=True, separator=''):
     detail_parts = ', '.join(differences) if differences else 'filename format mismatch'
 
     # LOW = purely cosmetic formatting (title/year/quality all present, has IMDB)
+    #       or only difference is a missing edition tag
     # MEDIUM = missing substantive tokens or no IMDB to confirm identity
-    severity = 'LOW' if (not differences and imdb_id) else 'MEDIUM'
+    edition_only = differences == ['missing edition']
+    severity = 'LOW' if ((not differences or edition_only) and imdb_id) else 'MEDIUM'
 
     return {
         'check': 'template',
