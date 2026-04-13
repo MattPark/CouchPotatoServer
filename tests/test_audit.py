@@ -144,8 +144,8 @@ class TestGetEditionCompound:
 
     def test_extended_directors_cut(self):
         result = get_edition('Movie.2005.EXTENDED.DIRECTORS.CUT.1080p.mkv')
-        # Extended is at earlier position, and it extends to "Extended Directors Cut"
-        assert result == 'Extended Directors Cut'
+        # Now matches the explicit EDITION_MAP tuple for Extended Director's Cut
+        assert result == "Extended Director's Cut"
 
     def test_unrated_stops_at_tech_word(self):
         """Unrated followed by tech word should NOT form compound."""
@@ -559,6 +559,65 @@ class TestEditionIntegration:
             'X-Men.Days.of.Future.Past.2014.THE.ROGUE.CUT.1080p.BluRay.mkv'
         )
         assert result == 'Rogue Cut'
+
+    # --- Possessive apostrophe handling ---
+
+    def test_extended_directors_cut_apostrophe(self):
+        """Container title with apostrophe: Extended Director's Cut."""
+        result = get_edition("Extended Director's Cut")
+        assert result == "Extended Director's Cut"
+
+    def test_extended_directors_cut_dotted(self):
+        """Filename-style: Extended.Directors.Cut after year."""
+        result = get_edition(
+            'Cop.Land.1997.Extended.Directors.Cut.1080p.BluRay.mkv'
+        )
+        assert result == "Extended Director's Cut"
+
+    def test_directors_cut_apostrophe_only(self):
+        """Plain Director's Cut with apostrophe still works."""
+        result = get_edition("Some.Movie.2020.Director's.Cut.1080p.mkv")
+        assert result == "Director's Cut"
+
+    def test_extended_director_cut_no_s(self):
+        """Extended Director Cut (no possessive) also matches."""
+        result = get_edition(
+            'Movie.2020.Extended.Director.Cut.1080p.mkv'
+        )
+        assert result == "Extended Director's Cut"
+
+    def test_parse_release_directors_cut_apostrophe(self):
+        """_parse_edition_from_release handles apostrophe."""
+        result = _parse_edition_from_release("Extended Director's Cut")
+        assert result == "Extended Director's Cut"
+
+    def test_parse_release_directors_cut_dotted(self):
+        """_parse_edition_from_release with dotted release name."""
+        result = _parse_edition_from_release(
+            'Cop.Land.1997.Extended.Directors.Cut.1080p.BluRay-Group'
+        )
+        assert result == "Extended Director's Cut"
+
+    def test_unrated_dc_scene_style(self):
+        """Unrated DC in scene release → Unrated Director's Cut."""
+        result = _parse_edition_from_release(
+            'Dawn.of.the.Dead.2004.Unrated.DC.2160p.BluRay.x265-QTZ'
+        )
+        assert result == "Unrated Director's Cut"
+
+    def test_unrated_dc_container_title(self):
+        """Unrated DC in container title string."""
+        result = get_edition(
+            'Dawn of the Dead (2004) Unrated DC MULTi VFF 2160p'
+        )
+        assert result == "Unrated Director's Cut"
+
+    def test_unrated_directors_cut_full(self):
+        """Full Unrated Directors Cut in filename."""
+        result = get_edition(
+            'Movie.2020.Unrated.Directors.Cut.1080p.mkv'
+        )
+        assert result == "Unrated Director's Cut"
 
 
 # ===========================================================================

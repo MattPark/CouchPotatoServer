@@ -151,6 +151,8 @@ MAX_WORKERS = 16
 # Edition detection (ported from scanner.py)
 EDITION_MAP = {
     "Director's Cut": [('directors', 'cut'), ('directors', 'edition'), 'dc'],
+    "Extended Director's Cut": [('extended', 'directors', 'cut'), ('extended', 'director', 'cut')],
+    "Unrated Director's Cut": [('unrated', 'dc'), ('unrated', 'directors', 'cut'), ('unrated', 'director', 'cut')],
     'Extended Edition': [('extended', 'cut'), ('extended', 'edition'), 'extended'],
     'Unrated': ['unrated'],
     'Theatrical': [('theatrical', 'cut'), ('theatrical', 'edition'), 'theatrical'],
@@ -682,7 +684,10 @@ def get_edition(filename):
     if plex_match:
         return plex_match.group(1)
 
-    words = re.split(r'\W+', filename.lower())
+    # Collapse possessive apostrophes before tokenizing so "Director's"
+    # becomes "Directors" and matches EDITION_MAP tuples like ('directors', 'cut')
+    text = re.sub(r"(\w)'s\b", r'\1s', filename.lower())
+    words = re.split(r'\W+', text)
 
     # Find year position — editions only appear after the year in release names
     year_idx = 0
@@ -954,7 +959,9 @@ def _parse_edition_from_release(release_name):
     """
     if not release_name:
         return ''
-    words = re.split(r'\W+', release_name.lower())
+    # Collapse possessive apostrophes: "Director's" → "Directors"
+    text = re.sub(r"(\w)'s\b", r'\1s', release_name.lower())
+    words = re.split(r'\W+', text)
 
     # Find year position for gating ambiguous tags
     year_idx = 0
