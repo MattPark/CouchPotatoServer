@@ -60,7 +60,7 @@ class OpenSubtitlesCom(MovieProvider):
         self._incrementDaily(self._daily_hash_hits)
 
     def getStats(self):
-        api_key = self.conf('opensubtitles_api_key') or ''
+        api_key = self.conf('opensubtitles_api_key', section='opensubtitles') or ''
         return {
             'opensubtitles': {
                 'searches_today': self._getDailyCount(self._daily_calls),
