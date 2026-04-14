@@ -1653,3 +1653,196 @@ class TestComputeRecommendedActionOpenSubtitles:
         }
         result = compute_recommended_action(flags, identification)
         assert result == 'delete_wrong'
+
+
+class TestRecalculateFolderDuplicates:
+    """Tests for Audit._recalculate_folder_duplicates() logic.
+
+    Since the method lives on the Audit class (which needs the full CP
+    runtime), we test via a minimal mock that has just last_report.
+    """
+
+    def _make_audit(self, flagged):
+        """Create a minimal object with the attributes _recalculate_folder_duplicates needs."""
+        # Import the actual method so we can bind it
+        from couchpotato.core.plugins.audit import Audit
+        obj = object.__new__(Audit)
+        obj.last_report = {
+            'flagged': flagged,
+            'total_flagged': len(flagged),
+        }
+        return obj
+
+    def _make_item(self, item_id, folder, filename, file_size, duration=100.0,
+                   resolution='1080p', flags=None, fixed=None):
+        return {
+            'item_id': item_id,
+            'folder': folder,
+            'file': filename,
+            'file_path': '/movies/%s/%s' % (folder, filename),
+            'file_size_bytes': file_size,
+            'actual': {
+                'resolution': '1920x1080',
+                'duration_min': duration,
+                'video_codec': 'h264',
+                'container_title': None,
+                'container_title_parsed': None,
+            },
+            'expected': {
+                'resolution': resolution,
+                'runtime_min': 120,
+                'title': 'Test',
+                'year': 2020,
+                'db_title': 'Test',
+            },
+            'flags': flags or [],
+            'flag_count': len(flags) if flags else 0,
+            'identification': None,
+            'recommended_action': None,
+            'fixed': fixed,
+            'variant_files': [],
+            'variant_count': 0,
+        }
+
+    def test_removes_stale_duplicate_flag_after_partner_deleted(self):
+        """When file A is deleted, file B's 'duplicate of A' flag is removed."""
+        item_a = self._make_item('aaa', 'Movie (2020)', 'a.mkv', 5000,
+                                 flags=[{'check': 'duplicate', 'severity': 'MEDIUM',
+                                         'detail': 'Possible duplicate of b.mkv'}],
+                                 fixed={'action': 'delete_wrong'})
+        item_b = self._make_item('bbb', 'Movie (2020)', 'b.mkv', 5000,
+                                 flags=[{'check': 'duplicate', 'severity': 'MEDIUM',
+                                         'detail': 'Possible duplicate of a.mkv'}])
+
+        audit = self._make_audit([item_a, item_b])
+        audit._recalculate_folder_duplicates(item_a)
+
+        # B should have lost its duplicate flag and been removed (no flags left)
+        assert item_b not in audit.last_report['flagged']
+        assert audit.last_report['total_flagged'] == 1  # only fixed item_a remains
+
+    def test_keeps_duplicate_flag_when_third_file_still_matches(self):
+        """If A, B, C are all same-size duplicates and A is deleted,
+        B and C should still be flagged as duplicates of each other."""
+        item_a = self._make_item('aaa', 'Movie (2020)', 'a.mkv', 5000,
+                                 flags=[{'check': 'duplicate', 'severity': 'MEDIUM',
+                                         'detail': 'Possible duplicate of b.mkv'}],
+                                 fixed={'action': 'delete_wrong'})
+        item_b = self._make_item('bbb', 'Movie (2020)', 'b.mkv', 5000,
+                                 flags=[{'check': 'duplicate', 'severity': 'MEDIUM',
+                                         'detail': 'Possible duplicate of a.mkv'}])
+        item_c = self._make_item('ccc', 'Movie (2020)', 'c.mkv', 5000,
+                                 flags=[{'check': 'duplicate', 'severity': 'MEDIUM',
+                                         'detail': 'Possible duplicate of a.mkv'}])
+
+        audit = self._make_audit([item_a, item_b, item_c])
+        audit._recalculate_folder_duplicates(item_a)
+
+        # B and C should still be in flagged with updated duplicate flags
+        assert item_b in audit.last_report['flagged']
+        assert item_c in audit.last_report['flagged']
+        b_dupe = [f for f in item_b['flags'] if f['check'] == 'duplicate']
+        c_dupe = [f for f in item_c['flags'] if f['check'] == 'duplicate']
+        assert len(b_dupe) == 1
+        assert 'c.mkv' in b_dupe[0]['detail']
+        assert len(c_dupe) == 1
+        assert 'b.mkv' in c_dupe[0]['detail']
+
+    def test_preserves_non_duplicate_flags(self):
+        """Removing a duplicate flag should not affect other flags on the sibling."""
+        item_a = self._make_item('aaa', 'Movie (2020)', 'a.mkv', 5000,
+                                 flags=[{'check': 'duplicate', 'severity': 'MEDIUM',
+                                         'detail': 'Possible duplicate of b.mkv'}],
+                                 fixed={'action': 'delete_wrong'})
+        item_b = self._make_item('bbb', 'Movie (2020)', 'b.mkv', 5000,
+                                 flags=[
+                                     {'check': 'resolution', 'severity': 'HIGH',
+                                      'detail': 'Claimed 1080p, actual 720p'},
+                                     {'check': 'duplicate', 'severity': 'MEDIUM',
+                                      'detail': 'Possible duplicate of a.mkv'},
+                                 ])
+
+        audit = self._make_audit([item_a, item_b])
+        audit._recalculate_folder_duplicates(item_a)
+
+        # B should still be in flagged with just the resolution flag
+        assert item_b in audit.last_report['flagged']
+        assert len(item_b['flags']) == 1
+        assert item_b['flags'][0]['check'] == 'resolution'
+        assert item_b['flag_count'] == 1
+
+    def test_recomputes_recommended_action(self):
+        """After removing duplicate flag, recommended_action is recomputed."""
+        item_a = self._make_item('aaa', 'Movie (2020)', 'a.mkv', 5000,
+                                 flags=[{'check': 'duplicate', 'severity': 'MEDIUM',
+                                         'detail': 'Possible duplicate of b.mkv'}],
+                                 fixed={'action': 'delete_wrong'})
+        item_b = self._make_item('bbb', 'Movie (2020)', 'b.mkv', 5000,
+                                 flags=[
+                                     {'check': 'template', 'severity': 'LOW',
+                                      'detail': 'Filename mismatch'},
+                                     {'check': 'duplicate', 'severity': 'MEDIUM',
+                                      'detail': 'Possible duplicate of a.mkv'},
+                                 ])
+
+        audit = self._make_audit([item_a, item_b])
+        audit._recalculate_folder_duplicates(item_a)
+
+        # B should now have rename_template (not delete_wrong)
+        assert item_b['recommended_action'] == 'rename_template'
+
+    def test_does_nothing_when_no_duplicate_flags(self):
+        """No-op when siblings have no duplicate flags."""
+        item_a = self._make_item('aaa', 'Movie (2020)', 'a.mkv', 5000,
+                                 flags=[{'check': 'resolution', 'severity': 'HIGH',
+                                         'detail': 'wrong res'}],
+                                 fixed={'action': 'delete_wrong'})
+        item_b = self._make_item('bbb', 'Movie (2020)', 'b.mkv', 6000,
+                                 flags=[{'check': 'template', 'severity': 'LOW',
+                                         'detail': 'template mismatch'}])
+
+        audit = self._make_audit([item_a, item_b])
+        audit._recalculate_folder_duplicates(item_a)
+
+        # B should be untouched
+        assert len(item_b['flags']) == 1
+        assert item_b['flags'][0]['check'] == 'template'
+
+    def test_does_nothing_for_different_folder(self):
+        """Items in a different folder are not affected."""
+        item_a = self._make_item('aaa', 'Movie A (2020)', 'a.mkv', 5000,
+                                 flags=[{'check': 'duplicate', 'severity': 'MEDIUM',
+                                         'detail': 'Possible duplicate of b.mkv'}],
+                                 fixed={'action': 'delete_wrong'})
+        item_b = self._make_item('bbb', 'Movie B (2020)', 'b.mkv', 5000,
+                                 flags=[{'check': 'duplicate', 'severity': 'MEDIUM',
+                                         'detail': 'Possible duplicate of c.mkv'}])
+
+        audit = self._make_audit([item_a, item_b])
+        audit._recalculate_folder_duplicates(item_a)
+
+        # B is in a different folder, should be untouched
+        assert len(item_b['flags']) == 1
+        assert item_b['flags'][0]['check'] == 'duplicate'
+
+    def test_updates_variant_files(self):
+        """variant_files list should be updated to remove the deleted file."""
+        item_a = self._make_item('aaa', 'Movie (2020)', 'a.mkv', 5000,
+                                 flags=[{'check': 'duplicate', 'severity': 'MEDIUM',
+                                         'detail': 'Possible duplicate of b.mkv'}],
+                                 fixed={'action': 'delete_wrong'})
+        item_b = self._make_item('bbb', 'Movie (2020)', 'b.mkv', 5000,
+                                 flags=[
+                                     {'check': 'resolution', 'severity': 'HIGH',
+                                      'detail': 'wrong res'},
+                                     {'check': 'duplicate', 'severity': 'MEDIUM',
+                                      'detail': 'Possible duplicate of a.mkv'},
+                                 ])
+        item_b['variant_files'] = ['a.mkv', 'b.mkv']
+        item_b['variant_count'] = 2
+
+        audit = self._make_audit([item_a, item_b])
+        audit._recalculate_folder_duplicates(item_a)
+
+        assert item_b['variant_files'] == ['b.mkv']
+        assert item_b['variant_count'] == 1

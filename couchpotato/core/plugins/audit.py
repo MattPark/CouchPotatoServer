@@ -4636,6 +4636,102 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         # Append to actions log (O(1)) instead of rewriting full report
         self._append_action(item, action, details)
 
+    def _recalculate_folder_duplicates(self, fixed_item):
+        """Recalculate duplicate flags for siblings after a delete/reassign.
+
+        When a file is deleted or moved out of a folder, its sibling items
+        may have stale 'duplicate' flags referencing the removed file.
+        This method:
+        1. Finds all unfixed siblings in the same folder
+        2. Re-runs detect_duplicates() on them (no disk I/O — uses stored metadata)
+        3. Removes stale duplicate flags, adds new ones if still warranted
+        4. Recomputes recommended_action for affected siblings
+        5. Drops siblings that have no remaining flags (now clean)
+        6. Updates variant_files/variant_count to reflect the removed file
+        """
+        if not self.last_report:
+            return
+
+        folder = fixed_item.get('folder', '')
+        fixed_file = fixed_item.get('file', '')
+        flagged = self.last_report.get('flagged', [])
+
+        # Find unfixed siblings in the same folder (excluding the just-fixed item)
+        siblings = [it for it in flagged
+                    if it.get('folder') == folder
+                    and not it.get('fixed')
+                    and it is not fixed_item]
+
+        if not siblings:
+            return
+
+        # Check if any sibling has a duplicate flag — if not, nothing to do
+        has_any_dupe = any(
+            any(f['check'] == 'duplicate' for f in it.get('flags', []))
+            for it in siblings
+        )
+        if not has_any_dupe:
+            return
+
+        # Re-run duplicate detection on surviving siblings
+        new_dupe_pairs = detect_duplicates(siblings)
+        # Build set of indices that are still duplicates
+        still_duped = set()
+        for idx_a, idx_b in new_dupe_pairs:
+            still_duped.add(idx_a)
+            still_duped.add(idx_b)
+
+        # Build partner map: index → partner filename
+        partner_map = {}
+        for idx_a, idx_b in new_dupe_pairs:
+            # Each index gets mapped to its first partner
+            if idx_a not in partner_map:
+                partner_map[idx_a] = siblings[idx_b].get('file', '')
+            if idx_b not in partner_map:
+                partner_map[idx_b] = siblings[idx_a].get('file', '')
+
+        # Update each sibling
+        items_to_remove = []
+        for i, sib in enumerate(siblings):
+            old_flags = sib.get('flags', [])
+            # Remove all existing duplicate flags
+            new_flags = [f for f in old_flags if f['check'] != 'duplicate']
+
+            # Re-add duplicate flag if still warranted
+            if i in still_duped:
+                new_flags.append({
+                    'check': 'duplicate',
+                    'severity': 'MEDIUM',
+                    'detail': 'Possible duplicate of %s' % partner_map.get(i, '?'),
+                })
+
+            sib['flags'] = new_flags
+            sib['flag_count'] = len(new_flags)
+
+            if not new_flags:
+                # No flags left — this item is now clean
+                items_to_remove.append(sib)
+            else:
+                # Recompute recommended_action with updated flags
+                sib['recommended_action'] = compute_recommended_action(
+                    new_flags, sib.get('identification'), sib.get('expected')
+                )
+
+            # Update variant_files to remove the deleted/moved file
+            vf = sib.get('variant_files', [])
+            if fixed_file in vf:
+                vf = [f for f in vf if f != fixed_file]
+                sib['variant_files'] = vf
+                sib['variant_count'] = len(vf)
+
+        # Remove now-clean items from the flagged list
+        if items_to_remove:
+            for item in items_to_remove:
+                flagged.remove(item)
+            self.last_report['total_flagged'] = len(flagged)
+            log.info('Duplicate recalculation: removed %s now-clean items from %s',
+                     (len(items_to_remove), folder))
+
     def _apply_reset_status(self, item, reset_status):
         """Apply a status change to the original movie in the CP database.
 
@@ -4791,6 +4887,11 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         # Mark as fixed
         self._mark_fixed(item, action, details)
         log.info('Fix %s applied to %s: %s', (action, item.get('folder', item_id), details))
+
+        # Recalculate duplicate flags for remaining siblings when a file
+        # is removed from a folder (delete or reassign/move)
+        if action in ('delete_wrong', 'reassign_movie'):
+            self._recalculate_folder_duplicates(item)
 
         return {
             'success': True,
@@ -5047,6 +5148,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
                 if success:
                     self._mark_fixed(item, action, details)
+                    # Recalculate duplicate flags for remaining siblings
+                    if action in ('delete_wrong', 'reassign_movie'):
+                        self._recalculate_folder_duplicates(item)
                     completed += 1
                 else:
                     failed += 1
