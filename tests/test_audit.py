@@ -30,6 +30,8 @@ from couchpotato.core.plugins.audit import (
     parse_cd_number,
     classify_video_files,
     detect_duplicates,
+    compute_opensubtitles_hash,
+    opensubtitles_lookup_hash,
 )
 import re
 
@@ -1407,3 +1409,247 @@ class TestDetectDuplicates:
         pairs = detect_duplicates(results)
         # Same size → duplicate via size check (different runtime/res don't matter)
         assert pairs == [(0, 1)]
+
+
+# ---------------------------------------------------------------------------
+# OpenSubtitles hash and lookup tests
+# ---------------------------------------------------------------------------
+
+class TestComputeOpensubtitlesHash:
+    """Tests for compute_opensubtitles_hash()."""
+
+    def _make_file(self, tmp_path, size, content_byte=b'\x00'):
+        """Create a test file of the given size."""
+        fp = tmp_path / 'test.mkv'
+        # Write deterministic content
+        fp.write_bytes(content_byte * size)
+        return str(fp)
+
+    def test_file_too_small(self, tmp_path):
+        """Files smaller than 128KB return None."""
+        fp = self._make_file(tmp_path, 64 * 1024)  # exactly 64KB
+        result = compute_opensubtitles_hash(fp)
+        assert result is None
+
+    def test_minimum_size(self, tmp_path):
+        """Files of exactly 128KB (65536 * 2) return a valid hash."""
+        fp = self._make_file(tmp_path, 65536 * 2)
+        result = compute_opensubtitles_hash(fp)
+        assert result is not None
+        assert len(result) == 16
+        assert all(c in '0123456789abcdef' for c in result)
+
+    def test_hash_is_deterministic(self, tmp_path):
+        """Same file produces the same hash."""
+        fp = self._make_file(tmp_path, 200000, b'\x42')
+        h1 = compute_opensubtitles_hash(fp)
+        h2 = compute_opensubtitles_hash(fp)
+        assert h1 == h2
+
+    def test_different_content_different_hash(self, tmp_path):
+        """Files with different content produce different hashes."""
+        fp1 = tmp_path / 'a.mkv'
+        fp2 = tmp_path / 'b.mkv'
+        fp1.write_bytes(b'\x00' * 200000)
+        fp2.write_bytes(b'\xff' * 200000)
+        h1 = compute_opensubtitles_hash(str(fp1))
+        h2 = compute_opensubtitles_hash(str(fp2))
+        assert h1 != h2
+
+    def test_hash_includes_filesize(self, tmp_path):
+        """Different file sizes with same content pattern produce different hashes."""
+        fp1 = self._make_file(tmp_path, 200000, b'\x42')
+        fp2 = tmp_path / 'bigger.mkv'
+        fp2.write_bytes(b'\x42' * 300000)
+        h1 = compute_opensubtitles_hash(fp1)
+        h2 = compute_opensubtitles_hash(str(fp2))
+        assert h1 != h2
+
+    def test_returns_lowercase_hex(self, tmp_path):
+        """Hash should be lowercase hex string."""
+        fp = self._make_file(tmp_path, 200000, b'\xAB')
+        result = compute_opensubtitles_hash(fp)
+        assert result == result.lower()
+
+
+class TestOpensubtitlesLookupHash:
+    """Tests for opensubtitles_lookup_hash() with mocked HTTP."""
+
+    def _mock_response(self, data, status_code=200):
+        """Create a mock response object."""
+        class MockResp:
+            def __init__(self):
+                self.status_code = status_code
+                self.ok = status_code == 200
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise Exception(f'HTTP {self.status_code}')
+            def json(self):
+                return data
+        return MockResp()
+
+    def test_no_api_key_returns_none(self):
+        """Returns None when no API key is provided."""
+        result = opensubtitles_lookup_hash('abcdef0123456789', '')
+        assert result is None
+
+    def test_no_api_key_none_returns_none(self):
+        """Returns None when API key is None."""
+        result = opensubtitles_lookup_hash('abcdef0123456789', None)
+        assert result is None
+
+    def test_successful_hash_match(self, monkeypatch):
+        """Returns identification when moviehash_match is True."""
+        response_data = {
+            'data': [{
+                'attributes': {
+                    'moviehash_match': True,
+                    'release': 'Some.Movie.2024.1080p.BluRay',
+                    'feature_details': {
+                        'title': 'Some Movie',
+                        'year': 2024,
+                        'imdb_id': 1234567,
+                        'tmdb_id': 99999,
+                        'feature_type': 'Movie',
+                    }
+                }
+            }]
+        }
+
+        import requests as req_module
+        monkeypatch.setattr(req_module, 'get', lambda *a, **kw: self._mock_response(response_data))
+
+        result = opensubtitles_lookup_hash('abcdef0123456789', 'test_key')
+        assert result is not None
+        assert result['title'] == 'Some Movie'
+        assert result['year'] == 2024
+        assert result['imdb_id'] == 'tt1234567'
+        assert result['feature_type'] == 'movie'
+
+    def test_episode_detection(self, monkeypatch):
+        """Returns feature_type='episode' for TV episodes."""
+        response_data = {
+            'data': [{
+                'attributes': {
+                    'moviehash_match': True,
+                    'release': 'Some.Show.S01E01',
+                    'feature_details': {
+                        'title': 'Some Show',
+                        'year': 2023,
+                        'imdb_id': 7654321,
+                        'tmdb_id': 88888,
+                        'feature_type': 'Episode',
+                    }
+                }
+            }]
+        }
+
+        import requests as req_module
+        monkeypatch.setattr(req_module, 'get', lambda *a, **kw: self._mock_response(response_data))
+
+        result = opensubtitles_lookup_hash('abcdef0123456789', 'test_key')
+        assert result is not None
+        assert result['feature_type'] == 'episode'
+
+    def test_no_results_returns_none(self, monkeypatch):
+        """Returns None when API returns no results."""
+        import requests as req_module
+        monkeypatch.setattr(req_module, 'get', lambda *a, **kw: self._mock_response({'data': []}))
+
+        result = opensubtitles_lookup_hash('abcdef0123456789', 'test_key')
+        assert result is None
+
+    def test_no_moviehash_match_falls_back(self, monkeypatch):
+        """Falls back to first result when no moviehash_match entries."""
+        response_data = {
+            'data': [{
+                'attributes': {
+                    'moviehash_match': False,
+                    'release': 'Fallback.Movie.2022',
+                    'feature_details': {
+                        'title': 'Fallback Movie',
+                        'year': 2022,
+                        'imdb_id': 1111111,
+                        'feature_type': 'Movie',
+                    }
+                }
+            }]
+        }
+
+        import requests as req_module
+        monkeypatch.setattr(req_module, 'get', lambda *a, **kw: self._mock_response(response_data))
+
+        result = opensubtitles_lookup_hash('abcdef0123456789', 'test_key')
+        assert result is not None
+        assert result['title'] == 'Fallback Movie'
+        assert result.get('hash_match') is False
+
+    def test_api_error_returns_none(self, monkeypatch):
+        """Returns None on API error."""
+        import requests as req_module
+        monkeypatch.setattr(req_module, 'get', lambda *a, **kw: self._mock_response({}, 500))
+
+        result = opensubtitles_lookup_hash('abcdef0123456789', 'test_key')
+        assert result is None
+
+    def test_imdb_id_zero_padded(self, monkeypatch):
+        """IMDB ID is properly zero-padded with tt prefix."""
+        response_data = {
+            'data': [{
+                'attributes': {
+                    'moviehash_match': True,
+                    'feature_details': {
+                        'title': 'Test',
+                        'year': 2020,
+                        'imdb_id': 123,
+                        'feature_type': 'Movie',
+                    }
+                }
+            }]
+        }
+
+        import requests as req_module
+        monkeypatch.setattr(req_module, 'get', lambda *a, **kw: self._mock_response(response_data))
+
+        result = opensubtitles_lookup_hash('abcdef0123456789', 'test_key')
+        assert result['imdb_id'] == 'tt0000123'
+
+
+class TestComputeRecommendedActionOpenSubtitles:
+    """Tests for compute_recommended_action() with opensubtitles_hash method."""
+
+    def test_opensubtitles_hash_different_movie(self):
+        """opensubtitles_hash with different title → reassign_movie."""
+        flags = [{'check': 'title', 'severity': 'HIGH'}]
+        identification = {
+            'method': 'opensubtitles_hash',
+            'identified_title': 'Different Movie',
+            'identified_year': 2020,
+            'identified_imdb': 'tt1234567',
+        }
+        expected = {'title': 'Original Movie', 'year': 2020}
+        result = compute_recommended_action(flags, identification, expected)
+        assert result == 'reassign_movie'
+
+    def test_opensubtitles_hash_same_movie(self):
+        """opensubtitles_hash with same title → falls through to flag-based."""
+        flags = [{'check': 'template', 'severity': 'LOW'}]
+        identification = {
+            'method': 'opensubtitles_hash',
+            'identified_title': 'Same Movie',
+            'identified_year': 2020,
+        }
+        expected = {'title': 'Same Movie', 'year': 2020}
+        result = compute_recommended_action(flags, identification, expected)
+        assert result == 'rename_template'
+
+    def test_opensubtitles_hash_tv_episode(self):
+        """opensubtitles_hash with feature_type=episode → delete_wrong."""
+        flags = [{'check': 'title', 'severity': 'HIGH'}]
+        identification = {
+            'method': 'opensubtitles_hash',
+            'feature_type': 'episode',
+            'identified_title': 'Some Show',
+        }
+        result = compute_recommended_action(flags, identification)
+        assert result == 'delete_wrong'

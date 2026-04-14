@@ -33,7 +33,7 @@ var MetadataSettingTab = new Class({
 	injectStats: function(content){
 		var self = this;
 
-		var services = ['omdbapi', 'themoviedb', 'fanarttv'];
+		var services = ['omdbapi', 'themoviedb', 'fanarttv', 'opensubtitles'];
 		services.each(function(name){
 			var group = content.getElement('.group_' + name);
 			if (group) {
@@ -143,6 +143,27 @@ var MetadataSettingTab = new Class({
 					'<div class="stat_item">' +
 						'<span class="stat_value">' + (f.has_custom_key ? 'Custom' : 'Built-in') + '</span>' +
 						'<span class="stat_label">Key Type</span>' +
+					'</div>' +
+				'</div>'
+			);
+		}
+
+		// OpenSubtitles
+		if (json.opensubtitles && self.stats_panels['opensubtitles']) {
+			var os = json.opensubtitles;
+			self.stats_panels['opensubtitles'].set('html',
+				'<div class="stats_grid">' +
+					'<div class="stat_item">' +
+						'<span class="stat_value">' + os.searches_today + '</span>' +
+						'<span class="stat_label">Searches Today</span>' +
+					'</div>' +
+					'<div class="stat_item">' +
+						'<span class="stat_value">' + os.hash_hits_today + '</span>' +
+						'<span class="stat_label">Hash Hits</span>' +
+					'</div>' +
+					'<div class="stat_item">' +
+						'<span class="stat_value">' + (os.has_api_key ? 'Configured' : 'Not Set') + '</span>' +
+						'<span class="stat_label">API Key</span>' +
 					'</div>' +
 				'</div>'
 			);

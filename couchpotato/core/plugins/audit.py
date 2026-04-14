@@ -8,8 +8,9 @@ Tier 1 (local, no network):
 
 Tier 2 (targeted identification for flagged files):
   A. Container title already identified it (from Tier 1 data)
-  B. CRC32 reverse lookup on srrDB → release name + IMDB ID
-  C. (future) TMDB search fallback
+  B. OpenSubtitles moviehash (fast, reads 128KB) → IMDB ID + title
+  C. CRC32 reverse lookup on srrDB → release name + IMDB ID
+  D. (future) TMDB search fallback
 
   Smart skip logic (tier2 without force_tier2):
     - TV episode detected → skip tier 2, mark for deletion
@@ -45,6 +46,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -132,6 +134,9 @@ FOLDER_RE = re.compile(r'^(.+?)\s*\((\d{4})\)\s*$')
 
 # srrDB API base
 SRRDB_API = 'https://api.srrdb.com/v1'
+
+# OpenSubtitles REST API v1
+OPENSUBTITLES_API = 'https://api.opensubtitles.com/api/v1'
 
 # TV episode patterns in container titles
 TV_EPISODE_RE = re.compile(
@@ -772,7 +777,11 @@ def compute_recommended_action(flags, identification=None, expected=None):
         if method == 'tv_episode_detected':
             return 'delete_wrong'
 
-        if method in ('container_title', 'srrdb_crc', 'manual'):
+        # OpenSubtitles identified as TV episode
+        if method == 'opensubtitles_hash' and identification.get('feature_type') == 'episode':
+            return 'delete_wrong'
+
+        if method in ('container_title', 'srrdb_crc', 'opensubtitles_hash', 'manual'):
             id_title = identification.get('identified_title', '')
             id_imdb = identification.get('identified_imdb')
 
@@ -1730,11 +1739,147 @@ def srrdb_lookup_crc(crc_hex):
     }
 
 
-def identify_flagged_file(filepath, flags, container_title_parsed):
+def compute_opensubtitles_hash(filepath):
+    """Compute the OpenSubtitles movie hash for a file.
+
+    The algorithm sums 64-bit little-endian integers from the first 64KB and
+    last 64KB of the file, seeded with the file size.  Only reads 128KB
+    regardless of file size, making it orders of magnitude faster than CRC32.
+
+    Returns a 16-character lowercase hex string, or None if the file is
+    too small (< 128KB).
+    """
+    bytesize = struct.calcsize(b'<q')  # 8 bytes
+    filesize = os.path.getsize(filepath)
+    if filesize < 65536 * 2:
+        return None
+
+    filehash = filesize
+    with open(filepath, 'rb') as f:
+        # Read first 64KB
+        for _ in range(65536 // bytesize):
+            buf = f.read(bytesize)
+            (val,) = struct.unpack(b'<q', buf)
+            filehash += val
+            filehash &= 0xFFFFFFFFFFFFFFFF
+
+        # Read last 64KB
+        f.seek(max(0, filesize - 65536), 0)
+        for _ in range(65536 // bytesize):
+            buf = f.read(bytesize)
+            (val,) = struct.unpack(b'<q', buf)
+            filehash += val
+            filehash &= 0xFFFFFFFFFFFFFFFF
+
+    return f'{filehash:016x}'
+
+
+def opensubtitles_lookup_hash(moviehash, api_key, filepath=None):
+    """Look up an OpenSubtitles movie hash to identify a file.
+
+    Queries the /subtitles endpoint with the moviehash parameter.
+    Returns an identification dict or None if no match found.
+
+    The search endpoint is unlimited (no download quota consumed).
+    Only subtitle downloads count against the daily quota.
+
+    Args:
+        moviehash: 16-char hex string from compute_opensubtitles_hash()
+        api_key: OpenSubtitles REST API key
+        filepath: optional, used for file_name hint in the request
+
+    Returns:
+        dict with identification info, or None if no match.
+    """
+    if not requests:
+        _log_warn('requests not available, skipping OpenSubtitles lookup')
+        return None
+
+    if not api_key:
+        return None
+
+    headers = {
+        'Api-Key': api_key,
+        'User-Agent': 'CouchPotato',
+        'Accept': 'application/json',
+    }
+
+    params = {'moviehash': moviehash}
+
+    try:
+        resp = requests.get(
+            f'{OPENSUBTITLES_API}/subtitles',
+            headers=headers,
+            params=params,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        _log_warn('OpenSubtitles lookup failed: %s' % e)
+        return None
+
+    results = data.get('data', [])
+    if not results:
+        return None
+
+    # Find the first result with moviehash_match and feature_details
+    for entry in results:
+        attrs = entry.get('attributes', {})
+        if not attrs.get('moviehash_match', False):
+            continue
+        feature = attrs.get('feature_details', {})
+        if not feature:
+            continue
+
+        imdb_id = feature.get('imdb_id')
+        if imdb_id:
+            # Ensure tt prefix and zero-padding
+            imdb_id = 'tt' + str(int(imdb_id)).rjust(7, '0')
+
+        feature_type = (feature.get('feature_type') or '').lower()
+
+        result = {
+            'title': feature.get('title', ''),
+            'year': int(feature.get('year')) if feature.get('year') else None,
+            'imdb_id': imdb_id,
+            'tmdb_id': feature.get('tmdb_id'),
+            'feature_type': feature_type,
+            'release': attrs.get('release', ''),
+        }
+        return result
+
+    # No moviehash_match entries — try the first result anyway
+    first = results[0]
+    attrs = first.get('attributes', {})
+    feature = attrs.get('feature_details', {})
+    if feature:
+        imdb_id = feature.get('imdb_id')
+        if imdb_id:
+            imdb_id = 'tt' + str(int(imdb_id)).rjust(7, '0')
+
+        feature_type = (feature.get('feature_type') or '').lower()
+
+        return {
+            'title': feature.get('title', ''),
+            'year': int(feature.get('year')) if feature.get('year') else None,
+            'imdb_id': imdb_id,
+            'tmdb_id': feature.get('tmdb_id'),
+            'feature_type': feature_type,
+            'release': attrs.get('release', ''),
+            'hash_match': False,
+        }
+
+    return None
+
+
+def identify_flagged_file(filepath, flags, container_title_parsed,
+                         opensubtitles_api_key=None):
     """Try to identify what a flagged file actually is.
 
     Strategy A: Container title (already parsed)
-    Strategy B: CRC32 → srrDB reverse lookup
+    Strategy B: OpenSubtitles moviehash (fast, reads only 128KB)
+    Strategy C: CRC32 → srrDB reverse lookup (slow, reads entire file)
     """
     identification = None
 
@@ -1788,7 +1933,49 @@ def identify_flagged_file(filepath, flags, container_title_parsed):
 
             return identification
 
-    # Strategy B: CRC32 reverse lookup on srrDB
+    # Strategy B: OpenSubtitles moviehash (fast — reads only 128KB)
+    if opensubtitles_api_key:
+        _log_info('Computing OpenSubtitles hash for %s...' % os.path.basename(filepath))
+        moviehash = compute_opensubtitles_hash(filepath)
+        if moviehash:
+            _log_info('OpenSubtitles hash: %s' % moviehash)
+            hit = opensubtitles_lookup_hash(moviehash, opensubtitles_api_key,
+                                            filepath=filepath)
+            if hit:
+                feature_type = hit.get('feature_type', '')
+
+                # TV episode detection from OpenSubtitles
+                if feature_type == 'episode':
+                    return {
+                        'method': 'opensubtitles_hash',
+                        'identified_title': hit.get('title', ''),
+                        'identified_year': hit.get('year'),
+                        'identified_imdb': hit.get('imdb_id'),
+                        'confidence': 'high',
+                        'source': 'OpenSubtitles hash %s' % moviehash,
+                        'moviehash': moviehash,
+                        'feature_type': 'episode',
+                        'action': 'queue_deletion',
+                        'detail': 'OpenSubtitles identifies this as a TV episode',
+                    }
+
+                identification = {
+                    'method': 'opensubtitles_hash',
+                    'identified_title': hit.get('title', ''),
+                    'identified_year': hit.get('year'),
+                    'identified_imdb': hit.get('imdb_id'),
+                    'confidence': 'high',
+                    'source': 'OpenSubtitles hash %s' % moviehash,
+                    'moviehash': moviehash,
+                }
+                # Include release name if available (for edition backfill)
+                if hit.get('release'):
+                    identification['source'] = hit['release']
+                return identification
+        else:
+            _log_info('File too small for OpenSubtitles hash, skipping')
+
+    # Strategy C: CRC32 reverse lookup on srrDB
     _log_info('Computing CRC32 of %s...' % os.path.basename(filepath))
     file_size = os.path.getsize(filepath)
     file_size_gb = file_size / (1024 ** 3)
@@ -2035,7 +2222,7 @@ def detect_duplicates(file_results):
 def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
                       expected_runtime, renamer_template, renamer_replace_doubles,
                       renamer_separator, tier2=False, force_tier2=False,
-                      cd_number=None):
+                      cd_number=None, opensubtitles_api_key=None):
     """Scan one video file and return an audit result dict (or None if clean).
 
     This is the core per-file scanning logic extracted from scan_movie_folder().
@@ -2200,7 +2387,8 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
             }
         elif force_tier2 or needs_identification(flags):
             result['identification'] = identify_flagged_file(
-                filepath, flags, container_title_parsed
+                filepath, flags, container_title_parsed,
+                opensubtitles_api_key=opensubtitles_api_key
             )
         else:
             result['identification'] = {
@@ -2231,7 +2419,8 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
 
 def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
                    expected_runtime, renamer_template, renamer_replace_doubles,
-                   renamer_separator, tier2=False, force_tier2=False):
+                   renamer_separator, tier2=False, force_tier2=False,
+                   opensubtitles_api_key=None):
     """Scan a multi-CD folder (all files have sequential cd tags).
 
     Scans each CD file individually with its cd_number, then aggregates
@@ -2259,6 +2448,7 @@ def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
             renamer_separator=renamer_separator,
             tier2=tier2, force_tier2=force_tier2,
             cd_number=cd_num,
+            opensubtitles_api_key=opensubtitles_api_key,
         )
         per_file_results.append((cd_num, filepath, result))
 
@@ -2386,7 +2576,7 @@ def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
 def _scan_variants(video_files, classification, folder_title, folder_year,
                    imdb_id, db_entry, expected_runtime, renamer_template,
                    renamer_replace_doubles, renamer_separator, tier2=False,
-                   force_tier2=False):
+                   force_tier2=False, opensubtitles_api_key=None):
     """Scan a folder with multiple file variants (editions, qualities, dupes).
 
     Each file is scanned individually.  Only files with issues get result
@@ -2411,6 +2601,7 @@ def _scan_variants(video_files, classification, folder_title, folder_year,
             renamer_replace_doubles=renamer_replace_doubles,
             renamer_separator=renamer_separator,
             tier2=tier2, force_tier2=force_tier2,
+            opensubtitles_api_key=opensubtitles_api_key,
         )
         file_results.append((filepath, result))
 
@@ -2517,7 +2708,7 @@ def _scan_variants(video_files, classification, folder_title, folder_year,
 def scan_movie_folder(folder_path, folder_name, media_by_imdb,
                       tier2=False, force_tier2=False, media_by_title=None,
                       renamer_template=None, renamer_replace_doubles=True,
-                      renamer_separator=''):
+                      renamer_separator='', opensubtitles_api_key=None):
     """Scan a single movie folder and return audit results.
 
     Handles single-file, multi-CD, and variant (multi-file) folders.
@@ -2579,6 +2770,7 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
         renamer_separator=renamer_separator,
         tier2=tier2,
         force_tier2=force_tier2,
+        opensubtitles_api_key=opensubtitles_api_key,
     )
 
     # Classify files and dispatch
@@ -2604,7 +2796,8 @@ _SKIP = object()
 
 def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
                  force_tier2=False, workers=DEFAULT_WORKERS,
-                 progress_callback=None, cancel_flag=None):
+                 progress_callback=None, cancel_flag=None,
+                 opensubtitles_api_key=None):
     """Scan movie library for mislabeled files.
 
     Args:
@@ -2682,6 +2875,7 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
                 renamer_template=renamer_template,
                 renamer_replace_doubles=renamer_replace_doubles,
                 renamer_separator=renamer_separator,
+                opensubtitles_api_key=opensubtitles_api_key,
             )
             return result, False
         except Exception as e:
@@ -4045,6 +4239,14 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         self.in_progress = {'total': 0, 'scanned': 0, 'flagged': 0}
 
+        # Read OpenSubtitles API key from settings
+        os_api_key = ''
+        try:
+            os_api_key = Env.setting('opensubtitles_api_key',
+                                      section='opensubtitles', default='')
+        except Exception:
+            pass
+
         try:
             report = scan_library(
                 movies_dir=movies_dir,
@@ -4055,6 +4257,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 workers=workers,
                 progress_callback=self._on_progress,
                 cancel_flag=self._cancel,
+                opensubtitles_api_key=os_api_key,
             )
             self.last_report = report
             self.last_report['completed_at'] = time.time()
@@ -4306,7 +4509,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             if not ident:
                 continue
             method = ident.get('method', '')
-            if method in ('container_title', 'srrdb_crc', 'manual'):
+            if method in ('container_title', 'srrdb_crc', 'opensubtitles_hash', 'manual'):
                 tier2_identified += 1
             elif method == 'crc_not_found':
                 tier2_unidentified += 1
@@ -4630,8 +4833,16 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         log.info('Running Tier 2 identification on %s', (item.get('folder', item_id),))
 
         try:
+            # Get OpenSubtitles API key from settings
+            os_api_key = ''
+            try:
+                os_api_key = Env.setting('opensubtitles_api_key',
+                                          section='opensubtitles', default='')
+            except Exception:
+                pass
             identification = identify_flagged_file(
-                filepath, flags, container_title_parsed
+                filepath, flags, container_title_parsed,
+                opensubtitles_api_key=os_api_key
             )
         except Exception as e:
             log.error('Tier 2 identification failed for %s: %s', (item_id, e))
@@ -5028,6 +5239,10 @@ def main():
         '--output', '-o',
         help='Write JSON report to this file (default: stdout)',
     )
+    parser.add_argument(
+        '--opensubtitles-key',
+        help='OpenSubtitles REST API key for hash-based identification',
+    )
 
     args = parser.parse_args()
 
@@ -5038,6 +5253,7 @@ def main():
         tier2=args.tier2,
         force_tier2=args.force_tier2,
         workers=args.workers,
+        opensubtitles_api_key=getattr(args, 'opensubtitles_key', ''),
     )
 
     json_output = json.dumps(report, indent=2)
