@@ -1222,3 +1222,7 @@ input[type=text],textarea{-webkit-appearance:none}
 .audit_preview_warning{font-size:.85em;color:#f44336;padding:2px 0}
 .audit_modal_footer{display:flex;justify-content:flex-end;gap:7px;padding:10px 20px;border-top:1px solid rgba(0,0,0,.1)}
 .dark .audit_modal_footer{border-top-color:rgba(255,255,255,.1)}
+.audit_variant_list{display:flex;flex-direction:column;gap:2px}
+.audit_variant_file{font-family:monospace;font-size:.85em;opacity:.7;padding:1px 0}
+.audit_preview_subtitle{font-weight:700;font-size:.85em;margin:8px 0 4px;opacity:.8}
+.audit_preview_cd{padding-left:10px}

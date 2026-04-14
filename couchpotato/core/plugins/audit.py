@@ -760,6 +760,10 @@ def compute_recommended_action(flags, identification=None, expected=None):
     if 'tv_episode' in checks:
         return 'delete_wrong'
 
+    # Duplicate file — recommend deletion (manual review to pick which copy)
+    if 'duplicate' in checks:
+        return 'delete_wrong'
+
     # If tier 2 has run, use identification to decide — takes priority over
     # tier 1 flag-based logic since it has more information
     if identification:
@@ -1409,12 +1413,20 @@ def _title_to_thename(title):
     return title
 
 
-def build_expected_filename(item, template, replace_doubles=True, separator=''):
+def build_expected_filename(item, template, replace_doubles=True, separator='',
+                           cd_number=None):
     """Build the expected filename from renamer template and item data.
 
     This is a scan-time variant of _apply_renamer_template() that works
     without Env.setting() by accepting template/settings as arguments.
     Uses guessit_tokens from the item to fill video/audio/source/group.
+
+    Args:
+        item: Audit result dict with expected/actual/guessit_tokens data
+        template: Renamer file_name template string
+        replace_doubles: Whether to clean up double separators
+        separator: Character to replace spaces with
+        cd_number: CD number for multi-CD files (int), or None
 
     Returns the expected filename string or None on error.
     """
@@ -1481,8 +1493,8 @@ def build_expected_filename(item, template, replace_doubles=True, separator=''):
         'resolution_height': actual_height,
         'audio_channels': gt.get('audio_channels', ''),
         'imdb_id': imdb_id,
-        'cd': '',
-        'cd_nr': '',
+        'cd': ' cd%d' % cd_number if cd_number else '',
+        'cd_nr': str(cd_number) if cd_number else '',
         'mpaa': '',
         'mpaa_only': 'Not Rated',
         'category': '',
@@ -1531,19 +1543,28 @@ def build_expected_filename(item, template, replace_doubles=True, separator=''):
     return replaced
 
 
-def check_template(item, template, replace_doubles=True, separator=''):
+def check_template(item, template, replace_doubles=True, separator='',
+                   cd_number=None):
     """Check 6: Filename doesn't match renamer template.
 
     Builds the expected filename from the template and all available item
     data (folder title/year, mediainfo resolution, IMDB, edition, guessit
     tokens from the filename).  Compares strictly against the actual filename.
 
+    Args:
+        item: Audit result dict with expected/actual/guessit_tokens data
+        template: Renamer file_name template string
+        replace_doubles: Whether to clean up double separators
+        separator: Character to replace spaces with
+        cd_number: CD number for multi-CD files (int), or None
+
     Returns a flag dict or None.
     """
     if not template:
         return None
 
-    expected = build_expected_filename(item, template, replace_doubles, separator)
+    expected = build_expected_filename(item, template, replace_doubles, separator,
+                                       cd_number=cd_number)
     if not expected:
         return None
 
@@ -1893,55 +1914,158 @@ def find_video_files(folder_path):
     return files
 
 
-def scan_movie_folder(folder_path, folder_name, media_by_imdb,
-                      tier2=False, force_tier2=False, media_by_title=None,
-                      renamer_template=None, renamer_replace_doubles=True,
-                      renamer_separator=''):
-    """Scan a single movie folder and return audit results.
+# Regex matching cd/CD markers in filenames: "cd1", "cd 2", "cd.3", "cd-4"
+_CD_NUMBER_RE = re.compile(r'[ _.\-]cd[ _.\-]*(\d+)', re.IGNORECASE)
+
+
+def parse_cd_number(filename):
+    """Extract a CD number from a filename.
+
+    Matches patterns like 'cd1', 'cd 2', 'cd.3', 'cd-4' (case-insensitive).
+    Returns the cd number as an int, or None if not found.
+    """
+    m = _CD_NUMBER_RE.search(filename)
+    return int(m.group(1)) if m else None
+
+
+def classify_video_files(video_files):
+    """Classify video files in a folder into logical groups.
+
+    Determines whether a folder contains a single file, a multi-CD set
+    (sequential cd1, cd2, ...), or multiple variants (editions, qualities,
+    duplicates).
 
     Args:
-        folder_path: Full path to the movie folder
-        folder_name: Folder basename (e.g., "Dead, The (1987)")
-        media_by_imdb: Dict mapping IMDB ID → movie info from CP database
-        tier2: Run Tier 2 identification on flagged files
-        force_tier2: Force Tier 2 even for high-confidence Tier 1 flags
-        media_by_title: Dict mapping (normalized_title, year) → movie info
-        renamer_template: Renamer file_name template string (e.g. '<thename> (<year>) <quality>.<ext>')
-        renamer_replace_doubles: Whether to clean up double separators
-        renamer_separator: Character to replace spaces with (empty = spaces)
+        video_files: List of full file paths to video files.
 
-    Returns a dict with scan results or None if no issues found.
+    Returns:
+        {
+            'type': 'single' | 'multi_cd' | 'variants',
+            'cd_files': [(cd_num, filepath), ...],  # sorted by cd_num
+            'non_cd_files': [filepath, ...],         # files without cd tags
+        }
     """
-    video_files = find_video_files(folder_path)
-    if not video_files:
-        return None
+    if len(video_files) <= 1:
+        return {
+            'type': 'single',
+            'cd_files': [],
+            'non_cd_files': list(video_files),
+        }
 
-    # Use the largest video file (skip samples)
-    video_files.sort(key=lambda f: os.path.getsize(f), reverse=True)
-    filepath = video_files[0]
+    cd_files = []
+    non_cd_files = []
+
+    for filepath in video_files:
+        filename = os.path.basename(filepath)
+        cd_num = parse_cd_number(filename)
+        if cd_num is not None:
+            cd_files.append((cd_num, filepath))
+        else:
+            non_cd_files.append(filepath)
+
+    cd_files.sort(key=lambda x: x[0])
+
+    # Multi-CD: ALL files have cd tags AND form a complete sequence starting at 1
+    if cd_files and not non_cd_files:
+        cd_nums = [num for num, _ in cd_files]
+        expected_seq = list(range(1, len(cd_files) + 1))
+        if cd_nums == expected_seq:
+            return {
+                'type': 'multi_cd',
+                'cd_files': cd_files,
+                'non_cd_files': [],
+            }
+
+    # Everything else: variants (each file scanned individually)
+    # This includes:
+    # - Multiple non-cd files (different editions, qualities, duplicates)
+    # - Mix of cd-tagged and non-cd files (cd files are likely partials/dupes)
+    # - Incomplete cd sequences (cd1+cd3 missing cd2)
+    return {
+        'type': 'variants',
+        'cd_files': cd_files,
+        'non_cd_files': non_cd_files,
+    }
+
+
+def detect_duplicates(file_results):
+    """Detect duplicate pairs among scanned file results.
+
+    Two files are considered duplicates if:
+    - They have the exact same file size (bytes), OR
+    - They have the same runtime (within 0.1 min) AND same resolution label
+
+    Args:
+        file_results: List of dicts, each with at minimum:
+            - 'file_size_bytes': int
+            - 'actual': {'resolution': str, 'duration_min': float}
+            - 'expected': {'resolution': str}
+
+    Returns:
+        List of (index_a, index_b) tuples identifying duplicate pairs.
+    """
+    pairs = []
+    n = len(file_results)
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            a = file_results[i]
+            b = file_results[j]
+
+            # Check 1: exact same file size
+            if a.get('file_size_bytes') and b.get('file_size_bytes'):
+                if a['file_size_bytes'] == b['file_size_bytes']:
+                    pairs.append((i, j))
+                    continue
+
+            # Check 2: same runtime AND same resolution
+            a_dur = a.get('actual', {}).get('duration_min', 0)
+            b_dur = b.get('actual', {}).get('duration_min', 0)
+            a_res = a.get('expected', {}).get('resolution', '')
+            b_res = b.get('expected', {}).get('resolution', '')
+
+            if (a_dur and b_dur and a_res and b_res
+                    and a_res == b_res
+                    and abs(a_dur - b_dur) <= 0.1):
+                pairs.append((i, j))
+
+    return pairs
+
+
+def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
+                      expected_runtime, renamer_template, renamer_replace_doubles,
+                      renamer_separator, tier2=False, force_tier2=False,
+                      cd_number=None):
+    """Scan one video file and return an audit result dict (or None if clean).
+
+    This is the core per-file scanning logic extracted from scan_movie_folder().
+    It runs all six checks (resolution, runtime, container title, TV episode,
+    edition, template) and optionally tier 2 identification.
+
+    Args:
+        filepath: Full path to the video file
+        folder_title: Parsed title from the folder name
+        folder_year: Parsed year from the folder name
+        imdb_id: IMDB ID (from filename or DB lookup), may be None
+        db_entry: CP database entry for this movie, may be None
+        expected_runtime: Expected runtime in minutes from DB
+        renamer_template: Renamer file_name template string
+        renamer_replace_doubles: Whether to clean up double separators
+        renamer_separator: Character to replace spaces with
+        tier2: Run Tier 2 identification on flagged files
+        force_tier2: Force Tier 2 even for high-confidence flags
+        cd_number: CD number for multi-CD files (int), or None
+
+    Returns:
+        dict with scan results, or None if no issues found.
+    """
     filename = os.path.basename(filepath)
 
-    # Parse expected values from folder/filename
-    folder_title, folder_year = parse_folder_name(folder_name)
+    # Parse expected values from filename
     claimed_res = parse_filename_resolution(filename)
-    imdb_id = parse_filename_imdb(filename)
-
-    # Look up TMDB runtime from CP database
-    expected_runtime = 0
-    db_entry = None
-    if imdb_id and imdb_id in media_by_imdb:
-        db_entry = media_by_imdb[imdb_id]
-        expected_runtime = db_entry.get('runtime', 0)
-
-    # Fallback: look up by title+year when IMDB ID not in filename
-    if not db_entry and media_by_title and folder_title and folder_year:
-        key = (normalize_title(folder_title), folder_year)
-        match = media_by_title.get(key)
-        if match:
-            if not imdb_id:
-                imdb_id = match['imdb_id']
-            db_entry = match
-            expected_runtime = match.get('runtime', 0)
+    file_imdb_id = parse_filename_imdb(filename)
+    # Prefer IMDB ID from filename if available, else use the one from caller
+    effective_imdb_id = file_imdb_id or imdb_id
 
     # Extract actual metadata from file
     meta = extract_file_meta(filepath)
@@ -1974,13 +2098,10 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
         edition_flag = None  # suppress the flag when template has no edition token
 
     # Fallback: detect edition from filename when container title had none
-    # This ensures files with {edition-X} in the filename preserve the edition
-    # during template comparison and rename operations
     if not detected_edition:
         detected_edition = get_edition(filename)
 
-    # Check 2: Runtime (edition-aware — suppresses flag for non-theatrical
-    # editions that run longer than TMDB runtime)
+    # Check 2: Runtime (edition-aware)
     flag = check_runtime(meta['duration_min'], expected_runtime,
                          edition=detected_edition,
                          container_title=meta['container_title'])
@@ -2000,17 +2121,15 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
     if flag:
         flags.append(flag)
 
-    # Check 5: Edition mismatch (flag was computed above, apply here)
+    # Check 5: Edition mismatch
     if edition_flag:
         flags.append(edition_flag)
 
-    # Build partial item for template check (needs all data populated)
-    # We need this before the "no flags → return None" check because the
-    # template check itself may be the only flag
+    # Build partial item for template check
     partial_item = {
         'file': filename,
         'file_path': filepath,
-        'imdb_id': imdb_id,
+        'imdb_id': effective_imdb_id,
         'actual': {
             'resolution': f"{meta['resolution_width']}x{meta['resolution_height']}",
         },
@@ -2028,6 +2147,7 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
         template_flag = check_template(
             partial_item, renamer_template,
             renamer_replace_doubles, renamer_separator,
+            cd_number=cd_number,
         )
         if template_flag:
             flags.append(template_flag)
@@ -2038,10 +2158,10 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
     result = {
         'item_id': compute_item_id(filepath),
         'file_fingerprint': compute_file_fingerprint(filepath),
-        'folder': folder_name,
+        'folder': os.path.basename(os.path.dirname(filepath)),
         'file': filename,
         'file_path': filepath,
-        'imdb_id': imdb_id,
+        'imdb_id': effective_imdb_id,
         'file_size_bytes': os.path.getsize(filepath),
         'actual': {
             'resolution': f"{meta['resolution_width']}x{meta['resolution_height']}",
@@ -2066,11 +2186,13 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
         'fixed': None,
     }
 
+    if cd_number is not None:
+        result['cd_number'] = cd_number
+
     # Tier 2: identification with smart skip logic
     if tier2:
         has_tv = any(f['check'] == 'tv_episode' for f in flags)
         if has_tv and not force_tier2:
-            # TV episode detected — mark for deletion, skip CRC identification
             result['identification'] = {
                 'method': 'tv_episode_detected',
                 'action': 'queue_deletion',
@@ -2081,28 +2203,22 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
                 filepath, flags, container_title_parsed
             )
         else:
-            # High-confidence tier 1 flag (resolution-only) — skip
             result['identification'] = {
                 'method': 'skipped',
                 'reason': 'high_confidence_tier1',
                 'detail': 'Tier 1 flags sufficient; use force_tier2=1 to override',
             }
 
-        # Backfill edition from tier 2 source (srrDB release name or
-        # container title).  This can suppress false-positive runtime flags
-        # for extended/director's cuts and add edition mismatch flags.
+        # Backfill edition from tier 2 source
         _backfill_edition_from_tier2(result)
 
-        # Post-tier-2: re-evaluate ±1 year title flags.  During tier 1 the
-        # IMDB year may not have been available (no db_entry), but tier 2
-        # identification may have found one via srrDB/container title lookup.
+        # Post-tier-2: re-evaluate ±1 year title flags
         if not db_entry:
             ident = result.get('identification') or {}
             id_year = ident.get('identified_year')
             if id_year:
                 removed = _revalidate_year_flags(result, id_year)
                 if removed and not result['flags']:
-                    # All flags were suppressed — item is clean
                     return None
 
     # Compute recommended action from flags + identification
@@ -2111,6 +2227,375 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
     )
 
     return result
+
+
+def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
+                   expected_runtime, renamer_template, renamer_replace_doubles,
+                   renamer_separator, tier2=False, force_tier2=False):
+    """Scan a multi-CD folder (all files have sequential cd tags).
+
+    Scans each CD file individually with its cd_number, then aggregates
+    into a single result card.  The aggregate result uses:
+    - cd1's metadata for resolution/codec/container title checks
+    - Sum of all CD runtimes for the runtime check
+    - All flags from all files (deduplicated)
+    - A 'cd_files' list with per-file details
+
+    Args:
+        cd_files: List of (cd_num, filepath) tuples, sorted by cd_num
+        (remaining args same as _scan_single_file)
+
+    Returns:
+        dict with aggregated scan result, or None if no issues.
+    """
+    # Scan each CD file
+    per_file_results = []
+    for cd_num, filepath in cd_files:
+        result = _scan_single_file(
+            filepath, folder_title, folder_year, imdb_id, db_entry,
+            expected_runtime=0,  # skip runtime check per-file; aggregate below
+            renamer_template=renamer_template,
+            renamer_replace_doubles=renamer_replace_doubles,
+            renamer_separator=renamer_separator,
+            tier2=tier2, force_tier2=force_tier2,
+            cd_number=cd_num,
+        )
+        per_file_results.append((cd_num, filepath, result))
+
+    # Collect results that have flags
+    flagged_results = [(cd, fp, r) for cd, fp, r in per_file_results if r is not None]
+
+    # Aggregate runtime from all files for a runtime check
+    total_runtime = 0
+    for cd_num, filepath, result in per_file_results:
+        if result and result.get('actual', {}).get('duration_min'):
+            total_runtime += result['actual']['duration_min']
+        else:
+            # File was clean — still need its runtime
+            meta = extract_file_meta(filepath)
+            total_runtime += round(meta.get('duration_min', 0), 1)
+
+    # Check aggregate runtime against expected
+    runtime_flag = None
+    if expected_runtime:
+        # Detect edition from cd1 for edition-aware runtime suppression
+        cd1_filepath = cd_files[0][1]
+        cd1_filename = os.path.basename(cd1_filepath)
+        cd1_meta = extract_file_meta(cd1_filepath)
+        detected_edition = get_edition(cd1_filename)
+        if not detected_edition:
+            _, detected_edition = check_edition(
+                cd1_meta.get('container_title', ''), cd1_filename
+            )
+        runtime_flag = check_runtime(
+            total_runtime, expected_runtime,
+            edition=detected_edition,
+            container_title=cd1_meta.get('container_title', ''),
+        )
+
+    if not flagged_results and not runtime_flag:
+        return None
+
+    # Use cd1 as the primary result, augment with multi-CD info
+    primary_cd, primary_path, primary_result = per_file_results[0]
+
+    if primary_result is None:
+        # cd1 was clean but we have aggregate runtime or other CD flags
+        # Build a minimal result from cd1
+        meta = extract_file_meta(primary_path)
+        filename = os.path.basename(primary_path)
+        guessit_tokens = parse_guessit_tokens(filename)
+        claimed_res = parse_filename_resolution(filename)
+        primary_result = {
+            'item_id': compute_item_id(primary_path),
+            'file_fingerprint': compute_file_fingerprint(primary_path),
+            'folder': os.path.basename(os.path.dirname(primary_path)),
+            'file': filename,
+            'file_path': primary_path,
+            'imdb_id': imdb_id,
+            'file_size_bytes': os.path.getsize(primary_path),
+            'actual': {
+                'resolution': f"{meta['resolution_width']}x{meta['resolution_height']}",
+                'duration_min': round(meta['duration_min'], 1),
+                'video_codec': meta['video_codec'],
+                'container_title': meta['container_title'],
+                'container_title_parsed': None,
+            },
+            'expected': {
+                'resolution': claimed_res,
+                'runtime_min': expected_runtime,
+                'title': folder_title,
+                'year': folder_year,
+                'db_title': db_entry['title'] if db_entry else None,
+            },
+            'flags': [],
+            'flag_count': 0,
+            'detected_edition': None,
+            'guessit_tokens': guessit_tokens,
+            'identification': None,
+            'recommended_action': None,
+            'fixed': None,
+        }
+
+    # Add aggregate runtime flag if present
+    if runtime_flag:
+        primary_result['flags'].append(runtime_flag)
+        primary_result['flag_count'] = len(primary_result['flags'])
+
+    # Merge flags from other CD files
+    seen_checks = {(f['check'], f.get('detail', '')) for f in primary_result['flags']}
+    for cd_num, filepath, result in flagged_results:
+        if result is primary_result:
+            continue
+        for flag in result.get('flags', []):
+            key = (flag['check'], flag.get('detail', ''))
+            if key not in seen_checks:
+                primary_result['flags'].append(flag)
+                seen_checks.add(key)
+
+    primary_result['flag_count'] = len(primary_result['flags'])
+
+    # Add multi-CD metadata
+    primary_result['multi_cd'] = True
+    primary_result['cd_count'] = len(cd_files)
+    primary_result['cd_files'] = [
+        {
+            'cd_number': cd_num,
+            'file': os.path.basename(fp),
+            'file_path': fp,
+            'file_size_bytes': os.path.getsize(fp),
+            'has_flags': r is not None,
+        }
+        for cd_num, fp, r in per_file_results
+    ]
+
+    # Update aggregate runtime
+    primary_result['actual']['duration_min'] = round(total_runtime, 1)
+    primary_result['expected']['runtime_min'] = expected_runtime
+
+    # Compute recommended action from aggregated flags
+    primary_result['recommended_action'] = compute_recommended_action(
+        primary_result['flags'],
+        primary_result.get('identification'),
+        primary_result.get('expected'),
+    )
+
+    return primary_result
+
+
+def _scan_variants(video_files, classification, folder_title, folder_year,
+                   imdb_id, db_entry, expected_runtime, renamer_template,
+                   renamer_replace_doubles, renamer_separator, tier2=False,
+                   force_tier2=False):
+    """Scan a folder with multiple file variants (editions, qualities, dupes).
+
+    Each file is scanned individually.  Only files with issues get result
+    cards.  Detected duplicates get an additional 'duplicate' flag.
+
+    Args:
+        video_files: All video files in the folder (sorted by size descending)
+        classification: Result from classify_video_files()
+        (remaining args same as _scan_single_file)
+
+    Returns:
+        list[dict] — list of result dicts for flagged files (may be empty → None)
+        None — if no files have issues
+    """
+    # Scan each file individually
+    file_results = []
+    for filepath in video_files:
+        result = _scan_single_file(
+            filepath, folder_title, folder_year, imdb_id, db_entry,
+            expected_runtime,
+            renamer_template=renamer_template,
+            renamer_replace_doubles=renamer_replace_doubles,
+            renamer_separator=renamer_separator,
+            tier2=tier2, force_tier2=force_tier2,
+        )
+        file_results.append((filepath, result))
+
+    # Build minimal result dicts for clean files (needed for duplicate detection)
+    full_results = []
+    for filepath, result in file_results:
+        if result is not None:
+            full_results.append(result)
+        else:
+            # Build a minimal dict for duplicate detection
+            meta = extract_file_meta(filepath)
+            filename = os.path.basename(filepath)
+            claimed_res = parse_filename_resolution(filename)
+            full_results.append({
+                'file': filename,
+                'file_path': filepath,
+                'file_size_bytes': os.path.getsize(filepath),
+                'actual': {
+                    'duration_min': round(meta['duration_min'], 1),
+                },
+                'expected': {
+                    'resolution': claimed_res,
+                },
+                '_clean': True,  # marker: this file had no flags
+            })
+
+    # Detect duplicates
+    dupe_pairs = detect_duplicates(full_results)
+
+    # Add duplicate flags to detected pairs
+    for idx_a, idx_b in dupe_pairs:
+        for idx in (idx_a, idx_b):
+            r = full_results[idx]
+            if r.get('_clean'):
+                # Promote clean file to a full result with a duplicate flag
+                filepath = r['file_path']
+                meta = extract_file_meta(filepath)
+                filename = os.path.basename(filepath)
+                guessit_tokens = parse_guessit_tokens(filename)
+                claimed_res = parse_filename_resolution(filename)
+                full_results[idx] = {
+                    'item_id': compute_item_id(filepath),
+                    'file_fingerprint': compute_file_fingerprint(filepath),
+                    'folder': os.path.basename(os.path.dirname(filepath)),
+                    'file': filename,
+                    'file_path': filepath,
+                    'imdb_id': imdb_id,
+                    'file_size_bytes': os.path.getsize(filepath),
+                    'actual': {
+                        'resolution': f"{meta['resolution_width']}x{meta['resolution_height']}",
+                        'duration_min': round(meta['duration_min'], 1),
+                        'video_codec': meta['video_codec'],
+                        'container_title': meta['container_title'],
+                        'container_title_parsed': None,
+                    },
+                    'expected': {
+                        'resolution': claimed_res,
+                        'runtime_min': expected_runtime,
+                        'title': folder_title,
+                        'year': folder_year,
+                        'db_title': db_entry['title'] if db_entry else None,
+                    },
+                    'flags': [],
+                    'flag_count': 0,
+                    'detected_edition': None,
+                    'guessit_tokens': guessit_tokens,
+                    'identification': None,
+                    'recommended_action': None,
+                    'fixed': None,
+                }
+                r = full_results[idx]
+
+            # Add duplicate flag if not already present
+            has_dupe = any(f['check'] == 'duplicate' for f in r.get('flags', []))
+            if not has_dupe:
+                partner_idx = idx_b if idx == idx_a else idx_a
+                partner = full_results[partner_idx]
+                r.setdefault('flags', []).append({
+                    'check': 'duplicate',
+                    'severity': 'MEDIUM',
+                    'detail': 'Possible duplicate of %s' % partner['file'],
+                })
+                r['flag_count'] = len(r['flags'])
+
+    # Add variant context to all flagged results
+    variant_files = [os.path.basename(fp) for fp in video_files]
+
+    results = []
+    for r in full_results:
+        if r.get('_clean'):
+            continue  # no flags and not a duplicate
+        r['variant_files'] = variant_files
+        r['variant_count'] = len(video_files)
+        # Recompute recommended_action with updated flags
+        if r.get('flags'):
+            r['recommended_action'] = compute_recommended_action(
+                r['flags'], r.get('identification'), r.get('expected')
+            )
+        results.append(r)
+
+    return results if results else None
+
+
+def scan_movie_folder(folder_path, folder_name, media_by_imdb,
+                      tier2=False, force_tier2=False, media_by_title=None,
+                      renamer_template=None, renamer_replace_doubles=True,
+                      renamer_separator=''):
+    """Scan a single movie folder and return audit results.
+
+    Handles single-file, multi-CD, and variant (multi-file) folders.
+
+    Args:
+        folder_path: Full path to the movie folder
+        folder_name: Folder basename (e.g., "Dead, The (1987)")
+        media_by_imdb: Dict mapping IMDB ID → movie info from CP database
+        tier2: Run Tier 2 identification on flagged files
+        force_tier2: Force Tier 2 even for high-confidence Tier 1 flags
+        media_by_title: Dict mapping (normalized_title, year) → movie info
+        renamer_template: Renamer file_name template string (e.g. '<thename> (<year>) <quality>.<ext>')
+        renamer_replace_doubles: Whether to clean up double separators
+        renamer_separator: Character to replace spaces with (empty = spaces)
+
+    Returns:
+        dict — single result for single-file or multi-CD folders
+        list[dict] — list of results for variant folders (one per flagged file)
+        None — if no issues found
+    """
+    video_files = find_video_files(folder_path)
+    if not video_files:
+        return None
+
+    # Parse expected values from folder name
+    folder_title, folder_year = parse_folder_name(folder_name)
+
+    # Look up DB entry — try IMDB ID from the largest file first, then
+    # fall back to title+year lookup.  This shared context is used by
+    # all files in the folder.
+    video_files.sort(key=lambda f: os.path.getsize(f), reverse=True)
+    imdb_id = parse_filename_imdb(os.path.basename(video_files[0]))
+    db_entry = None
+    expected_runtime = 0
+
+    if imdb_id and imdb_id in media_by_imdb:
+        db_entry = media_by_imdb[imdb_id]
+        expected_runtime = db_entry.get('runtime', 0)
+
+    # Fallback: look up by title+year when IMDB ID not in filename
+    if not db_entry and media_by_title and folder_title and folder_year:
+        key = (normalize_title(folder_title), folder_year)
+        match = media_by_title.get(key)
+        if match:
+            if not imdb_id:
+                imdb_id = match['imdb_id']
+            db_entry = match
+            expected_runtime = match.get('runtime', 0)
+
+    # Common scan kwargs shared by all dispatch paths
+    scan_kwargs = dict(
+        folder_title=folder_title,
+        folder_year=folder_year,
+        imdb_id=imdb_id,
+        db_entry=db_entry,
+        expected_runtime=expected_runtime,
+        renamer_template=renamer_template,
+        renamer_replace_doubles=renamer_replace_doubles,
+        renamer_separator=renamer_separator,
+        tier2=tier2,
+        force_tier2=force_tier2,
+    )
+
+    # Classify files and dispatch
+    classification = classify_video_files(video_files)
+
+    if classification['type'] == 'single':
+        # Single file — original behavior
+        filepath = video_files[0]
+        return _scan_single_file(filepath, **scan_kwargs)
+
+    elif classification['type'] == 'multi_cd':
+        # Multi-CD: scan each cd file, aggregate into one result
+        return _scan_multi_cd(classification['cd_files'], **scan_kwargs)
+
+    else:
+        # Variants: scan each file individually, return list of flagged results
+        return _scan_variants(video_files, classification, **scan_kwargs)
 
 
 # Sentinel value for _scan_one: folder was not a directory, skip it
@@ -2204,17 +2689,31 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
             return None, True
 
     def _collect_result(folder_name, result, is_error):
-        """Process a scan result. Must be called under lock (or single-threaded)."""
+        """Process a scan result. Must be called under lock (or single-threaded).
+
+        result can be:
+          - None (clean folder)
+          - dict (single flagged item)
+          - list[dict] (multiple flagged items from variant folder)
+        """
         nonlocal scanned, errors
         if is_error:
             errors += 1
             return
         scanned += 1
         if result is not None:
-            flagged.append(result)
-            severity = max(f['severity'] for f in result['flags'])
-            checks = ', '.join(f['check'] for f in result['flags'])
-            _log_info('FLAGGED [%s] %s: %s' % (severity, folder_name, checks))
+            if isinstance(result, list):
+                # Variant folder: multiple flagged files
+                for item in result:
+                    flagged.append(item)
+                    severity = max(f['severity'] for f in item['flags'])
+                    checks = ', '.join(f['check'] for f in item['flags'])
+                    _log_info('FLAGGED [%s] %s/%s: %s' % (severity, folder_name, item['file'], checks))
+            else:
+                flagged.append(result)
+                severity = max(f['severity'] for f in result['flags'])
+                checks = ', '.join(f['check'] for f in result['flags'])
+                _log_info('FLAGGED [%s] %s: %s' % (severity, folder_name, checks))
         if progress_callback:
             progress_callback(scanned, total, len(flagged))
 
@@ -2339,7 +2838,8 @@ def _build_resolution_rename(item):
     return new_file, new_path, actual_label
 
 
-def _apply_renamer_template(item, quality_override=None, edition_override=None):
+def _apply_renamer_template(item, quality_override=None, edition_override=None,
+                            cd_number=None):
     """Rebuild a filename from the renamer's file_name template.
 
     Uses the renamer config settings (file_name template, replace_doubles,
@@ -2349,6 +2849,7 @@ def _apply_renamer_template(item, quality_override=None, edition_override=None):
         item: audit item dict with expected/actual/imdb_id fields
         quality_override: if set, use this instead of the item's claimed quality
         edition_override: if set, use this as the edition value
+        cd_number: CD number for multi-CD files (int), or None
 
     Returns (new_filename, new_path) or raises ValueError.
     """
@@ -2429,8 +2930,8 @@ def _apply_renamer_template(item, quality_override=None, edition_override=None):
         'resolution_height': actual_height,
         'audio_channels': gt.get('audio_channels', ''),
         'imdb_id': imdb_id,
-        'cd': '',
-        'cd_nr': '',
+        'cd': ' cd%d' % cd_number if cd_number else '',
+        'cd_nr': str(cd_number) if cd_number else '',
         'mpaa': '',
         'mpaa_only': 'Not Rated',
         'category': '',
@@ -2794,9 +3295,13 @@ def _preview_rename_template(item):
     When the expected year (e.g. corrected by tier 2) produces a different
     folder name than the current folder, a folder rename is included in the
     preview so the entire path is corrected in one operation.
+
+    For multi-CD items, generates renames for all cd files.
     """
+    cd_number = item.get('cd_number')
+
     try:
-        new_file, new_path = _apply_renamer_template(item)
+        new_file, new_path = _apply_renamer_template(item, cd_number=cd_number)
     except ValueError as e:
         return {'error': str(e)}
 
@@ -2817,7 +3322,6 @@ def _preview_rename_template(item):
             folder_rename = True
             movies_dir = os.path.dirname(old_folder_path)
             new_folder_path = os.path.join(movies_dir, expected_folder)
-            # Update new_path to be inside the new folder
             new_path = os.path.join(new_folder_path, new_file)
 
     if new_path == old_path:
@@ -2842,6 +3346,34 @@ def _preview_rename_template(item):
             'new_folder': new_folder_path,
         }
         result['changes']['filesystem']['old_folder_cleanup'] = True
+
+    # Multi-CD: include rename info for all cd files
+    if item.get('multi_cd') and item.get('cd_files'):
+        cd_renames = []
+        for cd_info in item['cd_files']:
+            cd_num = cd_info['cd_number']
+            cd_filepath = cd_info['file_path']
+            cd_item = dict(item)
+            cd_item['file'] = cd_info['file']
+            cd_item['file_path'] = cd_filepath
+            cd_item['guessit_tokens'] = parse_guessit_tokens(cd_info['file'])
+            try:
+                cd_new_file, cd_new_path = _apply_renamer_template(
+                    cd_item, cd_number=cd_num
+                )
+            except ValueError:
+                continue
+            if folder_rename and new_folder_path:
+                cd_new_path = os.path.join(new_folder_path, cd_new_file)
+            cd_renames.append({
+                'cd_number': cd_num,
+                'old_path': cd_filepath,
+                'new_path': cd_new_path,
+            })
+        if cd_renames:
+            result['changes']['filesystem']['cd_renames'] = cd_renames
+            result['changes']['filesystem']['old_path'] = cd_renames[0]['old_path']
+            result['changes']['filesystem']['new_path'] = cd_renames[0]['new_path']
 
     return result
 
@@ -2938,10 +3470,14 @@ def execute_fix_rename_template(item):
     When the expected data produces a different folder name (e.g. year
     correction from tier 2), the folder is also renamed/moved.
 
+    For multi-CD items, renames all cd files in one operation.
+
     Returns (success, details_dict).
     """
+    cd_number = item.get('cd_number')
+
     try:
-        new_file, new_path = _apply_renamer_template(item)
+        new_file, new_path = _apply_renamer_template(item, cd_number=cd_number)
     except ValueError as e:
         return False, {'error': str(e)}
 
@@ -2973,8 +3509,81 @@ def execute_fix_rename_template(item):
     if os.path.exists(new_path):
         return False, {'error': 'Destination already exists: %s' % new_path}
 
+    # Multi-CD: rename all cd files
+    if item.get('multi_cd') and item.get('cd_files'):
+        cd_renames = []
+        for cd_info in item['cd_files']:
+            cd_num = cd_info['cd_number']
+            cd_filepath = cd_info['file_path']
+            cd_item = dict(item)
+            cd_item['file'] = cd_info['file']
+            cd_item['file_path'] = cd_filepath
+            cd_item['guessit_tokens'] = parse_guessit_tokens(cd_info['file'])
+            try:
+                cd_new_file, cd_new_path = _apply_renamer_template(
+                    cd_item, cd_number=cd_num
+                )
+            except ValueError as e:
+                return False, {'error': 'CD%d template failed: %s' % (cd_num, e)}
+            if folder_rename and new_folder_path:
+                cd_new_path = os.path.join(new_folder_path, cd_new_file)
+            cd_renames.append((cd_filepath, cd_new_path))
+
+        # Validate all cd files exist and destinations don't
+        for cd_old, cd_new in cd_renames:
+            if not os.path.isfile(cd_old):
+                return False, {'error': 'CD file not found: %s' % cd_old}
+            if os.path.exists(cd_new) and cd_new != cd_old:
+                return False, {'error': 'CD destination already exists: %s' % cd_new}
+
+        if folder_rename:
+            try:
+                os.makedirs(new_folder_path, exist_ok=True)
+            except OSError as e:
+                return False, {'error': 'Cannot create folder %s: %s' % (new_folder_path, e)}
+
+        # Execute all renames
+        completed = []
+        for cd_old, cd_new in cd_renames:
+            if cd_old == cd_new:
+                continue
+            try:
+                if folder_rename:
+                    shutil.move(cd_old, cd_new)
+                else:
+                    os.rename(cd_old, cd_new)
+                completed.append((cd_old, cd_new))
+            except (OSError, shutil.Error) as e:
+                return False, {
+                    'error': 'Rename failed for %s: %s' % (os.path.basename(cd_old), e),
+                    'partial': completed,
+                }
+
+        details = {
+            'old_path': cd_renames[0][0],
+            'new_path': cd_renames[0][1],
+            'cd_renames': [{'old_path': o, 'new_path': n} for o, n in cd_renames],
+        }
+
+        if folder_rename:
+            details['folder_renamed'] = True
+            details['old_folder'] = old_folder_path
+            details['new_folder'] = new_folder_path
+            # Clean up old folder if no video files remain
+            try:
+                remaining = os.listdir(old_folder_path)
+                video_remaining = [f for f in remaining
+                                  if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS]
+                if not video_remaining:
+                    shutil.rmtree(old_folder_path, ignore_errors=True)
+                    details['folder_cleaned'] = True
+            except OSError:
+                pass
+
+        return True, details
+
+    # Single file path (original behavior)
     if folder_rename:
-        # Create new folder, move file, clean up old folder
         try:
             os.makedirs(new_folder_path, exist_ok=True)
         except OSError as e:
@@ -2985,7 +3594,6 @@ def execute_fix_rename_template(item):
         except (OSError, shutil.Error) as e:
             return False, {'error': 'Move failed: %s' % e}
 
-        # Clean up old folder if no video files remain
         folder_cleaned = False
         try:
             remaining = os.listdir(old_folder_path)
@@ -3006,7 +3614,6 @@ def execute_fix_rename_template(item):
             'folder_cleaned': folder_cleaned,
         }
     else:
-        # Simple file rename within same directory
         try:
             os.rename(old_path, new_path)
         except OSError as e:

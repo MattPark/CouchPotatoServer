@@ -149,7 +149,8 @@ var AuditSettingTab = new Class({
 			new Element('option', { 'value': 'title', 'text': 'Title' }),
 			new Element('option', { 'value': 'tv_episode', 'text': 'TV Episode' }),
 			new Element('option', { 'value': 'edition', 'text': 'Edition' }),
-			new Element('option', { 'value': 'template', 'text': 'Template' })
+			new Element('option', { 'value': 'template', 'text': 'Template' }),
+			new Element('option', { 'value': 'duplicate', 'text': 'Duplicate' })
 		).inject(filters);
 
 		// Severity filter
@@ -410,14 +411,15 @@ var AuditSettingTab = new Class({
 			new Element('div.audit_bars_title', { 'text': 'Issues by Type' }).inject(bars_section);
 
 			var max_count = 0;
-			var check_types = ['resolution', 'title', 'runtime', 'tv_episode', 'edition', 'template'];
+			var check_types = ['resolution', 'title', 'runtime', 'tv_episode', 'edition', 'template', 'duplicate'];
 			var check_labels = {
 				'resolution': 'Resolution Mismatch',
 				'title': 'Title Mismatch',
 				'runtime': 'Runtime Mismatch',
 				'tv_episode': 'TV Episode',
 				'edition': 'Edition Missing',
-				'template': 'Template Mismatch'
+				'template': 'Template Mismatch',
+				'duplicate': 'Duplicate File'
 			};
 			var check_colors = {
 				'resolution': '#ff9800',
@@ -425,7 +427,8 @@ var AuditSettingTab = new Class({
 				'runtime': '#ff9800',
 				'tv_episode': '#f44336',
 				'edition': '#2196f3',
-				'template': '#9c27b0'
+				'template': '#9c27b0',
+				'duplicate': '#795548'
 			};
 
 			check_types.each(function(ct){
@@ -651,6 +654,29 @@ var AuditSettingTab = new Class({
 				new Element('span.audit_detail_label', { 'text': 'Size:' }),
 				new Element('span.audit_detail_value', { 'text': self.formatBytes(item.file_size_bytes) })
 			).inject(detail);
+		}
+
+		// Multi-CD context
+		if(item.multi_cd && item.cd_files){
+			var cd_section = new Element('div.audit_detail_row').inject(detail);
+			new Element('span.audit_detail_label', { 'text': 'Multi-CD:' }).inject(cd_section);
+			var cd_list = new Element('span.audit_detail_value.audit_variant_list').inject(cd_section);
+			item.cd_files.each(function(cd){
+				new Element('div.audit_variant_file', {
+					'text': 'CD' + cd.cd_number + ': ' + cd.file
+				}).inject(cd_list);
+			});
+		}
+
+		// Variant files context (other files in the same folder)
+		if(item.variant_files && item.variant_files.length > 1){
+			var variant_section = new Element('div.audit_detail_row').inject(detail);
+			new Element('span.audit_detail_label', { 'text': 'Also in folder:' }).inject(variant_section);
+			var variant_list = new Element('span.audit_detail_value.audit_variant_list').inject(variant_section);
+			item.variant_files.each(function(vf){
+				if(vf === item.file) return;
+				new Element('div.audit_variant_file', { 'text': vf }).inject(variant_list);
+			});
 		}
 
 		// Flags detail
@@ -1039,6 +1065,19 @@ var AuditSettingTab = new Class({
 					'text': 'Old folder will be removed if empty.'
 				}).inject(fs_section);
 			}
+			if(fs.cd_renames && fs.cd_renames.length > 0){
+				new Element('div.audit_preview_subtitle', { 'text': 'All CD files:' }).inject(fs_section);
+				fs.cd_renames.each(function(cd){
+					new Element('div.audit_preview_row.audit_preview_cd').adopt(
+						new Element('span.audit_preview_label', { 'text': 'CD' + cd.cd_number + ':' }),
+						new Element('span.audit_preview_old', { 'text': cd.old_path })
+					).inject(fs_section);
+					new Element('div.audit_preview_row.audit_preview_cd').adopt(
+						new Element('span.audit_preview_label', { 'text': '' }),
+						new Element('span.audit_preview_new', { 'text': cd.new_path })
+					).inject(fs_section);
+				});
+			}
 		}
 
 		// Database changes
@@ -1278,7 +1317,8 @@ var AuditSettingTab = new Class({
 			'title': 'TIT',
 			'tv_episode': 'TV',
 			'edition': 'ED',
-			'template': 'TPL'
+			'template': 'TPL',
+			'duplicate': 'DUP'
 		};
 		return icons[check] || check;
 	},

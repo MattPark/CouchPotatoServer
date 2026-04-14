@@ -13,6 +13,9 @@ Tests cover:
   - _check_year_against_imdb(): ±1 year IMDB adjudication
   - check_container_title(): container title mismatch with IMDB year validation
   - _revalidate_year_flags(): post-tier-2 flag re-evaluation
+  - parse_cd_number(): CD number extraction from filenames
+  - classify_video_files(): multi-file folder classification
+  - detect_duplicates(): duplicate file pair detection
 """
 
 from couchpotato.core.plugins.audit import (
@@ -24,6 +27,9 @@ from couchpotato.core.plugins.audit import (
     _check_year_against_imdb,
     check_container_title,
     _revalidate_year_flags,
+    parse_cd_number,
+    classify_video_files,
+    detect_duplicates,
 )
 import re
 
@@ -844,9 +850,21 @@ class TestComputeRecommendedAction:
         """Uses db_title when available for title comparison."""
         flags = self._flags('title')
         ident = self._ident('container_title', title='The Monster', year=2017)
-        # folder title is "Monster, The" but db_title is "The Monster"
-        expected = self._expected('Monster, The', 2016, db_title='The Monster')
+        expected = {'title': 'Monster, The', 'year': 2016, 'db_title': 'The Monster'}
         assert compute_recommended_action(flags, ident, expected) == 'rename_template'
+
+    def test_duplicate_flag_returns_delete(self):
+        """Duplicate flag should recommend delete_wrong."""
+        flags = [{'check': 'duplicate', 'severity': 'MEDIUM', 'detail': 'Possible duplicate'}]
+        assert compute_recommended_action(flags) == 'delete_wrong'
+
+    def test_duplicate_with_other_flags_still_delete(self):
+        """Duplicate flag takes priority (before template/resolution logic)."""
+        flags = [
+            {'check': 'duplicate', 'severity': 'MEDIUM', 'detail': 'Possible duplicate'},
+            {'check': 'template', 'severity': 'LOW', 'detail': 'Template mismatch'},
+        ]
+        assert compute_recommended_action(flags) == 'delete_wrong'
 
 
 # ---------------------------------------------------------------------------
@@ -1111,3 +1129,281 @@ class TestRevalidateYearFlags:
         assert item['flag_count'] == 2
         _revalidate_year_flags(item, 2019)
         assert item['flag_count'] == 1
+
+
+# ===========================================================================
+# parse_cd_number() — CD number extraction from filenames
+# ===========================================================================
+
+class TestParseCdNumber:
+    """Tests for parse_cd_number() filename parsing."""
+
+    def test_cd1_lowercase(self):
+        assert parse_cd_number('Movie (2005) cd1.avi') == 1
+
+    def test_cd2_lowercase(self):
+        assert parse_cd_number('Movie (2005) cd2.avi') == 2
+
+    def test_cd_uppercase(self):
+        assert parse_cd_number('Movie (2005) CD1.avi') == 1
+
+    def test_cd_mixed_case(self):
+        assert parse_cd_number('Movie (2005) Cd2.avi') == 2
+
+    def test_cd_with_dot_separator(self):
+        assert parse_cd_number('Movie.2005.cd.1.avi') == 1
+
+    def test_cd_with_dash_separator(self):
+        assert parse_cd_number('Movie-2005-cd-2.avi') == 2
+
+    def test_cd_with_underscore_separator(self):
+        assert parse_cd_number('Movie_2005_cd_3.avi') == 3
+
+    def test_cd_no_separator(self):
+        """cd immediately followed by digit, with leading separator."""
+        assert parse_cd_number('Movie (2005) cd1.mkv') == 1
+
+    def test_high_cd_number(self):
+        assert parse_cd_number('Movie (2005) cd10.avi') == 10
+
+    def test_no_cd_tag(self):
+        assert parse_cd_number('Movie (2005) 1080p.mkv') is None
+
+    def test_no_cd_tag_word_containing_cd(self):
+        """Words like 'abcd1' should not match (need leading separator)."""
+        assert parse_cd_number('abcd1.avi') is None
+
+    def test_cd_in_path_component_ignored(self):
+        """Only filename is searched, not the full path."""
+        # parse_cd_number receives just a filename, not a full path
+        assert parse_cd_number('movie.mkv') is None
+
+    def test_empty_string(self):
+        assert parse_cd_number('') is None
+
+    def test_cd_at_start_no_leading_separator(self):
+        """'cd1' at the very start of the filename has no leading separator."""
+        assert parse_cd_number('cd1.avi') is None
+
+
+# ===========================================================================
+# classify_video_files() — multi-file folder classification
+# ===========================================================================
+
+class TestClassifyVideoFiles:
+    """Tests for classify_video_files() folder classification."""
+
+    def test_empty_list(self):
+        result = classify_video_files([])
+        assert result['type'] == 'single'
+        assert result['cd_files'] == []
+        assert result['non_cd_files'] == []
+
+    def test_single_file(self):
+        result = classify_video_files(['/movies/Movie (2005)/Movie (2005) 1080p.mkv'])
+        assert result['type'] == 'single'
+        assert result['non_cd_files'] == ['/movies/Movie (2005)/Movie (2005) 1080p.mkv']
+        assert result['cd_files'] == []
+
+    def test_multi_cd_two_files(self):
+        """Two files with sequential cd1/cd2 tags → multi_cd."""
+        files = [
+            '/movies/Jungle Trap (1990)/Jungle Trap (1990) cd1.avi',
+            '/movies/Jungle Trap (1990)/Jungle Trap (1990) cd2.avi',
+        ]
+        result = classify_video_files(files)
+        assert result['type'] == 'multi_cd'
+        assert len(result['cd_files']) == 2
+        assert result['cd_files'][0] == (1, files[0])
+        assert result['cd_files'][1] == (2, files[1])
+        assert result['non_cd_files'] == []
+
+    def test_multi_cd_three_files(self):
+        """Three sequential cd files → multi_cd."""
+        files = [
+            '/movies/Movie/Movie cd3.avi',
+            '/movies/Movie/Movie cd1.avi',
+            '/movies/Movie/Movie cd2.avi',
+        ]
+        result = classify_video_files(files)
+        assert result['type'] == 'multi_cd'
+        assert len(result['cd_files']) == 3
+        # Should be sorted by cd number
+        assert result['cd_files'][0][0] == 1
+        assert result['cd_files'][1][0] == 2
+        assert result['cd_files'][2][0] == 3
+
+    def test_non_sequential_cd_is_variants(self):
+        """cd1 + cd3 (missing cd2) → variants, not multi_cd."""
+        files = [
+            '/movies/Movie/Movie cd1.avi',
+            '/movies/Movie/Movie cd3.avi',
+        ]
+        result = classify_video_files(files)
+        assert result['type'] == 'variants'
+
+    def test_mixed_cd_and_non_cd_is_variants(self):
+        """A full file plus a cd-tagged partial → variants."""
+        files = [
+            '/movies/Movie/Movie 1080p.mkv',
+            '/movies/Movie/Movie cd1.avi',
+        ]
+        result = classify_video_files(files)
+        assert result['type'] == 'variants'
+        assert len(result['non_cd_files']) == 1
+        assert len(result['cd_files']) == 1
+
+    def test_two_non_cd_files_is_variants(self):
+        """Two files without cd tags → variants (different editions/qualities)."""
+        files = [
+            '/movies/Twelve Monkeys (1995)/Twelve Monkeys (1995) 720p.mkv',
+            '/movies/Twelve Monkeys (1995)/Twelve Monkeys (1995) Remastered 1080p.mkv',
+        ]
+        result = classify_video_files(files)
+        assert result['type'] == 'variants'
+        assert len(result['non_cd_files']) == 2
+        assert result['cd_files'] == []
+
+    def test_duplicate_cd_numbers_is_variants(self):
+        """Two files both tagged cd1 → not sequential → variants."""
+        files = [
+            '/movies/Movie/Movie cd1.avi',
+            '/movies/Movie/Movie cd1.mkv',
+        ]
+        result = classify_video_files(files)
+        assert result['type'] == 'variants'
+
+    def test_cd_starting_at_zero_is_variants(self):
+        """cd0 + cd1 → sequence doesn't start at 1 → variants."""
+        files = [
+            '/movies/Movie/Movie cd0.avi',
+            '/movies/Movie/Movie cd1.avi',
+        ]
+        result = classify_video_files(files)
+        assert result['type'] == 'variants'
+
+
+# ===========================================================================
+# detect_duplicates() — duplicate file pair detection
+# ===========================================================================
+
+class TestDetectDuplicates:
+    """Tests for detect_duplicates() pair detection."""
+
+    @staticmethod
+    def _result(size=None, duration=None, resolution=None):
+        """Helper to build a minimal file_result dict."""
+        r = {
+            'file_size_bytes': size,
+            'actual': {'duration_min': duration or 0},
+            'expected': {'resolution': resolution or ''},
+        }
+        return r
+
+    def test_empty_list(self):
+        assert detect_duplicates([]) == []
+
+    def test_single_file(self):
+        assert detect_duplicates([self._result(size=1000)]) == []
+
+    def test_same_file_size(self):
+        """Two files with identical byte size → duplicate."""
+        results = [
+            self._result(size=5000000000),
+            self._result(size=5000000000),
+        ]
+        pairs = detect_duplicates(results)
+        assert pairs == [(0, 1)]
+
+    def test_different_file_size_no_match(self):
+        """Different sizes, different resolutions → not duplicates."""
+        results = [
+            self._result(size=5000000000, duration=120.0, resolution='1080p'),
+            self._result(size=3000000000, duration=120.0, resolution='720p'),
+        ]
+        pairs = detect_duplicates(results)
+        assert pairs == []
+
+    def test_same_runtime_same_resolution(self):
+        """Same runtime (within 0.1) and same resolution → duplicate."""
+        results = [
+            self._result(size=5000000000, duration=120.0, resolution='1080p'),
+            self._result(size=3000000000, duration=120.05, resolution='1080p'),
+        ]
+        pairs = detect_duplicates(results)
+        assert pairs == [(0, 1)]
+
+    def test_same_runtime_different_resolution_not_duplicate(self):
+        """Same runtime but different resolution → intentional quality variants."""
+        results = [
+            self._result(size=5000000000, duration=120.0, resolution='1080p'),
+            self._result(size=3000000000, duration=120.0, resolution='720p'),
+        ]
+        pairs = detect_duplicates(results)
+        assert pairs == []
+
+    def test_runtime_outside_threshold(self):
+        """Runtime differs by more than 0.1 min → not duplicates."""
+        results = [
+            self._result(size=5000000000, duration=120.0, resolution='1080p'),
+            self._result(size=3000000000, duration=120.2, resolution='1080p'),
+        ]
+        pairs = detect_duplicates(results)
+        assert pairs == []
+
+    def test_runtime_at_exact_threshold(self):
+        """Runtime differs by exactly 0.1 min → still duplicate."""
+        results = [
+            self._result(size=5000000000, duration=120.0, resolution='1080p'),
+            self._result(size=3000000000, duration=120.1, resolution='1080p'),
+        ]
+        pairs = detect_duplicates(results)
+        assert pairs == [(0, 1)]
+
+    def test_three_files_two_pairs(self):
+        """Three files where all have same size → three pairs."""
+        results = [
+            self._result(size=5000000000),
+            self._result(size=5000000000),
+            self._result(size=5000000000),
+        ]
+        pairs = detect_duplicates(results)
+        assert pairs == [(0, 1), (0, 2), (1, 2)]
+
+    def test_file_size_zero_not_matched(self):
+        """File size of 0 is falsy → size check skipped."""
+        results = [
+            self._result(size=0, duration=120.0, resolution='1080p'),
+            self._result(size=0, duration=120.0, resolution='1080p'),
+        ]
+        pairs = detect_duplicates(results)
+        # size=0 is falsy, so size check skipped; falls through to runtime check
+        assert pairs == [(0, 1)]
+
+    def test_missing_file_size_falls_through_to_runtime(self):
+        """No file_size_bytes → size check skipped, runtime check used."""
+        results = [
+            self._result(size=None, duration=90.5, resolution='720p'),
+            self._result(size=None, duration=90.5, resolution='720p'),
+        ]
+        pairs = detect_duplicates(results)
+        assert pairs == [(0, 1)]
+
+    def test_no_duration_no_match(self):
+        """No file size, no duration → no match (runtime 0 is falsy)."""
+        results = [
+            self._result(size=None, duration=0, resolution='1080p'),
+            self._result(size=None, duration=0, resolution='1080p'),
+        ]
+        pairs = detect_duplicates(results)
+        assert pairs == []
+
+    def test_size_match_takes_priority_over_runtime(self):
+        """Size match fires first, runtime check not needed."""
+        results = [
+            self._result(size=5000000000, duration=120.0, resolution='1080p'),
+            self._result(size=5000000000, duration=999.0, resolution='720p'),
+        ]
+        pairs = detect_duplicates(results)
+        # Same size → duplicate via size check (different runtime/res don't matter)
+        assert pairs == [(0, 1)]
