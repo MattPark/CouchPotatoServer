@@ -1873,8 +1873,7 @@ def opensubtitles_lookup_hash(moviehash, api_key, filepath=None):
     return None
 
 
-def identify_flagged_file(filepath, flags, container_title_parsed,
-                         opensubtitles_api_key=None):
+def identify_flagged_file(filepath, flags, container_title_parsed):
     """Try to identify what a flagged file actually is.
 
     Strategy A: Container title (already parsed)
@@ -1934,12 +1933,25 @@ def identify_flagged_file(filepath, flags, container_title_parsed,
             return identification
 
     # Strategy B: OpenSubtitles moviehash (fast — reads only 128KB)
-    if opensubtitles_api_key:
+    # Get API key: via event inside CP, direct import for standalone CLI
+    _os_api_key = None
+    if _CP_AVAILABLE:
+        try:
+            _os_api_key = fireEvent('opensubtitles.api_key', single=True)
+        except Exception:
+            pass
+    else:
+        try:
+            from couchpotato.core.media.movie.providers.info.opensubtitles import OS_APP_API_KEY
+            _os_api_key = OS_APP_API_KEY
+        except ImportError:
+            pass
+    if _os_api_key:
         _log_info('Computing OpenSubtitles hash for %s...' % os.path.basename(filepath))
         moviehash = compute_opensubtitles_hash(filepath)
         if moviehash:
             _log_info('OpenSubtitles hash: %s' % moviehash)
-            hit = opensubtitles_lookup_hash(moviehash, opensubtitles_api_key,
+            hit = opensubtitles_lookup_hash(moviehash, _os_api_key,
                                             filepath=filepath)
             if hit:
                 feature_type = hit.get('feature_type', '')
@@ -2222,7 +2234,7 @@ def detect_duplicates(file_results):
 def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
                       expected_runtime, renamer_template, renamer_replace_doubles,
                       renamer_separator, tier2=False, force_tier2=False,
-                      cd_number=None, opensubtitles_api_key=None):
+                      cd_number=None):
     """Scan one video file and return an audit result dict (or None if clean).
 
     This is the core per-file scanning logic extracted from scan_movie_folder().
@@ -2387,8 +2399,7 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
             }
         elif force_tier2 or needs_identification(flags):
             result['identification'] = identify_flagged_file(
-                filepath, flags, container_title_parsed,
-                opensubtitles_api_key=opensubtitles_api_key
+                filepath, flags, container_title_parsed
             )
         else:
             result['identification'] = {
@@ -2419,8 +2430,7 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
 
 def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
                    expected_runtime, renamer_template, renamer_replace_doubles,
-                   renamer_separator, tier2=False, force_tier2=False,
-                   opensubtitles_api_key=None):
+                   renamer_separator, tier2=False, force_tier2=False):
     """Scan a multi-CD folder (all files have sequential cd tags).
 
     Scans each CD file individually with its cd_number, then aggregates
@@ -2448,7 +2458,6 @@ def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
             renamer_separator=renamer_separator,
             tier2=tier2, force_tier2=force_tier2,
             cd_number=cd_num,
-            opensubtitles_api_key=opensubtitles_api_key,
         )
         per_file_results.append((cd_num, filepath, result))
 
@@ -2576,7 +2585,7 @@ def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
 def _scan_variants(video_files, classification, folder_title, folder_year,
                    imdb_id, db_entry, expected_runtime, renamer_template,
                    renamer_replace_doubles, renamer_separator, tier2=False,
-                   force_tier2=False, opensubtitles_api_key=None):
+                   force_tier2=False):
     """Scan a folder with multiple file variants (editions, qualities, dupes).
 
     Each file is scanned individually.  Only files with issues get result
@@ -2601,7 +2610,6 @@ def _scan_variants(video_files, classification, folder_title, folder_year,
             renamer_replace_doubles=renamer_replace_doubles,
             renamer_separator=renamer_separator,
             tier2=tier2, force_tier2=force_tier2,
-            opensubtitles_api_key=opensubtitles_api_key,
         )
         file_results.append((filepath, result))
 
@@ -2708,7 +2716,7 @@ def _scan_variants(video_files, classification, folder_title, folder_year,
 def scan_movie_folder(folder_path, folder_name, media_by_imdb,
                       tier2=False, force_tier2=False, media_by_title=None,
                       renamer_template=None, renamer_replace_doubles=True,
-                      renamer_separator='', opensubtitles_api_key=None):
+                      renamer_separator=''):
     """Scan a single movie folder and return audit results.
 
     Handles single-file, multi-CD, and variant (multi-file) folders.
@@ -2770,7 +2778,6 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
         renamer_separator=renamer_separator,
         tier2=tier2,
         force_tier2=force_tier2,
-        opensubtitles_api_key=opensubtitles_api_key,
     )
 
     # Classify files and dispatch
@@ -2796,8 +2803,7 @@ _SKIP = object()
 
 def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
                  force_tier2=False, workers=DEFAULT_WORKERS,
-                 progress_callback=None, cancel_flag=None,
-                 opensubtitles_api_key=None):
+                 progress_callback=None, cancel_flag=None):
     """Scan movie library for mislabeled files.
 
     Args:
@@ -2875,7 +2881,6 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
                 renamer_template=renamer_template,
                 renamer_replace_doubles=renamer_replace_doubles,
                 renamer_separator=renamer_separator,
-                opensubtitles_api_key=opensubtitles_api_key,
             )
             return result, False
         except Exception as e:
@@ -4239,14 +4244,6 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         self.in_progress = {'total': 0, 'scanned': 0, 'flagged': 0}
 
-        # Read OpenSubtitles API key from settings
-        os_api_key = ''
-        try:
-            os_api_key = Env.setting('opensubtitles_api_key',
-                                      section='opensubtitles', default='')
-        except Exception:
-            pass
-
         try:
             report = scan_library(
                 movies_dir=movies_dir,
@@ -4257,7 +4254,6 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 workers=workers,
                 progress_callback=self._on_progress,
                 cancel_flag=self._cancel,
-                opensubtitles_api_key=os_api_key,
             )
             self.last_report = report
             self.last_report['completed_at'] = time.time()
@@ -4833,16 +4829,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         log.info('Running Tier 2 identification on %s', (item.get('folder', item_id),))
 
         try:
-            # Get OpenSubtitles API key from settings
-            os_api_key = ''
-            try:
-                os_api_key = Env.setting('opensubtitles_api_key',
-                                          section='opensubtitles', default='')
-            except Exception:
-                pass
             identification = identify_flagged_file(
-                filepath, flags, container_title_parsed,
-                opensubtitles_api_key=os_api_key
+                filepath, flags, container_title_parsed
             )
         except Exception as e:
             log.error('Tier 2 identification failed for %s: %s', (item_id, e))
@@ -5239,11 +5227,6 @@ def main():
         '--output', '-o',
         help='Write JSON report to this file (default: stdout)',
     )
-    parser.add_argument(
-        '--opensubtitles-key',
-        help='OpenSubtitles REST API key for hash-based identification',
-    )
-
     args = parser.parse_args()
 
     report = scan_library(
@@ -5253,7 +5236,6 @@ def main():
         tier2=args.tier2,
         force_tier2=args.force_tier2,
         workers=args.workers,
-        opensubtitles_api_key=getattr(args, 'opensubtitles_key', ''),
     )
 
     json_output = json.dumps(report, indent=2)

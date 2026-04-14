@@ -162,8 +162,8 @@ var MetadataSettingTab = new Class({
 						'<span class="stat_label">Hash Hits</span>' +
 					'</div>' +
 					'<div class="stat_item">' +
-						'<span class="stat_value">' + (os.has_api_key ? 'Configured' : 'Not Set') + '</span>' +
-						'<span class="stat_label">API Key</span>' +
+						'<span class="stat_value">' + (os.key_type || 'Unknown') + '</span>' +
+						'<span class="stat_label">Key Type</span>' +
 					'</div>' +
 				'</div>'
 			);

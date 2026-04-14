@@ -20,6 +20,12 @@ log = CPLog(__name__)
 
 autoload = 'OpenSubtitlesCom'
 
+# Built-in application-level API key (registered at opensubtitles.com/consumers).
+# This identifies the CouchPotato application — it is NOT a user secret.
+# Searches (hash lookups) are unlimited and free; only subtitle downloads
+# consume quota (which requires user login via username/password below).
+OS_APP_API_KEY = '6myLcgfFag887jWtWC40vKhs92LocQUA'
+
 
 class OpenSubtitlesCom(MovieProvider):
 
@@ -31,6 +37,18 @@ class OpenSubtitlesCom(MovieProvider):
 
     def __init__(self):
         addEvent('metadata.stats', self.getStats)
+        addEvent('opensubtitles.api_key', self.getApiKey)
+
+    # --- API key -------------------------------------------------------------
+
+    def getApiKey(self):
+        """Return the API key to use for OpenSubtitles requests.
+
+        Always returns the built-in application key.  There is no user-
+        configurable override — this is an app-level credential, not a
+        user secret.
+        """
+        return OS_APP_API_KEY
 
     # --- call tracking -------------------------------------------------------
 
@@ -60,12 +78,11 @@ class OpenSubtitlesCom(MovieProvider):
         self._incrementDaily(self._daily_hash_hits)
 
     def getStats(self):
-        api_key = self.conf('opensubtitles_api_key', section='opensubtitles') or ''
         return {
             'opensubtitles': {
                 'searches_today': self._getDailyCount(self._daily_calls),
                 'hash_hits_today': self._getDailyCount(self._daily_hash_hits),
-                'has_api_key': api_key != '',
+                'key_type': 'Built-in',
                 # TODO: Add download quota tracking when subtitle
                 #       download is implemented.  The REST API returns
                 #       remaining downloads in the /download response.
@@ -86,15 +103,11 @@ config = [{
             'description': 'Hash-based movie identification for library audit. '
                            'Searches are unlimited; only subtitle downloads use quota.',
             'options': [
-                {
-                    'name': 'opensubtitles_api_key',
-                    'default': '',
-                    'type': 'password',
-                    'label': 'API Key',
-                    'description': 'Get a free key at '
-                                   '<a href="https://www.opensubtitles.com/en/consumers" '
-                                   'target="_blank">opensubtitles.com/consumers</a>',
-                },
+                # TODO: Add username/password fields here when subtitle
+                #       download functionality is implemented.  The user
+                #       would enter their opensubtitles.com credentials
+                #       to enable downloading (5/day anonymous, 10/day
+                #       logged-in, 20+/day VIP).
             ],
         },
     ],
