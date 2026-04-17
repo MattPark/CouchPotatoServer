@@ -1630,7 +1630,7 @@
 			&:hover { opacity: .85; }
 		}
 
-		&.audit_tier2_btn {
+		&.audit_full_btn {
 			background: #1976d2;
 			color: #fff;
 			margin-left: 8px;
@@ -1638,7 +1638,7 @@
 			&:hover { opacity: .85; }
 		}
 
-		&.audit_tier2_running {
+		&.audit_full_running {
 			opacity: .5;
 			cursor: wait;
 		}

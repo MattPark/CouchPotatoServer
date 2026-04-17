@@ -9,8 +9,8 @@ var AuditSettingTab = new Class({
 	preview_modal: null,
 	_expand_next: false,
 
-	tier1_btn: null,
-	tier2_btn: null,
+	quick_btn: null,
+	full_btn: null,
 	cancel_btn: null,
 
 	scan_in_progress: false,
@@ -89,19 +89,19 @@ var AuditSettingTab = new Class({
 
 		var buttons_row = new Element('div.scan_buttons').inject(self.scan_toolbar);
 
-		self.tier1_btn = new Element('a.scan_btn.audit_tier1', {
+		self.quick_btn = new Element('a.scan_btn.audit_quick', {
 			'events': { 'click': self.startScan.bind(self, false) }
 		}).adopt(
 			new Element('span.scan_btn_icon.icon-search'),
-			new Element('span.scan_btn_label', { 'text': 'Tier 1 Scan' }),
+			new Element('span.scan_btn_label', { 'text': 'Quick Scan' }),
 			new Element('span.scan_btn_desc', { 'text': 'Quick local scan: resolution, runtime, title, TV episodes, editions' })
 		).inject(buttons_row);
 
-		self.tier2_btn = new Element('a.scan_btn.audit_tier2', {
+		self.full_btn = new Element('a.scan_btn.audit_full', {
 			'events': { 'click': self.startScan.bind(self, true) }
 		}).adopt(
 			new Element('span.scan_btn_icon.icon-refresh'),
-			new Element('span.scan_btn_label', { 'text': 'Tier 1 + 2 Scan' }),
+			new Element('span.scan_btn_label', { 'text': 'Full Scan' }),
 			new Element('span.scan_btn_desc', { 'text': 'Full scan with CRC/srrDB identification (~20 min)' })
 		).inject(buttons_row);
 
@@ -175,7 +175,7 @@ var AuditSettingTab = new Class({
 			new Element('option', { 'value': 'rename_edition', 'text': 'Rename Edition' }),
 			new Element('option', { 'value': 'delete_wrong', 'text': 'Delete Wrong' }),
 			new Element('option', { 'value': 'reassign_movie', 'text': 'Reassign Movie' }),
-			new Element('option', { 'value': 'needs_tier2', 'text': 'Needs Tier 2' }),
+			new Element('option', { 'value': 'needs_full', 'text': 'Needs Identification' }),
 			new Element('option', { 'value': 'manual_review', 'text': 'Manual Review' })
 		).inject(filters);
 
@@ -254,11 +254,11 @@ var AuditSettingTab = new Class({
 	// Scan Controls
 	// -----------------------------------------------------------------------
 
-	startScan: function(tier2){
+	startScan: function(full){
 		var self = this;
 		if(self.scan_in_progress) return;
 
-		var data = { 'tier2': tier2 ? 1 : 0, 'workers': 4 };
+		var data = { 'full': full ? 1 : 0, 'workers': 4 };
 
 		Api.request('audit.scan', {
 			'data': data,
@@ -289,12 +289,12 @@ var AuditSettingTab = new Class({
 	setButtonsScanning: function(scanning){
 		var self = this;
 		if(scanning){
-			self.tier1_btn.addClass('disabled');
-			self.tier2_btn.addClass('disabled');
+			self.quick_btn.addClass('disabled');
+			self.full_btn.addClass('disabled');
 			self.cancel_btn.setStyle('display', '');
 		} else {
-			self.tier1_btn.removeClass('disabled');
-			self.tier2_btn.removeClass('disabled');
+			self.quick_btn.removeClass('disabled');
+			self.full_btn.removeClass('disabled');
 			self.cancel_btn.setStyle('display', 'none');
 		}
 	},
@@ -462,7 +462,7 @@ var AuditSettingTab = new Class({
 				'rename_edition': 'Rename Edition',
 				'delete_wrong': 'Delete TV Episodes',
 				'reassign_movie': 'Reassign Movie',
-				'needs_tier2': 'Needs Tier 2 ID',
+				'needs_full': 'Needs Identification',
 				'manual_review': 'Manual Review'
 			};
 			var action_colors = {
@@ -471,7 +471,7 @@ var AuditSettingTab = new Class({
 				'rename_edition': '#2196f3',
 				'delete_wrong': '#f44336',
 				'reassign_movie': '#ff9800',
-				'needs_tier2': '#9e9e9e',
+				'needs_full': '#9e9e9e',
 				'manual_review': '#9e9e9e'
 			};
 
@@ -715,7 +715,7 @@ var AuditSettingTab = new Class({
 			self.renderKeyValues(expected_section, item.expected);
 		}
 
-		// Identification (tier 2)
+		// Identification
 		if(item.identification && item.identification.method && item.identification.method !== 'skipped'){
 			var id_section = new Element('div.audit_detail_section').inject(detail);
 			new Element('div.audit_detail_subtitle', { 'text': 'Identification:' }).inject(id_section);
@@ -727,7 +727,7 @@ var AuditSettingTab = new Class({
 			var actions_row = new Element('div.audit_item_actions').inject(detail);
 			var action = item.recommended_action;
 
-			if(action && action !== 'none' && action !== 'needs_tier2' && action !== 'manual_review'){
+			if(action && action !== 'none' && action !== 'needs_full' && action !== 'manual_review'){
 				new Element('a.audit_action_btn.primary', {
 					'text': self.actionLabel(action),
 					'events': { 'click': function(e){
@@ -750,12 +750,12 @@ var AuditSettingTab = new Class({
 				}).inject(actions_row);
 			});
 
-			// Run Tier 2 button
-			var t2_btn = new Element('a.audit_action_btn.audit_tier2_btn', {
-				'text': 'Run Tier 2',
+			// Run Identification button
+			var t2_btn = new Element('a.audit_action_btn.audit_full_btn', {
+				'text': 'Identify',
 				'events': { 'click': function(e){
 					e.stop();
-					self.runTier2(item.item_id, t2_btn, card);
+					self.runIdentify(item.item_id, t2_btn, card);
 				}}
 			}).inject(actions_row);
 
@@ -1233,19 +1233,19 @@ var AuditSettingTab = new Class({
 		self.preview_modal.empty();
 	},
 
-	runTier2: function(item_id, btn, card){
+	runIdentify: function(item_id, btn, card){
 		var self = this;
 
 		// Show loading state
 		var orig_text = btn.get('text');
 		btn.set('text', 'Running...');
-		btn.addClass('audit_tier2_running');
+		btn.addClass('audit_full_running');
 		btn.removeEvents('click');
 
 		Api.request('audit.identify', {
 			'data': { 'item_id': item_id },
 			'onComplete': function(json){
-				btn.removeClass('audit_tier2_running');
+				btn.removeClass('audit_full_running');
 
 				if(json && json.success){
 					self.loadStats();
@@ -1253,9 +1253,9 @@ var AuditSettingTab = new Class({
 					btn.set('text', orig_text);
 					btn.addEvent('click', function(e){
 						e.stop();
-						self.runTier2(item_id, btn, card);
+						self.runIdentify(item_id, btn, card);
 					});
-					alert('Tier 2 failed: ' + (json ? json.error || 'Unknown error' : 'No response'));
+					alert('Identification failed: ' + (json ? json.error || 'Unknown error' : 'No response'));
 				}
 			}
 		});
@@ -1282,12 +1282,12 @@ var AuditSettingTab = new Class({
 
 		var orig_text = btn.get('text');
 		btn.set('text', 'Looking up...');
-		btn.addClass('audit_tier2_running');
+		btn.addClass('audit_full_running');
 
 		Api.request('audit.reassign', {
 			'data': { 'item_id': item_id, 'imdb_id': imdb_id },
 			'onComplete': function(json){
-				btn.removeClass('audit_tier2_running');
+				btn.removeClass('audit_full_running');
 				btn.set('text', orig_text);
 
 				if(json && json.success && json.preview){
@@ -1339,7 +1339,7 @@ var AuditSettingTab = new Class({
 			'rename_edition': 'Rename Edition',
 			'delete_wrong': 'Delete',
 			'reassign_movie': 'Reassign Movie',
-			'needs_tier2': 'Needs Tier 2',
+			'needs_full': 'Needs Identification',
 			'manual_review': 'Manual Review',
 			'none': 'None'
 		};

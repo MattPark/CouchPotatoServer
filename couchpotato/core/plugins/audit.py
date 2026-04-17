@@ -1,32 +1,32 @@
 """Library audit tool for detecting mislabeled movies.
 
-Tier 1 (local, no network):
+Quick scan (local, no network):
   1. Resolution mismatch — actual resolution vs filename-claimed resolution
   2. Runtime mismatch — actual duration vs TMDB runtime from CP database
   3. Container title mismatch — guessit-parsed metadata title/year vs folder title/year
   4. TV episode detection — S##E## / Season / Disc patterns in container titles
 
-Tier 2 (targeted identification for flagged files):
-  A. Container title already identified it (from Tier 1 data)
+Full scan — identification (targeted for flagged files):
+  A. Container title already identified it (from quick scan data)
   B. OpenSubtitles moviehash (fast, reads 128KB) → IMDB ID + title
   C. CRC32 reverse lookup on srrDB → release name + IMDB ID
   D. (future) TMDB search fallback
 
-  Smart skip logic (tier2 without force_tier2):
-    - TV episode detected → skip tier 2, mark for deletion
-    - Resolution-only mismatch → skip tier 2 (right movie, wrong quality)
-    - Everything else → run tier 2 (suspect file needs identification)
-    - force_tier2=1 overrides all skip logic
+  Smart skip logic (full without force_full):
+    - TV episode detected → skip identification, mark for deletion
+    - Resolution-only mismatch → skip identification (right movie, wrong quality)
+    - Everything else → run identification (suspect file needs it)
+    - force_full=1 overrides all skip logic
 
 Usage (standalone):
   python audit.py --movies-dir /movies --db /config/data/database/db.json
   python audit.py --movies-dir /movies --db /config/data/database/db.json --scan-path "Dead, The (1987)"
-  python audit.py --movies-dir /movies --db /config/data/database/db.json --tier2
-  python audit.py --movies-dir /movies --db /config/data/database/db.json --tier2 --force-tier2
+  python audit.py --movies-dir /movies --db /config/data/database/db.json --full
+  python audit.py --movies-dir /movies --db /config/data/database/db.json --full --force-full
   python audit.py --movies-dir /movies --db /config/data/database/db.json --workers 8
 
 API (when running inside CouchPotato):
-  GET /api/{key}/audit.scan?tier2=0&force_tier2=0&workers=4&scan_path=
+  GET /api/{key}/audit.scan?full=0&force_full=0&workers=4&scan_path=
   GET /api/{key}/audit.cancel
   GET /api/{key}/audit.progress
   GET /api/{key}/audit.results?offset=0&limit=50&filter_check=&filter_severity=&filter_action=&sort=folder&sort_dir=asc
@@ -854,15 +854,15 @@ def compute_recommended_action(flags, identification=None, expected=None):
         'delete_wrong'       — TV episode or identified as non-movie
         'rename_template'    — filename doesn't match template (superset of resolution/edition)
         'rename_resolution'  — resolution-only flag (right movie, wrong quality label)
-        'reassign_movie'     — tier 2 identified as a different movie
+        'reassign_movie'     — identification found a different movie
         'rename_edition'     — edition detected in container but not filename
-        'needs_tier2'        — title/runtime mismatch, needs tier 2 identification
-        'manual_review'      — tier 2 ran but couldn't identify
-        'none'               — no action needed (tier 2 confirmed same movie)
+        'needs_full'        — title/runtime mismatch, needs identification
+        'manual_review'      — identification ran but couldn't match
+        'none'               — no action needed (identification confirmed same movie)
 
     Args:
         flags: list of flag dicts with 'check' keys
-        identification: tier 2 identification dict (optional)
+        identification: identification dict (optional)
         expected: item['expected'] dict with title/year/db_title (optional).
             When provided, allows same-title detection so year-only
             mismatches get 'rename_template' instead of 'reassign_movie'.
@@ -877,8 +877,8 @@ def compute_recommended_action(flags, identification=None, expected=None):
     if 'duplicate' in checks:
         return 'delete_wrong'
 
-    # If tier 2 has run, use identification to decide — takes priority over
-    # tier 1 flag-based logic since it has more information
+    # If identification has run, use it to decide — takes priority over
+    # quick scan flag-based logic since it has more information
     if identification:
         method = identification.get('method', '')
 
@@ -909,7 +909,7 @@ def compute_recommended_action(flags, identification=None, expected=None):
                             return 'rename_template'
                         else:
                             return 'reassign_movie'
-                    # Same title, same year (or can't compare) — tier 2
+                    # Same title, same year (or can't compare) — identification
                     # confirmed identity.  Fall through to flag-based logic
                     # which will handle any remaining template/res/edition flags.
                     pass
@@ -925,20 +925,20 @@ def compute_recommended_action(flags, identification=None, expected=None):
             return 'manual_review'
 
         if method == 'skipped':
-            # High-confidence tier 1 — fall through to flag-based logic below
+            # High-confidence quick scan — fall through to flag-based logic below
             pass
 
     # Template mismatch is a naming-only fix — use rename_template
     # It subsumes resolution and edition rename when template check is present
     if 'template' in checks:
-        # If there are also identity flags (title/runtime) and no tier 2 data,
+        # If there are also identity flags (title/runtime) and no identification data,
         # those need identification first
         identity_checks = checks & {'title', 'runtime'}
         if identity_checks and not identification:
-            return 'needs_tier2'
+            return 'needs_full'
         return 'rename_template'
 
-    # No tier 2 data — decide from tier 1 flags alone
+    # No identification data — decide from quick scan flags alone
     if checks == {'resolution'}:
         return 'rename_resolution'
 
@@ -948,20 +948,20 @@ def compute_recommended_action(flags, identification=None, expected=None):
     if 'edition' in checks and checks - {'edition', 'resolution'} == set():
         return 'rename_resolution'
 
-    # Title or runtime mismatch without tier 2 — needs identification.
+    # Title or runtime mismatch without identification — needs identification.
     # But if identification already ran and confirmed the same movie,
     # there's nothing to fix (e.g., container metadata has a different
     # year but the filename is already correct).
     if 'title' in checks or 'runtime' in checks:
         if not identification:
-            return 'needs_tier2'
+            return 'needs_full'
         return 'none'
 
     return 'manual_review'
 
 
 # ---------------------------------------------------------------------------
-# Tier 1 checks
+# Quick scan checks
 # ---------------------------------------------------------------------------
 
 def check_resolution(claimed_label, actual_width, actual_height):
@@ -1107,11 +1107,11 @@ def _parse_edition_from_release(release_name):
     return _edition_fallback_regex(release_name)
 
 
-def _backfill_edition_from_tier2(result):
-    """Backfill detected_edition from tier 2 identification source.
+def _backfill_edition_from_identification(result):
+    """Backfill detected_edition from identification source.
 
-    After tier 2 identification, the srrDB release name or container title
-    source may contain edition info that wasn't available during tier 1.
+    After identification, the srrDB release name or container title
+    source may contain edition info that wasn't available during the quick scan.
     This function:
       1. Parses the identification source for edition keywords
       2. Sets detected_edition on the item if not already set
@@ -1195,7 +1195,7 @@ def check_container_title(container_title, folder_title, folder_year,
             - neither matches → downgrade to LOW
 
     Returns a flag dict or None.  Also returns parsed metadata (title, year)
-    for use in Tier 2 identification.
+    for use in identification.
     """
     if not container_title or is_junk_title(container_title):
         return None, None
@@ -1212,7 +1212,7 @@ def check_container_title(container_title, folder_title, folder_year,
     # Real scene names include a year.  Allow longer titles through since they
     # could be actual movie names (e.g. "What keeps you alive").
     # Don't flag as a title mismatch, but DO return the parsed metadata so
-    # Tier 2 Strategy A can still attempt identification from it.
+    # Identification Strategy A can still attempt identification from it.
     if not meta_year and len(meta_title.split()) <= 3:
         parsed_meta = {
             'title': meta_title,
@@ -1308,8 +1308,8 @@ def _check_year_against_imdb(container_year, folder_year, imdb_year):
 def _revalidate_year_flags(item, imdb_year):
     """Re-evaluate ±1 year title flags using newly available IMDB data.
 
-    Called after Tier 2 identification provides an IMDB year that wasn't
-    available during Tier 1.  Mutates the item's flags list in place:
+    Called after identification provides an IMDB year that wasn't
+    available during the quick scan.  Mutates the item's flags list in place:
     removes suppressed flags and downgrades ambiguous ones.
 
     Args:
@@ -1752,13 +1752,13 @@ def check_template(item, template, replace_doubles=True, separator='',
 
 
 # ---------------------------------------------------------------------------
-# Tier 2 skip logic
+# Identification skip logic
 # ---------------------------------------------------------------------------
 
 def needs_identification(flags):
-    """Determine if a flagged file needs Tier 2 identification.
+    """Determine if a flagged file needs identification.
 
-    Smart skip logic — avoid expensive CRC32/srrDB lookups when Tier 1
+    Smart skip logic — avoid expensive CRC32/srrDB lookups when the quick scan
     already gives us enough information to act:
 
       - TV episode detected → skip (already identified from container title,
@@ -1772,7 +1772,7 @@ def needs_identification(flags):
       - Everything else → run (title mismatch, runtime mismatch, or
         multi-flag combinations are suspect and need identification)
 
-    Returns True if Tier 2 should run, False to skip.
+    Returns True if identification should run, False to skip.
     """
     checks = {f['check'] for f in flags}
 
@@ -1785,12 +1785,12 @@ def needs_identification(flags):
     if checks <= naming_only:
         return False
 
-    # Everything else is suspect — run tier 2
+    # Everything else is suspect — run identification
     return True
 
 
 # ---------------------------------------------------------------------------
-# Tier 2 identification
+# Identification
 # ---------------------------------------------------------------------------
 
 def compute_crc32(filepath, progress_callback=None):
@@ -2341,13 +2341,13 @@ def detect_duplicates(file_results):
 
 def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
                       expected_runtime, renamer_template, renamer_replace_doubles,
-                      renamer_separator, tier2=False, force_tier2=False,
+                      renamer_separator, full=False, force_full=False,
                       cd_number=None):
     """Scan one video file and return an audit result dict (or None if clean).
 
     This is the core per-file scanning logic extracted from scan_movie_folder().
     It runs all six checks (resolution, runtime, container title, TV episode,
-    edition, template) and optionally tier 2 identification.
+    edition, template) and optionally identification.
 
     Args:
         filepath: Full path to the video file
@@ -2359,8 +2359,8 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
         renamer_template: Renamer file_name template string
         renamer_replace_doubles: Whether to clean up double separators
         renamer_separator: Character to replace spaces with
-        tier2: Run Tier 2 identification on flagged files
-        force_tier2: Force Tier 2 even for high-confidence flags
+        full: Run full scan with identification on flagged files
+        force_full: Force identification even for high-confidence flags
         cd_number: CD number for multi-CD files (int), or None
 
     Returns:
@@ -2497,30 +2497,30 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
     if cd_number is not None:
         result['cd_number'] = cd_number
 
-    # Tier 2: identification with smart skip logic
-    if tier2:
+    # Identification with smart skip logic
+    if full:
         has_tv = any(f['check'] == 'tv_episode' for f in flags)
-        if has_tv and not force_tier2:
+        if has_tv and not force_full:
             result['identification'] = {
                 'method': 'tv_episode_detected',
                 'action': 'queue_deletion',
                 'detail': 'Container title indicates TV episode content',
             }
-        elif force_tier2 or needs_identification(flags):
+        elif force_full or needs_identification(flags):
             result['identification'] = identify_flagged_file(
                 filepath, flags, container_title_parsed
             )
         else:
             result['identification'] = {
                 'method': 'skipped',
-                'reason': 'high_confidence_tier1',
-                'detail': 'Tier 1 flags sufficient; use force_tier2=1 to override',
+                'reason': 'high_confidence_quick_scan',
+                'detail': 'Quick scan flags sufficient; use force_full=1 to override',
             }
 
-        # Backfill edition from tier 2 source
-        _backfill_edition_from_tier2(result)
+        # Backfill edition from identification source
+        _backfill_edition_from_identification(result)
 
-        # Post-tier-2: re-evaluate ±1 year title flags
+        # Post-identification: re-evaluate ±1 year title flags
         if not db_entry:
             ident = result.get('identification') or {}
             id_year = ident.get('identified_year')
@@ -2539,7 +2539,7 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
 
 def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
                    expected_runtime, renamer_template, renamer_replace_doubles,
-                   renamer_separator, tier2=False, force_tier2=False):
+                   renamer_separator, full=False, force_full=False):
     """Scan a multi-CD folder (all files have sequential cd tags).
 
     Scans each CD file individually with its cd_number, then aggregates
@@ -2565,7 +2565,7 @@ def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
             renamer_template=renamer_template,
             renamer_replace_doubles=renamer_replace_doubles,
             renamer_separator=renamer_separator,
-            tier2=tier2, force_tier2=force_tier2,
+            full=full, force_full=force_full,
             cd_number=cd_num,
         )
         per_file_results.append((cd_num, filepath, result))
@@ -2694,8 +2694,8 @@ def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
 
 def _scan_variants(video_files, classification, folder_title, folder_year,
                    imdb_id, db_entry, expected_runtime, renamer_template,
-                   renamer_replace_doubles, renamer_separator, tier2=False,
-                   force_tier2=False):
+                   renamer_replace_doubles, renamer_separator, full=False,
+                   force_full=False):
     """Scan a folder with multiple file variants (editions, qualities, dupes).
 
     Each file is scanned individually.  Only files with issues get result
@@ -2719,7 +2719,7 @@ def _scan_variants(video_files, classification, folder_title, folder_year,
             renamer_template=renamer_template,
             renamer_replace_doubles=renamer_replace_doubles,
             renamer_separator=renamer_separator,
-            tier2=tier2, force_tier2=force_tier2,
+            full=full, force_full=force_full,
         )
         file_results.append((filepath, result))
 
@@ -2825,7 +2825,7 @@ def _scan_variants(video_files, classification, folder_title, folder_year,
 
 
 def scan_movie_folder(folder_path, folder_name, media_by_imdb,
-                      tier2=False, force_tier2=False, media_by_title=None,
+                      full=False, force_full=False, media_by_title=None,
                       renamer_template=None, renamer_replace_doubles=True,
                       renamer_separator=''):
     """Scan a single movie folder and return audit results.
@@ -2836,8 +2836,8 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
         folder_path: Full path to the movie folder
         folder_name: Folder basename (e.g., "Dead, The (1987)")
         media_by_imdb: Dict mapping IMDB ID → movie info from CP database
-        tier2: Run Tier 2 identification on flagged files
-        force_tier2: Force Tier 2 even for high-confidence Tier 1 flags
+        full: Run full scan with identification on flagged files
+        force_full: Force identification even for high-confidence quick scan flags
         media_by_title: Dict mapping (normalized_title, year) → movie info
         renamer_template: Renamer file_name template string (e.g. '<thename> (<year>) <quality>.<ext>')
         renamer_replace_doubles: Whether to clean up double separators
@@ -2887,8 +2887,8 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
         renamer_template=renamer_template,
         renamer_replace_doubles=renamer_replace_doubles,
         renamer_separator=renamer_separator,
-        tier2=tier2,
-        force_tier2=force_tier2,
+        full=full,
+        force_full=force_full,
     )
 
     # Classify files and dispatch
@@ -2912,8 +2912,8 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
 _SKIP = object()
 
 
-def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
-                 force_tier2=False, workers=DEFAULT_WORKERS,
+def scan_library(movies_dir, db_path, scan_path=None, full=False,
+                 force_full=False, workers=DEFAULT_WORKERS,
                  progress_callback=None, cancel_flag=None):
     """Scan movie library for mislabeled files.
 
@@ -2921,8 +2921,8 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
         movies_dir: Path to the movies directory
         db_path: Path to CP's db.json
         scan_path: If set, only scan this specific folder name
-        tier2: Run Tier 2 identification on flagged files
-        force_tier2: Force Tier 2 even for high-confidence Tier 1 flags
+        full: Run full scan with identification on flagged files
+        force_full: Force identification even for high-confidence quick scan flags
         workers: Number of parallel scan threads (1 = sequential)
         progress_callback: If set, called with (scanned, total, flagged_count)
                            after each folder
@@ -2987,7 +2987,7 @@ def scan_library(movies_dir, db_path, scan_path=None, tier2=False,
         try:
             result = scan_movie_folder(
                 folder_path, folder_name, media_by_imdb,
-                tier2=tier2, force_tier2=force_tier2,
+                full=full, force_full=force_full,
                 media_by_title=media_by_title,
                 renamer_template=renamer_template,
                 renamer_replace_doubles=renamer_replace_doubles,
@@ -3496,22 +3496,22 @@ def _preview_delete_wrong(item):
 def _preview_reassign_movie(item):
     """Generate preview for reassign_movie action.
 
-    Requires tier 2 identification with an identified IMDB ID.
+    Requires identification with an identified IMDB ID.
     """
     ident = item.get('identification')
     if not ident:
-        return {'error': 'No tier 2 identification data — run a tier 2 scan first'}
+        return {'error': 'No identification data — run a full scan first'}
 
     method = ident.get('method', '')
     if method not in ('container_title', 'srrdb_crc', 'manual'):
-        return {'error': 'Tier 2 identification method "%s" cannot determine correct movie' % method}
+        return {'error': 'Identification method "%s" cannot determine correct movie' % method}
 
     id_title = ident.get('identified_title', '')
     id_year = ident.get('identified_year')
     id_imdb = ident.get('identified_imdb', '')
 
     if not id_title:
-        return {'error': 'Tier 2 did not identify a title'}
+        return {'error': 'Identification did not find a title'}
 
     # Determine the movies root from the old path
     # old_path: /media/Movies/FolderName/file.mkv → movies_dir = /media/Movies
@@ -3602,7 +3602,7 @@ def _preview_rename_template(item):
     Rebuilds filename from the renamer template using all available data
     including guessit-parsed tokens from the current filename.
 
-    When the expected year (e.g. corrected by tier 2) produces a different
+    When the expected year (e.g. corrected by identification) produces a different
     folder name than the current folder, a folder rename is included in the
     preview so the entire path is corrected in one operation.
 
@@ -3778,7 +3778,7 @@ def execute_fix_rename_template(item):
     rename_resolution and rename_edition — it fixes everything in one rename.
 
     When the expected data produces a different folder name (e.g. year
-    correction from tier 2), the folder is also renamed/moved.
+    correction from identification), the folder is also renamed/moved.
 
     For multi-CD items, renames all cd files in one operation.
 
@@ -4045,8 +4045,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         addApiView('audit.scan', self.scanView, docs={
             'desc': 'Start a library audit scan',
             'params': {
-                'tier2': {'desc': 'Run Tier 2 identification (CRC + srrDB). Default 0.'},
-                'force_tier2': {'desc': 'Force Tier 2 even for high-confidence flags. Default 0.'},
+                'full': {'desc': 'Run full scan with identification (hash + srrDB). Default 0.'},
+                'force_full': {'desc': 'Force identification even for high-confidence flags. Default 0.'},
                 'workers': {'desc': 'Number of parallel scan threads (1-16). Default 4.'},
                 'scan_path': {'desc': 'Scan only this folder name (optional).'},
             },
@@ -4114,7 +4114,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         })
 
         addApiView('audit.identify', self.identifyView, docs={
-            'desc': 'Run Tier 2 identification on a single flagged item',
+            'desc': 'Run identification on a single flagged item',
             'params': {
                 'item_id': {'desc': '12-char hex ID of the flagged item'},
             },
@@ -4336,7 +4336,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'flagged': flagged_count,
         }
 
-    def _run_scan(self, tier2=False, force_tier2=False, scan_path=None,
+    def _run_scan(self, full=False, force_full=False, scan_path=None,
                   workers=DEFAULT_WORKERS):
         """Run the audit scan (called in background thread)."""
         self._cancel[0] = False
@@ -4360,8 +4360,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 movies_dir=movies_dir,
                 db_path=db_path,
                 scan_path=scan_path,
-                tier2=tier2,
-                force_tier2=force_tier2,
+                full=full,
+                force_full=force_full,
                 workers=workers,
                 progress_callback=self._on_progress,
                 cancel_flag=self._cancel,
@@ -4463,7 +4463,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         return items
 
-    def scanView(self, tier2='0', force_tier2='0', workers='4',
+    def scanView(self, full='0', force_full='0', workers='4',
                  scan_path=None, **kwargs):
         """API handler: start an audit scan."""
         if self.in_progress:
@@ -4473,8 +4473,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 'progress': self.in_progress,
             }
 
-        do_tier2 = str(tier2) == '1'
-        do_force = str(force_tier2) == '1'
+        do_full = str(full) == '1'
+        do_force = str(force_full) == '1'
 
         try:
             num_workers = int(workers)
@@ -4486,16 +4486,16 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         fireEventAsync(
             'audit.run_scan',
-            tier2=do_tier2,
-            force_tier2=do_force,
+            full=do_full,
+            force_full=do_force,
             scan_path=scan_path if scan_path else None,
             workers=num_workers,
         )
 
         return {
             'success': True,
-            'message': 'Audit scan started (workers=%s, tier2=%s, force_tier2=%s)' % (
-                num_workers, do_tier2, do_force),
+            'message': 'Audit scan started (workers=%s, full=%s, force_full=%s)' % (
+                num_workers, do_full, do_force),
             'progress': self.in_progress,
         }
 
@@ -4607,21 +4607,21 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         # Count fixed items
         total_fixed = sum(1 for i in flagged if i.get('fixed'))
 
-        # Tier 2 stats
-        tier2_identified = 0
-        tier2_unidentified = 0
-        tier2_skipped = 0
+        # Identification stats
+        ident_identified = 0
+        ident_unidentified = 0
+        ident_skipped = 0
         for item in flagged:
             ident = item.get('identification')
             if not ident:
                 continue
             method = ident.get('method', '')
             if method in ('container_title', 'srrdb_crc', 'opensubtitles_hash', 'manual'):
-                tier2_identified += 1
+                ident_identified += 1
             elif method == 'crc_not_found':
-                tier2_unidentified += 1
+                ident_unidentified += 1
             elif method in ('skipped', 'tv_episode_detected'):
-                tier2_skipped += 1
+                ident_skipped += 1
 
         total_scanned = self.last_report.get('total_scanned', 0)
         total_flagged = self.last_report.get('total_flagged', 0)
@@ -4638,10 +4638,10 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 'checks': check_counts,
                 'severity': severity_counts,
                 'actions': action_counts,
-                'tier2': {
-                    'identified': tier2_identified,
-                    'unidentified': tier2_unidentified,
-                     'skipped': tier2_skipped,
+                'identification': {
+                    'identified': ident_identified,
+                    'unidentified': ident_unidentified,
+                     'skipped': ident_skipped,
                 },
             },
         }
@@ -5012,7 +5012,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         }
 
     def identifyView(self, item_id=None, **kwargs):
-        """API handler: run Tier 2 identification on a single flagged item.
+        """API handler: run identification on a single flagged item.
 
         Runs identify_flagged_file() on the item, updates identification and
         recommended_action in-place, persists results, and returns the updated
@@ -5038,14 +5038,14 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         flags = item.get('flags', [])
 
-        log.info('Running Tier 2 identification on %s', (item.get('folder', item_id),))
+        log.info('Running identification on %s', (item.get('folder', item_id),))
 
         try:
             identification = identify_flagged_file(
                 filepath, flags, container_title_parsed
             )
         except Exception as e:
-            log.error('Tier 2 identification failed for %s: %s', (item_id, e))
+            log.error('Identification failed for %s: %s', (item_id, e))
             return {'success': False, 'error': 'Identification failed: %s' % str(e)}
 
         # Update item in-place
@@ -5056,14 +5056,14 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         if id_imdb and not item.get('imdb_id'):
             item['imdb_id'] = id_imdb
 
-        # Backfill edition from tier 2 source (srrDB release name or
+        # Backfill edition from identification source (srrDB release name or
         # container title).  This can suppress false-positive runtime flags
         # for extended/director's cuts and add edition mismatch flags.
-        _backfill_edition_from_tier2(item)
+        _backfill_edition_from_identification(item)
 
-        # Re-evaluate ±1 year title flags with the IMDB year from tier 2
+        # Re-evaluate ±1 year title flags with the IMDB year from
         # identification.  This may suppress false-positive year flags that
-        # were created during tier 1 when no IMDB data was available.
+        # were created during the quick scan when no IMDB data was available.
         id_year = identification.get('identified_year')
         if id_year:
             _revalidate_year_flags(item, id_year)
@@ -5073,7 +5073,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             item.get('flags', []), identification, item.get('expected')
         )
 
-        # When tier 2 confirms same title but different year (±1),
+        # When identification confirms same title but different year (±1),
         # compute_recommended_action returns 'rename_template'.  Update the
         # expected year so _apply_renamer_template builds the correct filename
         # and add a template flag so the UI shows what changed.
@@ -5088,7 +5088,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                     item['flags'].append({
                         'check': 'template',
                         'severity': 'MEDIUM',
-                        'detail': 'Year corrected from %s to %s based on tier 2 identification' % (
+                        'detail': 'Year corrected from %s to %s based on identification' % (
                             exp_year, id_year),
                     })
                     item['flag_count'] = len(item['flags'])
@@ -5096,7 +5096,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         # Persist
         self._save_results()
 
-        log.info('Tier 2 result for %s: method=%s action=%s', (
+        log.info('Identification result for %s: method=%s action=%s', (
             item.get('folder', item_id),
             identification.get('method', ''),
             item['recommended_action'],
@@ -5185,7 +5185,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                     item['flags'].append({
                         'check': 'template',
                         'severity': 'MEDIUM',
-                        'detail': 'Year corrected from %s to %s based on tier 2 identification' % (
+                        'detail': 'Year corrected from %s to %s based on identification' % (
                             exp_year, id_year),
                     })
                     item['flag_count'] = len(item['flags'])
@@ -5427,12 +5427,12 @@ def main():
         help='Scan only this specific folder name (within movies-dir)',
     )
     parser.add_argument(
-        '--tier2', action='store_true',
-        help='Run Tier 2 identification on flagged files (CRC32 + srrDB)',
+        '--full', action='store_true',
+        help='Run full scan with identification on flagged files (hash + srrDB)',
     )
     parser.add_argument(
-        '--force-tier2', action='store_true',
-        help='Force Tier 2 even for high-confidence Tier 1 flags',
+        '--force-full', action='store_true',
+        help='Force identification even for high-confidence quick scan flags',
     )
     parser.add_argument(
         '--workers', type=int, default=DEFAULT_WORKERS,
@@ -5448,8 +5448,8 @@ def main():
         movies_dir=args.movies_dir,
         db_path=args.db,
         scan_path=args.scan_path,
-        tier2=args.tier2,
-        force_tier2=args.force_tier2,
+        full=args.full,
+        force_full=args.force_full,
         workers=args.workers,
     )
 

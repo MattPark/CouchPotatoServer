@@ -12,7 +12,7 @@ Tests cover:
   - compute_recommended_action(): same-title / year correction logic
   - _check_year_against_imdb(): ±1 year IMDB adjudication
   - check_container_title(): container title mismatch with IMDB year validation
-  - _revalidate_year_flags(): post-tier-2 flag re-evaluation
+  - _revalidate_year_flags(): post-identification flag re-evaluation
   - parse_cd_number(): CD number extraction from filenames
   - classify_video_files(): multi-file folder classification
   - detect_duplicates(): duplicate file pair detection
@@ -695,7 +695,7 @@ class TestComputeRecommendedAction:
     def test_same_title_same_year_no_template_flag(self):
         """Same title + same year, only title flag, identification confirms identity → none.
 
-        When tier 2 (or manual) identification confirms the same movie and
+        When identification (or manual) confirms the same movie and
         there are no actionable flags (template/resolution/edition), the
         title flag is just a container metadata discrepancy — nothing to fix.
         """
@@ -809,14 +809,14 @@ class TestComputeRecommendedAction:
     # -- No identification, flag-based --
 
     def test_no_ident_title_flag(self):
-        """Title flag without identification → needs_tier2."""
+        """Title flag without identification → needs_full."""
         flags = self._flags('title')
-        assert compute_recommended_action(flags) == 'needs_tier2'
+        assert compute_recommended_action(flags) == 'needs_full'
 
     def test_no_ident_template_and_title(self):
-        """Template + title without identification → needs_tier2."""
+        """Template + title without identification → needs_full."""
         flags = self._flags('template', 'title')
-        assert compute_recommended_action(flags) == 'needs_tier2'
+        assert compute_recommended_action(flags) == 'needs_full'
 
     def test_no_ident_template_only(self):
         """Template flag alone without identification → rename_template."""
@@ -1039,7 +1039,7 @@ class TestCheckContainerTitleImdbYear:
 # ---------------------------------------------------------------------------
 
 class TestRevalidateYearFlags:
-    """Tests for post-tier-2 ±1 year flag re-evaluation."""
+    """Tests for post-identification ±1 year flag re-evaluation."""
 
     @staticmethod
     def _item(flags, folder_year=2019):
