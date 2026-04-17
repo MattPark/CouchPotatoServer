@@ -383,6 +383,110 @@ def titles_match(title_a, title_b):
 # File metadata extraction
 # ---------------------------------------------------------------------------
 
+def _format_audio_channels(channels_str, channel_layout):
+    """Convert mediainfo channel count + layout to a human-readable label.
+
+    Returns e.g. '7.1', '5.1', '2.0', '1.0', or the raw count as fallback.
+    """
+    try:
+        ch = int(channels_str)
+    except (ValueError, TypeError):
+        return ''
+    layout = (channel_layout or '').upper()
+    has_lfe = 'LFE' in layout
+    if has_lfe:
+        return '%s.1' % (ch - 1,)
+    if ch <= 2:
+        return '%s.0' % ch
+    # No LFE detected but >2 channels — show raw count
+    return str(ch)
+
+
+def _format_audio_codec(track):
+    """Derive a human-friendly audio codec name from a mediainfo Audio track.
+
+    Prefers Format_Commercial_IfAny when it's informative (e.g. 'Dolby TrueHD
+    with Dolby Atmos').  Falls back to a curated mapping of Format values, with
+    Format_AdditionalFeatures used to distinguish variants like DTS-HD MA.
+    """
+    fmt = track.get('Format', '')
+    commercial = track.get('Format_Commercial_IfAny', '')
+    additional = track.get('Format_AdditionalFeatures', '')
+
+    # Commercial name is often the best — but skip if it's just "Dolby Digital"
+    # for plain AC-3 since we can be more concise.
+    if commercial:
+        c = commercial.lower()
+        if 'truehd' in c and 'atmos' in c:
+            return 'TrueHD Atmos'
+        if 'truehd' in c:
+            return 'TrueHD'
+        if 'dolby digital plus' in c and 'atmos' in c:
+            return 'DD+ Atmos'
+        if 'dolby digital plus' in c:
+            return 'DD+'
+        if 'dts-hd master' in c or 'dts-hd ma' in c.replace(' ', '-'):
+            return 'DTS-HD MA'
+        if 'dts-hd' in c:
+            return 'DTS-HD'
+        if 'dts:x' in c.lower():
+            return 'DTS:X'
+
+    # Mapping from mediainfo Format field
+    fmt_upper = fmt.upper()
+    add_upper = additional.upper()
+    if fmt_upper == 'MLP FBA':
+        return 'TrueHD Atmos' if '16-CH' in add_upper else 'TrueHD'
+    if fmt_upper == 'E-AC-3':
+        return 'DD+ Atmos' if 'JOC' in add_upper else 'DD+'
+    if fmt_upper == 'AC-3':
+        return 'AC3'
+    if fmt_upper == 'DTS':
+        if 'XLL' in add_upper:
+            return 'DTS-HD MA'
+        if 'X' in add_upper:
+            return 'DTS:X'
+        return 'DTS'
+    if fmt_upper == 'AAC':
+        return 'AAC'
+    if fmt_upper in ('FLAC',):
+        return 'FLAC'
+    if fmt_upper == 'PCM':
+        return 'PCM'
+    if fmt_upper == 'MPEG AUDIO':
+        return 'MP3'
+    if fmt_upper == 'VORBIS':
+        return 'Vorbis'
+    if fmt_upper == 'OPUS':
+        return 'Opus'
+    if fmt_upper == 'WMA':
+        return 'WMA'
+    # Fallback: return raw format or 'Unknown'
+    return fmt or 'Unknown'
+
+
+def _extract_audio_tracks(tracks):
+    """Extract audio track info from mediainfo track list.
+
+    Returns a list of dicts: [{codec, channels, language}, ...]
+    """
+    audio_tracks = []
+    for t in tracks:
+        if not isinstance(t, dict):
+            continue
+        if t.get('@type') != 'Audio':
+            continue
+        codec = _format_audio_codec(t)
+        channels = _format_audio_channels(t.get('Channels', ''), t.get('ChannelLayout', ''))
+        language = t.get('Language', '')
+        audio_tracks.append({
+            'codec': codec,
+            'channels': channels,
+            'language': language,
+        })
+    return audio_tracks
+
+
 def extract_file_meta(filepath):
     """Extract metadata from a video file using the mediainfo CLI.
 
@@ -391,7 +495,7 @@ def extract_file_meta(filepath):
     parent process continues scanning.
 
     Returns dict with: resolution_width, resolution_height, duration_min,
-                       video_codec, container_title
+                       video_codec, container_title, audio_tracks
     """
     result = {
         'resolution_width': 0,
@@ -399,6 +503,7 @@ def extract_file_meta(filepath):
         'duration_min': 0.0,
         'video_codec': '',
         'container_title': None,
+        'audio_tracks': [],
     }
 
     # Ask mediainfo for JSON output (available in mediainfo >= 18.03)
@@ -471,6 +576,9 @@ def extract_file_meta(filepath):
     # Container title
     if general and general.get('Title'):
         result['container_title'] = general['Title']
+
+    # Audio tracks
+    result['audio_tracks'] = _extract_audio_tracks(tracks)
 
     return result
 
@@ -2364,11 +2472,12 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
         'file_size_bytes': os.path.getsize(filepath),
         'actual': {
             'resolution': f"{meta['resolution_width']}x{meta['resolution_height']}",
-            'duration_min': round(meta['duration_min'], 1),
-            'video_codec': meta['video_codec'],
-            'container_title': meta['container_title'],
-            'container_title_parsed': container_title_parsed,
-        },
+                'duration_min': round(meta['duration_min'], 1),
+                'video_codec': meta['video_codec'],
+                'audio_tracks': meta.get('audio_tracks', []),
+                'container_title': meta['container_title'],
+                'container_title_parsed': container_title_parsed,
+            },
         'expected': {
             'resolution': claimed_res,
             'runtime_min': expected_runtime,
@@ -2517,6 +2626,7 @@ def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
                 'resolution': f"{meta['resolution_width']}x{meta['resolution_height']}",
                 'duration_min': round(meta['duration_min'], 1),
                 'video_codec': meta['video_codec'],
+                'audio_tracks': meta.get('audio_tracks', []),
                 'container_title': meta['container_title'],
                 'container_title_parsed': None,
             },
@@ -2662,6 +2772,7 @@ def _scan_variants(video_files, classification, folder_title, folder_year,
                         'resolution': f"{meta['resolution_width']}x{meta['resolution_height']}",
                         'duration_min': round(meta['duration_min'], 1),
                         'video_codec': meta['video_codec'],
+                        'audio_tracks': meta.get('audio_tracks', []),
                         'container_title': meta['container_title'],
                         'container_title_parsed': None,
                     },

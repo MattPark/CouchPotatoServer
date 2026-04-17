@@ -32,6 +32,9 @@ from couchpotato.core.plugins.audit import (
     detect_duplicates,
     compute_opensubtitles_hash,
     opensubtitles_lookup_hash,
+    _format_audio_codec,
+    _format_audio_channels,
+    _extract_audio_tracks,
 )
 import re
 
@@ -1846,3 +1849,113 @@ class TestRecalculateFolderDuplicates:
 
         assert item_b['variant_files'] == ['b.mkv']
         assert item_b['variant_count'] == 1
+
+
+# ---------------------------------------------------------------------------
+# Audio track extraction helpers
+# ---------------------------------------------------------------------------
+
+class TestFormatAudioChannels:
+
+    def test_71_from_count_8(self):
+        assert _format_audio_channels('8', 'L R C LFE Ls Rs Lb Rb') == '7.1'
+
+    def test_51_from_count_6(self):
+        assert _format_audio_channels('6', 'L R C LFE Ls Rs') == '5.1'
+
+    def test_20_from_count_2(self):
+        assert _format_audio_channels('2', '') == '2.0'
+
+    def test_mono(self):
+        assert _format_audio_channels('1', '') == '1.0'
+
+    def test_empty(self):
+        assert _format_audio_channels('', '') == ''
+
+    def test_lfe_detection(self):
+        # 6 channels with LFE = 5.1
+        assert _format_audio_channels('6', 'L R C LFE Ls Rs') == '5.1'
+        # 6 channels without LFE layout info — raw count fallback
+        assert _format_audio_channels('6', '') == '6'
+
+
+class TestFormatAudioCodec:
+
+    def test_truehd_atmos(self):
+        track = {'Format': 'MLP FBA', 'Format_Commercial_IfAny': 'Dolby TrueHD with Dolby Atmos', 'Format_AdditionalFeatures': '16-ch'}
+        assert _format_audio_codec(track) == 'TrueHD Atmos'
+
+    def test_truehd_no_atmos(self):
+        track = {'Format': 'MLP FBA', 'Format_Commercial_IfAny': 'Dolby TrueHD'}
+        assert _format_audio_codec(track) == 'TrueHD'
+
+    def test_ddplus_atmos(self):
+        track = {'Format': 'E-AC-3', 'Format_AdditionalFeatures': 'JOC'}
+        assert _format_audio_codec(track) == 'DD+ Atmos'
+
+    def test_ddplus_no_atmos(self):
+        track = {'Format': 'E-AC-3'}
+        assert _format_audio_codec(track) == 'DD+'
+
+    def test_ac3(self):
+        track = {'Format': 'AC-3'}
+        assert _format_audio_codec(track) == 'AC3'
+
+    def test_dts_hd_ma(self):
+        track = {'Format': 'DTS', 'Format_AdditionalFeatures': 'XLL'}
+        assert _format_audio_codec(track) == 'DTS-HD MA'
+
+    def test_dts_plain(self):
+        track = {'Format': 'DTS'}
+        assert _format_audio_codec(track) == 'DTS'
+
+    def test_aac(self):
+        track = {'Format': 'AAC'}
+        assert _format_audio_codec(track) == 'AAC'
+
+    def test_mpeg_audio(self):
+        track = {'Format': 'MPEG Audio'}
+        assert _format_audio_codec(track) == 'MP3'
+
+    def test_flac(self):
+        track = {'Format': 'FLAC'}
+        assert _format_audio_codec(track) == 'FLAC'
+
+    def test_unknown(self):
+        track = {'Format': 'SomeWeirdCodec'}
+        assert _format_audio_codec(track) == 'SomeWeirdCodec'
+
+
+class TestExtractAudioTracks:
+
+    def test_basic_extraction(self):
+        tracks = [
+            {'@type': 'General', 'Format': 'Matroska'},
+            {'@type': 'Video', 'Format': 'HEVC'},
+            {'@type': 'Audio', 'Format': 'DTS', 'Format_AdditionalFeatures': 'XLL', 'Channels': '6', 'ChannelLayout': 'L R C LFE Ls Rs', 'Language': 'en'},
+            {'@type': 'Audio', 'Format': 'AC-3', 'Channels': '6', 'ChannelLayout': 'L R C LFE Ls Rs', 'Language': 'en'},
+        ]
+        result = _extract_audio_tracks(tracks)
+        assert len(result) == 2
+        assert result[0] == {'codec': 'DTS-HD MA', 'channels': '5.1', 'language': 'en'}
+        assert result[1] == {'codec': 'AC3', 'channels': '5.1', 'language': 'en'}
+
+    def test_no_audio_tracks(self):
+        tracks = [
+            {'@type': 'General'},
+            {'@type': 'Video', 'Format': 'AVC'},
+        ]
+        assert _extract_audio_tracks(tracks) == []
+
+    def test_empty_tracks(self):
+        assert _extract_audio_tracks([]) == []
+
+    def test_non_dict_tracks(self):
+        assert _extract_audio_tracks([None, 'garbage', 42]) == []
+
+    def test_avi_mp3(self):
+        tracks = [
+            {'@type': 'Audio', 'Format': 'MPEG Audio', 'Channels': '2'},
+        ]
+        result = _extract_audio_tracks(tracks)
+        assert result == [{'codec': 'MP3', 'channels': '2.0', 'language': ''}]

@@ -696,6 +696,15 @@ var AuditSettingTab = new Class({
 
 		// Actual vs Expected
 		if(item.actual){
+			// Format audio_tracks array into readable string
+			if(item.actual.audio_tracks && item.actual.audio_tracks.length){
+				item.actual.audio = item.actual.audio_tracks.map(function(t){
+					var s = t.codec || '?';
+					if(t.channels) s += ' ' + t.channels;
+					return s;
+				}).join(', ');
+			}
+			delete item.actual.audio_tracks;
 			var actual_section = new Element('div.audit_detail_section').inject(detail);
 			new Element('div.audit_detail_subtitle', { 'text': 'Actual:' }).inject(actual_section);
 			self.renderKeyValues(actual_section, item.actual);
