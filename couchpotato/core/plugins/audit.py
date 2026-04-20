@@ -960,6 +960,39 @@ def compute_recommended_action(flags, identification=None, expected=None):
     return 'manual_review'
 
 
+def pick_best_duplicate(a, b):
+    """Given two duplicate items, return (keep, delete) — the better one first.
+
+    Preference order:
+    1. HEVC/h265 codec wins over non-HEVC (even if smaller)
+    2. Otherwise, larger file wins
+
+    Args:
+        a, b: result dicts with 'actual' (video_codec) and 'file_size_bytes'
+
+    Returns:
+        (keep, delete) tuple of the two input dicts
+    """
+    a_codec = (a.get('actual', {}).get('video_codec') or '').upper()
+    b_codec = (b.get('actual', {}).get('video_codec') or '').upper()
+
+    a_hevc = 'HEVC' in a_codec or 'H265' in a_codec or 'X265' in a_codec or 'H.265' in a_codec
+    b_hevc = 'HEVC' in b_codec or 'H265' in b_codec or 'X265' in b_codec or 'H.265' in b_codec
+
+    # If one is HEVC and the other isn't, HEVC wins
+    if a_hevc and not b_hevc:
+        return (a, b)
+    if b_hevc and not a_hevc:
+        return (b, a)
+
+    # Same codec family — larger file wins
+    a_size = a.get('file_size_bytes', 0)
+    b_size = b.get('file_size_bytes', 0)
+    if a_size >= b_size:
+        return (a, b)
+    return (b, a)
+
+
 # ---------------------------------------------------------------------------
 # Quick scan checks
 # ---------------------------------------------------------------------------
@@ -2286,12 +2319,21 @@ def classify_video_files(video_files):
     # Everything else: variants (each file scanned individually)
     # This includes:
     # - Multiple non-cd files (different editions, qualities, duplicates)
-    # - Mix of cd-tagged and non-cd files (cd files are likely partials/dupes)
+    # - Mix of cd-tagged and non-cd files (cd sub-group + standalone files)
     # - Incomplete cd sequences (cd1+cd3 missing cd2)
+
+    # Check if the CD files form a valid sequential sub-group (cd1..cdN)
+    has_cd_subgroup = False
+    if cd_files and non_cd_files:
+        cd_nums = [num for num, _ in cd_files]
+        expected_seq = list(range(1, len(cd_files) + 1))
+        has_cd_subgroup = (cd_nums == expected_seq)
+
     return {
         'type': 'variants',
         'cd_files': cd_files,
         'non_cd_files': non_cd_files,
+        'has_cd_subgroup': has_cd_subgroup,
     }
 
 
@@ -2698,8 +2740,13 @@ def _scan_variants(video_files, classification, folder_title, folder_year,
                    force_full=False):
     """Scan a folder with multiple file variants (editions, qualities, dupes).
 
-    Each file is scanned individually.  Only files with issues get result
-    cards.  Detected duplicates get an additional 'duplicate' flag.
+    When the folder contains a CD sub-group (sequential cd1..cdN alongside
+    non-CD files), the CD files are scanned as a single logical unit via
+    _scan_multi_cd() and their combined runtime is compared against the
+    expected runtime.  Non-CD standalone files are scanned individually.
+
+    Duplicate detection runs across all logical units (the CD set counts
+    as one unit).
 
     Args:
         video_files: All video files in the folder (sorted by size descending)
@@ -2710,22 +2757,71 @@ def _scan_variants(video_files, classification, folder_title, folder_year,
         list[dict] — list of result dicts for flagged files (may be empty → None)
         None — if no files have issues
     """
-    # Scan each file individually
-    file_results = []
-    for filepath in video_files:
-        result = _scan_single_file(
-            filepath, folder_title, folder_year, imdb_id, db_entry,
-            expected_runtime,
-            renamer_template=renamer_template,
-            renamer_replace_doubles=renamer_replace_doubles,
-            renamer_separator=renamer_separator,
-            full=full, force_full=force_full,
-        )
-        file_results.append((filepath, result))
+    scan_kwargs = dict(
+        folder_title=folder_title,
+        folder_year=folder_year,
+        imdb_id=imdb_id,
+        db_entry=db_entry,
+        expected_runtime=expected_runtime,
+        renamer_template=renamer_template,
+        renamer_replace_doubles=renamer_replace_doubles,
+        renamer_separator=renamer_separator,
+        full=full,
+        force_full=force_full,
+    )
 
-    # Build minimal result dicts for clean files (needed for duplicate detection)
+    has_cd_subgroup = classification.get('has_cd_subgroup', False)
+    cd_files = classification.get('cd_files', [])
+
+    # -- Phase 1: Scan logical units --
+    # Each "unit" is either a CD sub-group result or a standalone file result.
+    # full_results holds one entry per unit for duplicate detection.
     full_results = []
-    for filepath, result in file_results:
+    # Track which filepaths belong to the CD sub-group (for variant_files display)
+    cd_subgroup_paths = set()
+
+    if has_cd_subgroup and cd_files:
+        # Scan the CD sub-group as one logical unit
+        cd_subgroup_paths = {fp for _, fp in cd_files}
+        cd_result = _scan_multi_cd(cd_files, **scan_kwargs)
+        if cd_result is not None:
+            cd_result['_is_cd_subgroup'] = True
+            full_results.append(cd_result)
+        else:
+            # CD sub-group is clean — still need it for duplicate detection
+            # Build a minimal aggregate result
+            total_size = sum(os.path.getsize(fp) for _, fp in cd_files)
+            total_runtime = 0
+            for _, fp in cd_files:
+                meta = extract_file_meta(fp)
+                total_runtime += round(meta.get('duration_min', 0), 1)
+            cd1_path = cd_files[0][1]
+            cd1_filename = os.path.basename(cd1_path)
+            claimed_res = parse_filename_resolution(cd1_filename)
+            full_results.append({
+                'file': cd1_filename,
+                'file_path': cd1_path,
+                'file_size_bytes': total_size,
+                'actual': {
+                    'duration_min': round(total_runtime, 1),
+                },
+                'expected': {
+                    'resolution': claimed_res,
+                },
+                '_clean': True,
+                '_is_cd_subgroup': True,
+                'multi_cd': True,
+                'cd_count': len(cd_files),
+            })
+
+    # Scan standalone files (non-CD, or CD files when there's no valid sub-group)
+    standalone_files = classification.get('non_cd_files', [])
+    if not has_cd_subgroup:
+        # No valid CD sub-group — scan ALL files as individual variants
+        standalone_files = list(video_files)
+
+    for filepath in standalone_files:
+        result = _scan_single_file(filepath, **scan_kwargs)
         if result is not None:
             full_results.append(result)
         else:
@@ -2743,69 +2839,52 @@ def _scan_variants(video_files, classification, folder_title, folder_year,
                 'expected': {
                     'resolution': claimed_res,
                 },
-                '_clean': True,  # marker: this file had no flags
+                '_clean': True,
             })
 
-    # Detect duplicates
+    # -- Phase 2: Duplicate detection across all units --
     dupe_pairs = detect_duplicates(full_results)
 
-    # Add duplicate flags to detected pairs
+    # Add duplicate flags to detected pairs with keep/delete recommendation
     for idx_a, idx_b in dupe_pairs:
+        # Promote clean items first so we have full metadata for comparison
         for idx in (idx_a, idx_b):
             r = full_results[idx]
             if r.get('_clean'):
-                # Promote clean file to a full result with a duplicate flag
-                filepath = r['file_path']
-                meta = extract_file_meta(filepath)
-                filename = os.path.basename(filepath)
-                guessit_tokens = parse_guessit_tokens(filename)
-                claimed_res = parse_filename_resolution(filename)
-                full_results[idx] = {
-                    'item_id': compute_item_id(filepath),
-                    'file_fingerprint': compute_file_fingerprint(filepath),
-                    'folder': os.path.basename(os.path.dirname(filepath)),
-                    'file': filename,
-                    'file_path': filepath,
-                    'imdb_id': imdb_id,
-                    'file_size_bytes': os.path.getsize(filepath),
-                    'actual': {
-                        'resolution': f"{meta['resolution_width']}x{meta['resolution_height']}",
-                        'duration_min': round(meta['duration_min'], 1),
-                        'video_codec': meta['video_codec'],
-                        'audio_tracks': meta.get('audio_tracks', []),
-                        'container_title': meta['container_title'],
-                        'container_title_parsed': None,
-                    },
-                    'expected': {
-                        'resolution': claimed_res,
-                        'runtime_min': expected_runtime,
-                        'title': folder_title,
-                        'year': folder_year,
-                        'db_title': db_entry['title'] if db_entry else None,
-                    },
-                    'flags': [],
-                    'flag_count': 0,
-                    'detected_edition': None,
-                    'guessit_tokens': guessit_tokens,
-                    'identification': None,
-                    'recommended_action': None,
-                    'fixed': None,
-                }
-                r = full_results[idx]
+                _promote_clean_to_full(r, imdb_id, expected_runtime,
+                                       folder_title, folder_year, db_entry)
 
-            # Add duplicate flag if not already present
+        # Determine which item to keep
+        a = full_results[idx_a]
+        b = full_results[idx_b]
+        keep, delete = pick_best_duplicate(a, b)
+
+        for idx in (idx_a, idx_b):
+            r = full_results[idx]
             has_dupe = any(f['check'] == 'duplicate' for f in r.get('flags', []))
             if not has_dupe:
                 partner_idx = idx_b if idx == idx_a else idx_a
                 partner = full_results[partner_idx]
+                partner_label = partner['file']
+                if partner.get('multi_cd'):
+                    partner_label = '%s (%d-CD set)' % (partner['file'], partner.get('cd_count', 0))
+
+                is_keeper = (r is keep)
+                if is_keeper:
+                    detail = 'Possible duplicate of %s (recommend keeping this copy)' % partner_label
+                else:
+                    detail = 'Possible duplicate of %s (recommend deleting this copy)' % partner_label
+
                 r.setdefault('flags', []).append({
                     'check': 'duplicate',
                     'severity': 'MEDIUM',
-                    'detail': 'Possible duplicate of %s' % partner['file'],
+                    'detail': detail,
+                    'duplicate_action': 'keep' if is_keeper else 'delete',
+                    'duplicate_of': partner['file'],
                 })
                 r['flag_count'] = len(r['flags'])
 
-    # Add variant context to all flagged results
+    # -- Phase 3: Assemble final results --
     variant_files = [os.path.basename(fp) for fp in video_files]
 
     results = []
@@ -2822,6 +2901,61 @@ def _scan_variants(video_files, classification, folder_title, folder_year,
         results.append(r)
 
     return results if results else None
+
+
+def _promote_clean_to_full(r, imdb_id, expected_runtime, folder_title,
+                           folder_year, db_entry):
+    """Promote a minimal '_clean' result dict to a full result in-place.
+
+    Used when a previously-clean file gets a duplicate flag added.
+    Skips CD sub-group results (they already have full structure from
+    _scan_multi_cd).
+    """
+    if r.get('_is_cd_subgroup'):
+        # CD sub-group results already have most fields from _scan_multi_cd
+        r.pop('_clean', None)
+        r.setdefault('flags', [])
+        r.setdefault('flag_count', 0)
+        return
+
+    filepath = r['file_path']
+    meta = extract_file_meta(filepath)
+    filename = os.path.basename(filepath)
+    guessit_tokens = parse_guessit_tokens(filename)
+    claimed_res = parse_filename_resolution(filename)
+
+    r.update({
+        'item_id': compute_item_id(filepath),
+        'file_fingerprint': compute_file_fingerprint(filepath),
+        'folder': os.path.basename(os.path.dirname(filepath)),
+        'file': filename,
+        'file_path': filepath,
+        'imdb_id': imdb_id,
+        'file_size_bytes': os.path.getsize(filepath),
+        'actual': {
+            'resolution': f"{meta['resolution_width']}x{meta['resolution_height']}",
+            'duration_min': round(meta['duration_min'], 1),
+            'video_codec': meta['video_codec'],
+            'audio_tracks': meta.get('audio_tracks', []),
+            'container_title': meta['container_title'],
+            'container_title_parsed': None,
+        },
+        'expected': {
+            'resolution': claimed_res,
+            'runtime_min': expected_runtime,
+            'title': folder_title,
+            'year': folder_year,
+            'db_title': db_entry['title'] if db_entry else None,
+        },
+        'flags': [],
+        'flag_count': 0,
+        'detected_edition': None,
+        'guessit_tokens': guessit_tokens,
+        'identification': None,
+        'recommended_action': None,
+        'fixed': None,
+    })
+    r.pop('_clean', None)
 
 
 def scan_movie_folder(folder_path, folder_name, media_by_imdb,
@@ -4810,11 +4944,33 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
             # Re-add duplicate flag if still warranted
             if i in still_duped:
-                new_flags.append({
-                    'check': 'duplicate',
-                    'severity': 'MEDIUM',
-                    'detail': 'Possible duplicate of %s' % partner_map.get(i, '?'),
-                })
+                partner_file = partner_map.get(i, '?')
+                # Find the partner item for keep/delete recommendation
+                partner_item = None
+                for j, s in enumerate(siblings):
+                    if s.get('file') == partner_file:
+                        partner_item = s
+                        break
+                if partner_item:
+                    keep, delete = pick_best_duplicate(sib, partner_item)
+                    is_keeper = (sib is keep)
+                    if is_keeper:
+                        detail = 'Possible duplicate of %s (recommend keeping this copy)' % partner_file
+                    else:
+                        detail = 'Possible duplicate of %s (recommend deleting this copy)' % partner_file
+                    new_flags.append({
+                        'check': 'duplicate',
+                        'severity': 'MEDIUM',
+                        'detail': detail,
+                        'duplicate_action': 'keep' if is_keeper else 'delete',
+                        'duplicate_of': partner_file,
+                    })
+                else:
+                    new_flags.append({
+                        'check': 'duplicate',
+                        'severity': 'MEDIUM',
+                        'detail': 'Possible duplicate of %s' % partner_file,
+                    })
 
             sib['flags'] = new_flags
             sib['flag_count'] = len(new_flags)

@@ -30,6 +30,7 @@ from couchpotato.core.plugins.audit import (
     parse_cd_number,
     classify_video_files,
     detect_duplicates,
+    pick_best_duplicate,
     compute_opensubtitles_hash,
     opensubtitles_lookup_hash,
     _format_audio_codec,
@@ -1257,17 +1258,43 @@ class TestClassifyVideoFiles:
         assert result['type'] == 'variants'
         assert len(result['non_cd_files']) == 1
         assert len(result['cd_files']) == 1
+        # Single CD file forms a trivial cd1 sub-group
+        assert result['has_cd_subgroup'] is True
 
-    def test_two_non_cd_files_is_variants(self):
-        """Two files without cd tags → variants (different editions/qualities)."""
+    def test_mixed_cd_subgroup_and_standalone(self):
+        """A full file plus cd1+cd2+cd3 → variants with valid CD sub-group."""
+        files = [
+            '/movies/New Land/New Land 720p.mkv',
+            '/movies/New Land/New Land cd1.mkv',
+            '/movies/New Land/New Land cd2.mkv',
+            '/movies/New Land/New Land cd3.mkv',
+        ]
+        result = classify_video_files(files)
+        assert result['type'] == 'variants'
+        assert len(result['non_cd_files']) == 1
+        assert len(result['cd_files']) == 3
+        assert result['has_cd_subgroup'] is True
+
+    def test_mixed_non_sequential_cd_no_subgroup(self):
+        """A full file plus cd1+cd3 (missing cd2) → no valid CD sub-group."""
+        files = [
+            '/movies/Movie/Movie 1080p.mkv',
+            '/movies/Movie/Movie cd1.avi',
+            '/movies/Movie/Movie cd3.avi',
+        ]
+        result = classify_video_files(files)
+        assert result['type'] == 'variants'
+        assert result['has_cd_subgroup'] is False
+
+    def test_two_non_cd_files_no_subgroup(self):
+        """Two non-CD files → variants, no CD sub-group."""
         files = [
             '/movies/Twelve Monkeys (1995)/Twelve Monkeys (1995) 720p.mkv',
             '/movies/Twelve Monkeys (1995)/Twelve Monkeys (1995) Remastered 1080p.mkv',
         ]
         result = classify_video_files(files)
         assert result['type'] == 'variants'
-        assert len(result['non_cd_files']) == 2
-        assert result['cd_files'] == []
+        assert result['has_cd_subgroup'] is False
 
     def test_duplicate_cd_numbers_is_variants(self):
         """Two files both tagged cd1 → not sequential → variants."""
@@ -1412,6 +1439,65 @@ class TestDetectDuplicates:
         pairs = detect_duplicates(results)
         # Same size → duplicate via size check (different runtime/res don't matter)
         assert pairs == [(0, 1)]
+
+
+# ---------------------------------------------------------------------------
+# pick_best_duplicate() — keep/delete recommendation
+# ---------------------------------------------------------------------------
+
+class TestPickBestDuplicate:
+    """Tests for pick_best_duplicate() keep/delete logic."""
+
+    @staticmethod
+    def _item(codec='AVC', size=5000000000):
+        return {
+            'file': 'movie.mkv',
+            'file_size_bytes': size,
+            'actual': {'video_codec': codec},
+        }
+
+    def test_hevc_wins_over_avc_even_if_smaller(self):
+        a = self._item(codec='HEVC', size=1000)
+        b = self._item(codec='AVC', size=9999)
+        keep, delete = pick_best_duplicate(a, b)
+        assert keep is a
+        assert delete is b
+
+    def test_h265_wins_over_avc(self):
+        a = self._item(codec='AVC', size=9999)
+        b = self._item(codec='H.265', size=1000)
+        keep, delete = pick_best_duplicate(a, b)
+        assert keep is b
+
+    def test_x265_wins_over_avc(self):
+        a = self._item(codec='x265', size=1000)
+        b = self._item(codec='AVC', size=9999)
+        keep, delete = pick_best_duplicate(a, b)
+        assert keep is a
+
+    def test_both_hevc_larger_wins(self):
+        a = self._item(codec='HEVC', size=5000)
+        b = self._item(codec='HEVC', size=9000)
+        keep, delete = pick_best_duplicate(a, b)
+        assert keep is b
+
+    def test_both_avc_larger_wins(self):
+        a = self._item(codec='AVC', size=9000)
+        b = self._item(codec='AVC', size=5000)
+        keep, delete = pick_best_duplicate(a, b)
+        assert keep is a
+
+    def test_no_codec_info_larger_wins(self):
+        a = self._item(codec='', size=3000)
+        b = self._item(codec='', size=7000)
+        keep, delete = pick_best_duplicate(a, b)
+        assert keep is b
+
+    def test_equal_size_returns_first(self):
+        a = self._item(codec='AVC', size=5000)
+        b = self._item(codec='AVC', size=5000)
+        keep, delete = pick_best_duplicate(a, b)
+        assert keep is a
 
 
 # ---------------------------------------------------------------------------
