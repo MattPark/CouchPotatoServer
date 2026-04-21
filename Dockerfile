@@ -3,9 +3,13 @@
 ##############################################################################
 FROM alpine:edge AS whisper-builder
 
+# Pin to a release tag so Docker can cache this layer.
+# Bump this ARG to update whisper.cpp — the build layer only re-runs when the tag changes.
+ARG WHISPER_VERSION=v1.8.4
+
 RUN apk add --no-cache cmake g++ make git linux-headers
 
-RUN git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git /whisper
+RUN git clone --depth 1 --branch ${WHISPER_VERSION} https://github.com/ggerganov/whisper.cpp.git /whisper
 
 WORKDIR /whisper
 
