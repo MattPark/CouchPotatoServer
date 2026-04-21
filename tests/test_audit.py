@@ -36,6 +36,7 @@ from couchpotato.core.plugins.audit import (
     _format_audio_codec,
     _format_audio_channels,
     _extract_audio_tracks,
+    check_audio_language,
 )
 import re
 
@@ -871,6 +872,27 @@ class TestComputeRecommendedAction:
             {'check': 'template', 'severity': 'LOW', 'detail': 'Template mismatch'},
         ]
         assert compute_recommended_action(flags) == 'delete_duplicate'
+
+    def test_foreign_audio_flag_returns_delete_foreign(self):
+        """Foreign audio flag → delete_foreign."""
+        flags = [{'check': 'foreign_audio', 'severity': 'LOW', 'detail': 'All audio tracks are non-English: fr'}]
+        assert compute_recommended_action(flags) == 'delete_foreign'
+
+    def test_foreign_audio_with_template_still_delete_foreign(self):
+        """Foreign audio takes priority over template/resolution flags."""
+        flags = [
+            {'check': 'foreign_audio', 'severity': 'LOW', 'detail': 'All audio tracks are non-English: fr'},
+            {'check': 'template', 'severity': 'LOW', 'detail': 'Template mismatch'},
+        ]
+        assert compute_recommended_action(flags) == 'delete_foreign'
+
+    def test_foreign_audio_with_resolution_still_delete_foreign(self):
+        """Foreign audio takes priority over resolution flags."""
+        flags = [
+            {'check': 'foreign_audio', 'severity': 'LOW', 'detail': 'All audio tracks are non-English: ja'},
+            {'check': 'resolution', 'severity': 'HIGH', 'detail': 'Resolution mismatch'},
+        ]
+        assert compute_recommended_action(flags) == 'delete_foreign'
 
 
 # ---------------------------------------------------------------------------
@@ -2045,3 +2067,90 @@ class TestExtractAudioTracks:
         ]
         result = _extract_audio_tracks(tracks)
         assert result == [{'codec': 'MP3', 'channels': '2.0', 'language': ''}]
+
+
+class TestCheckAudioLanguage:
+    """Tests for check_audio_language()."""
+
+    def test_no_tracks_flags(self):
+        """No audio tracks at all → flag (no English audio)."""
+        result = check_audio_language([])
+        assert result is not None
+        assert result['check'] == 'foreign_audio'
+        assert result['severity'] == 'LOW'
+        assert 'No audio tracks' in result['detail']
+
+    def test_single_english_track_no_flag(self):
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': 'en'}]
+        assert check_audio_language(tracks) is None
+
+    def test_mixed_english_and_french_no_flag(self):
+        tracks = [
+            {'codec': 'DTS-HD MA', 'channels': '5.1', 'language': 'en'},
+            {'codec': 'AAC', 'channels': '2.0', 'language': 'fr'},
+        ]
+        assert check_audio_language(tracks) is None
+
+    def test_all_french_flags(self):
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': 'fr'}]
+        result = check_audio_language(tracks)
+        assert result is not None
+        assert result['check'] == 'foreign_audio'
+        assert result['severity'] == 'LOW'
+        assert 'fr' in result['detail']
+
+    def test_multiple_non_english_languages(self):
+        tracks = [
+            {'codec': 'DTS', 'channels': '5.1', 'language': 'fr'},
+            {'codec': 'AAC', 'channels': '2.0', 'language': 'de'},
+        ]
+        result = check_audio_language(tracks)
+        assert result is not None
+        assert 'fr' in result['detail']
+        assert 'de' in result['detail']
+
+    def test_single_japanese_flags(self):
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': 'ja'}]
+        result = check_audio_language(tracks)
+        assert result is not None
+        assert 'ja' in result['detail']
+
+    def test_unknown_language_skips(self):
+        """Empty language on any track → benefit of the doubt, no flag."""
+        tracks = [
+            {'codec': 'AAC', 'channels': '2.0', 'language': 'fr'},
+            {'codec': 'AAC', 'channels': '2.0', 'language': ''},
+        ]
+        assert check_audio_language(tracks) is None
+
+    def test_all_unknown_language_skips(self):
+        """All tracks with empty language → benefit of the doubt."""
+        tracks = [
+            {'codec': 'AAC', 'channels': '2.0', 'language': ''},
+        ]
+        assert check_audio_language(tracks) is None
+
+    def test_custom_accepted_languages(self):
+        """Custom accepted_languages parameter works."""
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': 'fr'}]
+        # French is accepted
+        assert check_audio_language(tracks, accepted_languages=('en', 'fr')) is None
+        # Only English accepted → flags
+        result = check_audio_language(tracks, accepted_languages=('en',))
+        assert result is not None
+
+    def test_case_insensitive_match(self):
+        """Language matching is case-insensitive."""
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': 'EN'}]
+        assert check_audio_language(tracks) is None
+
+    def test_duplicate_languages_deduped(self):
+        """Multiple tracks with same language show it once in detail."""
+        tracks = [
+            {'codec': 'DTS', 'channels': '5.1', 'language': 'fr'},
+            {'codec': 'AAC', 'channels': '2.0', 'language': 'fr'},
+        ]
+        result = check_audio_language(tracks)
+        assert result is not None
+        # Should show 'fr' only once
+        assert result['detail'] == 'All audio tracks are non-English: fr'

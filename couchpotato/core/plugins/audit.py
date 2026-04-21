@@ -853,6 +853,7 @@ def compute_recommended_action(flags, identification=None, expected=None):
     Returns one of:
         'delete_wrong'       — TV episode or identified as non-movie
         'delete_duplicate'   — duplicate file (keep/delete decided by pick_best_duplicate)
+        'delete_foreign'     — all audio tracks are non-English (no accepted language)
         'rename_template'    — filename doesn't match template (superset of resolution/edition)
         'rename_resolution'  — resolution-only flag (right movie, wrong quality label)
         'reassign_movie'     — identification found a different movie
@@ -878,6 +879,10 @@ def compute_recommended_action(flags, identification=None, expected=None):
     # distinguish duplicates from TV episodes
     if 'duplicate' in checks:
         return 'delete_duplicate'
+
+    # Foreign audio — all tracks are non-English, recommend deletion
+    if 'foreign_audio' in checks:
+        return 'delete_foreign'
 
     # If identification has run, use it to decide — takes priority over
     # quick scan flag-based logic since it has more information
@@ -1427,6 +1432,55 @@ def check_tv_episode(container_title):
         }
 
     return None
+
+
+def check_audio_language(audio_tracks, accepted_languages=('en',)):
+    """Check 4b: Non-English audio.
+
+    Flags files where no audio track contains an accepted language.
+    - No tracks at all → flag (no audio means no accepted language).
+    - Any track with empty/unknown language → skip (benefit of the doubt).
+    - All tracks have known languages, none accepted → flag.
+    - Any track in accepted_languages → no flag.
+
+    The accepted_languages parameter defaults to ('en',) but is designed
+    to be swapped for a user-configurable list in a future release.
+
+    Returns a flag dict or None.
+    """
+    if not audio_tracks:
+        return {
+            'check': 'foreign_audio',
+            'severity': 'LOW',
+            'detail': 'No audio tracks detected',
+        }
+
+    languages = []
+    for t in audio_tracks:
+        lang = t.get('language', '')
+        if not lang:
+            # Unknown language — benefit of the doubt, don't flag
+            return None
+        languages.append(lang)
+
+    # Check if any track is in the accepted set
+    accepted = {a.lower() for a in accepted_languages}
+    if any(lang.lower() in accepted for lang in languages):
+        return None
+
+    # All tracks are known non-accepted languages
+    unique_langs = []
+    seen = set()
+    for lang in languages:
+        if lang not in seen:
+            unique_langs.append(lang)
+            seen.add(lang)
+
+    return {
+        'check': 'foreign_audio',
+        'severity': 'LOW',
+        'detail': 'All audio tracks are non-English: %s' % ', '.join(unique_langs),
+    }
 
 
 def check_edition(container_title, filename):
@@ -2503,6 +2557,11 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
         if template_flag:
             flags.append(template_flag)
 
+    # Check 7: Non-English audio
+    flag = check_audio_language(meta.get('audio_tracks', []))
+    if flag:
+        flags.append(flag)
+
     if not flags:
         return None
 
@@ -3242,6 +3301,7 @@ VALID_FIX_ACTIONS = {
     'reassign_movie',
     'delete_wrong',
     'delete_duplicate',
+    'delete_foreign',
     'rename_edition',
     'rename_template',
 }
@@ -3836,7 +3896,7 @@ def generate_fix_preview(item, action):
         return _preview_rename_resolution(item)
     elif action == 'rename_edition':
         return _preview_rename_edition(item)
-    elif action in ('delete_wrong', 'delete_duplicate'):
+    elif action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
         return _preview_delete_wrong(item)
     elif action == 'reassign_movie':
         return _preview_reassign_movie(item)
@@ -4205,7 +4265,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'params': {
                 'offset': {'desc': 'Skip N items (default 0)'},
                 'limit': {'desc': 'Return N items (default 50, max 500)'},
-                'filter_check': {'desc': 'Filter by check type (comma-sep): resolution,title,runtime,tv_episode,edition,template'},
+                'filter_check': {'desc': 'Filter by check type (comma-sep): resolution,title,runtime,tv_episode,edition,template,foreign_audio'},
                 'filter_severity': {'desc': 'Filter by severity: HIGH, MEDIUM, LOW'},
                 'filter_action': {'desc': 'Filter by recommended action'},
                 'filter_fixed': {'desc': 'true, false, all (default false)'},
@@ -4222,7 +4282,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'desc': 'Preview what a fix action would change (dry run)',
             'params': {
                 'item_id': {'desc': '12-char hex ID of the flagged item'},
-                'action': {'desc': 'Fix action: rename_template, rename_resolution, reassign_movie, delete_wrong, delete_duplicate, rename_edition'},
+                'action': {'desc': 'Fix action: rename_template, rename_resolution, reassign_movie, delete_wrong, delete_duplicate, delete_foreign, rename_edition'},
             },
         })
 
@@ -4230,7 +4290,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'desc': 'Execute a fix action on a flagged item',
             'params': {
                 'item_id': {'desc': '12-char hex ID of the flagged item'},
-                'action': {'desc': 'Fix action: rename_template, rename_resolution, reassign_movie, delete_wrong, delete_duplicate, rename_edition'},
+                'action': {'desc': 'Fix action: rename_template, rename_resolution, reassign_movie, delete_wrong, delete_duplicate, delete_foreign, rename_edition'},
                 'confirm': {'desc': 'Must be 1 to confirm execution'},
             },
         })
@@ -5161,7 +5221,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             success, details = execute_fix_rename_resolution(item)
         elif action == 'rename_edition':
             success, details = execute_fix_rename_edition(item)
-        elif action in ('delete_wrong', 'delete_duplicate'):
+        elif action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
             success, details = execute_fix_delete_wrong(item)
         elif action == 'reassign_movie':
             success, details = execute_fix_reassign_movie(item)
@@ -5173,7 +5233,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             return {'success': False, 'error': details.get('error', 'Unknown error')}
 
         # Apply status change for delete/reassign actions
-        if action in ('delete_wrong', 'delete_duplicate', 'reassign_movie') and reset_status and reset_status != 'nochange':
+        if action in ('delete_wrong', 'delete_duplicate', 'delete_foreign', 'reassign_movie') and reset_status and reset_status != 'nochange':
             status_result = self._apply_reset_status(item, reset_status)
             details['status_change'] = status_result
 
@@ -5183,7 +5243,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         # Recalculate duplicate flags for remaining siblings when a file
         # is removed from a folder (delete or reassign/move)
-        if action in ('delete_wrong', 'delete_duplicate', 'reassign_movie'):
+        if action in ('delete_wrong', 'delete_duplicate', 'delete_foreign', 'reassign_movie'):
             self._recalculate_folder_duplicates(item)
 
         return {
@@ -5432,7 +5492,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                     success, details = execute_fix_rename_resolution(item)
                 elif action == 'rename_edition':
                     success, details = execute_fix_rename_edition(item)
-                elif action in ('delete_wrong', 'delete_duplicate'):
+                elif action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
                     success, details = execute_fix_delete_wrong(item)
                 elif action == 'reassign_movie':
                     success, details = execute_fix_reassign_movie(item)
@@ -5442,7 +5502,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 if success:
                     self._mark_fixed(item, action, details)
                     # Recalculate duplicate flags for remaining siblings
-                    if action in ('delete_wrong', 'delete_duplicate', 'reassign_movie'):
+                    if action in ('delete_wrong', 'delete_duplicate', 'delete_foreign', 'reassign_movie'):
                         self._recalculate_folder_duplicates(item)
                     completed += 1
                 else:
