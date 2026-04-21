@@ -5323,9 +5323,11 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         accepted = {'en'}  # TODO: read from config
         is_accepted = normalized in accepted
 
-        # Update flags: remove unknown_audio, potentially add foreign_audio
+        # Update flags: remove unknown_audio and existing foreign_audio,
+        # then re-add foreign_audio only if whisper confirmed non-accepted
         flags = item.get('flags', [])
-        new_flags = [f for f in flags if f['check'] != 'unknown_audio']
+        new_flags = [f for f in flags
+                     if f['check'] not in ('unknown_audio', 'foreign_audio')]
 
         if is_accepted:
             # Whisper confirmed accepted language — clear the flag

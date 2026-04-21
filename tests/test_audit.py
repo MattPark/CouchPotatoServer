@@ -2740,3 +2740,49 @@ class TestApplyWhisperResult:
 
         checks = {f['check'] for f in item['flags']}
         assert 'unknown_audio' in checks
+
+    def test_existing_foreign_audio_not_duplicated(self):
+        """Item with existing foreign_audio + verify → single foreign_audio flag."""
+        p = self._MockPlugin()
+        self._bind(p)
+
+        item = {
+            'item_id': 'testdedup',
+            'file_fingerprint': '500:3344',
+            'flags': [
+                {'check': 'foreign_audio', 'severity': 'LOW',
+                 'detail': 'Audio language is ja, expected en'},
+            ],
+            'flag_count': 1,
+            'recommended_action': 'delete_foreign',
+        }
+        result = {'language': 'ja', 'confidence': 0.97, 'samples': []}
+
+        p._apply_whisper_result(item, result)
+
+        foreign_flags = [f for f in item['flags'] if f['check'] == 'foreign_audio']
+        assert len(foreign_flags) == 1, 'Should have exactly one foreign_audio flag'
+        assert 'Whisper detected' in foreign_flags[0]['detail']
+
+    def test_whisper_english_clears_foreign_audio(self):
+        """Item with foreign_audio + whisper says English → flag removed."""
+        p = self._MockPlugin()
+        self._bind(p)
+
+        item = {
+            'item_id': 'testclear',
+            'file_fingerprint': '600:5566',
+            'flags': [
+                {'check': 'foreign_audio', 'severity': 'LOW',
+                 'detail': 'Audio language is de, expected en'},
+            ],
+            'flag_count': 1,
+            'recommended_action': 'delete_foreign',
+        }
+        result = {'language': 'en', 'confidence': 0.99, 'samples': []}
+
+        p._apply_whisper_result(item, result)
+
+        checks = {f['check'] for f in item['flags']}
+        assert 'foreign_audio' not in checks
+        assert item['flag_count'] == 0
