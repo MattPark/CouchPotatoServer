@@ -852,6 +852,7 @@ def compute_recommended_action(flags, identification=None, expected=None):
 
     Returns one of:
         'delete_wrong'       — TV episode or identified as non-movie
+        'delete_duplicate'   — duplicate file (keep/delete decided by pick_best_duplicate)
         'rename_template'    — filename doesn't match template (superset of resolution/edition)
         'rename_resolution'  — resolution-only flag (right movie, wrong quality label)
         'reassign_movie'     — identification found a different movie
@@ -873,9 +874,10 @@ def compute_recommended_action(flags, identification=None, expected=None):
     if 'tv_episode' in checks:
         return 'delete_wrong'
 
-    # Duplicate file — recommend deletion (manual review to pick which copy)
+    # Duplicate file — separate action from delete_wrong so UI can
+    # distinguish duplicates from TV episodes
     if 'duplicate' in checks:
-        return 'delete_wrong'
+        return 'delete_duplicate'
 
     # If identification has run, use it to decide — takes priority over
     # quick scan flag-based logic since it has more information
@@ -3239,6 +3241,7 @@ VALID_FIX_ACTIONS = {
     'rename_resolution',
     'reassign_movie',
     'delete_wrong',
+    'delete_duplicate',
     'rename_edition',
     'rename_template',
 }
@@ -3833,7 +3836,7 @@ def generate_fix_preview(item, action):
         return _preview_rename_resolution(item)
     elif action == 'rename_edition':
         return _preview_rename_edition(item)
-    elif action == 'delete_wrong':
+    elif action in ('delete_wrong', 'delete_duplicate'):
         return _preview_delete_wrong(item)
     elif action == 'reassign_movie':
         return _preview_reassign_movie(item)
@@ -4219,7 +4222,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'desc': 'Preview what a fix action would change (dry run)',
             'params': {
                 'item_id': {'desc': '12-char hex ID of the flagged item'},
-                'action': {'desc': 'Fix action: rename_template, rename_resolution, reassign_movie, delete_wrong, rename_edition'},
+                'action': {'desc': 'Fix action: rename_template, rename_resolution, reassign_movie, delete_wrong, delete_duplicate, rename_edition'},
             },
         })
 
@@ -4227,7 +4230,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'desc': 'Execute a fix action on a flagged item',
             'params': {
                 'item_id': {'desc': '12-char hex ID of the flagged item'},
-                'action': {'desc': 'Fix action: rename_template, rename_resolution, reassign_movie, delete_wrong, rename_edition'},
+                'action': {'desc': 'Fix action: rename_template, rename_resolution, reassign_movie, delete_wrong, delete_duplicate, rename_edition'},
                 'confirm': {'desc': 'Must be 1 to confirm execution'},
             },
         })
@@ -4447,8 +4450,31 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         # Reconcile any pending actions from the append-only log
         self._reconcile_actions()
 
+        # Migrate: separate delete_duplicate from delete_wrong for existing results
+        self._migrate_duplicate_actions()
+
         # Load ignored items
         self._load_ignored()
+
+    def _migrate_duplicate_actions(self):
+        """One-time migration: change recommended_action from delete_wrong to
+        delete_duplicate for items flagged as duplicates (not TV episodes).
+
+        Prior to this change, both duplicates and TV episodes used delete_wrong.
+        """
+        if not self.last_report:
+            return
+        migrated = 0
+        for item in self.last_report.get('flagged', []):
+            if item.get('recommended_action') != 'delete_wrong':
+                continue
+            checks = {f['check'] for f in item.get('flags', [])}
+            if 'duplicate' in checks and 'tv_episode' not in checks:
+                item['recommended_action'] = 'delete_duplicate'
+                migrated += 1
+        if migrated:
+            log.info('Migrated %s items from delete_wrong to delete_duplicate', (migrated,))
+            self._save_results()
 
     def _get_movies_dir(self):
         """Get the first library directory from manage settings."""
@@ -5135,7 +5161,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             success, details = execute_fix_rename_resolution(item)
         elif action == 'rename_edition':
             success, details = execute_fix_rename_edition(item)
-        elif action == 'delete_wrong':
+        elif action in ('delete_wrong', 'delete_duplicate'):
             success, details = execute_fix_delete_wrong(item)
         elif action == 'reassign_movie':
             success, details = execute_fix_reassign_movie(item)
@@ -5147,7 +5173,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             return {'success': False, 'error': details.get('error', 'Unknown error')}
 
         # Apply status change for delete/reassign actions
-        if action in ('delete_wrong', 'reassign_movie') and reset_status and reset_status != 'nochange':
+        if action in ('delete_wrong', 'delete_duplicate', 'reassign_movie') and reset_status and reset_status != 'nochange':
             status_result = self._apply_reset_status(item, reset_status)
             details['status_change'] = status_result
 
@@ -5157,7 +5183,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         # Recalculate duplicate flags for remaining siblings when a file
         # is removed from a folder (delete or reassign/move)
-        if action in ('delete_wrong', 'reassign_movie'):
+        if action in ('delete_wrong', 'delete_duplicate', 'reassign_movie'):
             self._recalculate_folder_duplicates(item)
 
         return {
@@ -5406,7 +5432,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                     success, details = execute_fix_rename_resolution(item)
                 elif action == 'rename_edition':
                     success, details = execute_fix_rename_edition(item)
-                elif action == 'delete_wrong':
+                elif action in ('delete_wrong', 'delete_duplicate'):
                     success, details = execute_fix_delete_wrong(item)
                 elif action == 'reassign_movie':
                     success, details = execute_fix_reassign_movie(item)
@@ -5416,7 +5442,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 if success:
                     self._mark_fixed(item, action, details)
                     # Recalculate duplicate flags for remaining siblings
-                    if action in ('delete_wrong', 'reassign_movie'):
+                    if action in ('delete_wrong', 'delete_duplicate', 'reassign_movie'):
                         self._recalculate_folder_duplicates(item)
                     completed += 1
                 else:

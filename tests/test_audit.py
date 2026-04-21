@@ -859,18 +859,18 @@ class TestComputeRecommendedAction:
         expected = {'title': 'Monster, The', 'year': 2016, 'db_title': 'The Monster'}
         assert compute_recommended_action(flags, ident, expected) == 'rename_template'
 
-    def test_duplicate_flag_returns_delete(self):
-        """Duplicate flag should recommend delete_wrong."""
+    def test_duplicate_flag_returns_delete_duplicate(self):
+        """Duplicate flag should recommend delete_duplicate (not delete_wrong)."""
         flags = [{'check': 'duplicate', 'severity': 'MEDIUM', 'detail': 'Possible duplicate'}]
-        assert compute_recommended_action(flags) == 'delete_wrong'
+        assert compute_recommended_action(flags) == 'delete_duplicate'
 
-    def test_duplicate_with_other_flags_still_delete(self):
+    def test_duplicate_with_other_flags_still_delete_duplicate(self):
         """Duplicate flag takes priority (before template/resolution logic)."""
         flags = [
             {'check': 'duplicate', 'severity': 'MEDIUM', 'detail': 'Possible duplicate'},
             {'check': 'template', 'severity': 'LOW', 'detail': 'Template mismatch'},
         ]
-        assert compute_recommended_action(flags) == 'delete_wrong'
+        assert compute_recommended_action(flags) == 'delete_duplicate'
 
 
 # ---------------------------------------------------------------------------
