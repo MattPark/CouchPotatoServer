@@ -4330,7 +4330,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
     in_progress = False
     last_report = None
     _cancel = [False]   # mutable list so the scan loop can observe changes
-    ignored = {}        # fingerprint -> {reason, ignored_at, item_id, title}
+    file_knowledge = {} # fingerprint -> {ignored: {...}, whisper: {...}, ...}
 
     # Fix progress tracking
     fix_in_progress = False
@@ -4461,34 +4461,71 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         return os.path.join(data_dir, 'audit_actions.jsonl')
 
     def _get_ignored_path(self):
-        """Get the path to the ignored items file."""
+        """Get the path to the legacy ignored items file (for migration)."""
         data_dir = Env.get('data_dir')
         return os.path.join(data_dir, 'audit_ignored.json')
 
-    def _load_ignored(self):
-        """Load ignored items from disk."""
-        path = self._get_ignored_path()
-        if not os.path.isfile(path):
-            self.ignored = {}
-            return
-        try:
-            with open(path, 'r') as f:
-                self.ignored = json.load(f)
-            log.info('Loaded %s ignored audit items from %s', (len(self.ignored), path))
-        except Exception as e:
-            log.error('Failed to load ignored audit items: %s', (e,))
-            self.ignored = {}
+    def _get_file_knowledge_path(self):
+        """Get the path to the unified file knowledge table."""
+        data_dir = Env.get('data_dir')
+        return os.path.join(data_dir, 'audit_file_knowledge.json')
 
-    def _save_ignored(self):
-        """Persist ignored items to disk."""
-        path = self._get_ignored_path()
+    def _load_file_knowledge(self):
+        """Load the unified file knowledge table from disk.
+
+        On first run, migrates the legacy audit_ignored.json into the new
+        format and renames the old file to .bak.
+        """
+        path = self._get_file_knowledge_path()
+
+        if os.path.isfile(path):
+            try:
+                with open(path, 'r') as f:
+                    self.file_knowledge = json.load(f)
+                n_ignored = sum(1 for v in self.file_knowledge.values()
+                                if 'ignored' in v)
+                log.info('Loaded file knowledge table (%s entries, %s ignored) from %s',
+                         (len(self.file_knowledge), n_ignored, path))
+            except Exception as e:
+                log.error('Failed to load file knowledge table: %s', (e,))
+                self.file_knowledge = {}
+            return
+
+        # Migrate from legacy audit_ignored.json if it exists
+        legacy_path = self._get_ignored_path()
+        if os.path.isfile(legacy_path):
+            try:
+                with open(legacy_path, 'r') as f:
+                    old_ignored = json.load(f)
+                self.file_knowledge = {}
+                for fp, info in old_ignored.items():
+                    self.file_knowledge[fp] = {'ignored': info}
+                self._save_file_knowledge()
+                # Rename old file so migration only happens once
+                os.rename(legacy_path, legacy_path + '.bak')
+                log.info('Migrated %s ignored items from %s to file knowledge table',
+                         (len(old_ignored), legacy_path))
+            except Exception as e:
+                log.error('Failed to migrate legacy ignored file: %s', (e,))
+                self.file_knowledge = {}
+        else:
+            self.file_knowledge = {}
+
+    def _save_file_knowledge(self):
+        """Persist the unified file knowledge table to disk."""
+        path = self._get_file_knowledge_path()
         try:
             tmp_path = path + '.tmp'
             with open(tmp_path, 'w') as f:
-                json.dump(self.ignored, f)
+                json.dump(self.file_knowledge, f)
             os.replace(tmp_path, path)
         except Exception as e:
-            log.error('Failed to save ignored audit items: %s', (e,))
+            log.error('Failed to save file knowledge table: %s', (e,))
+
+    def _is_ignored(self, fingerprint):
+        """Check whether a file fingerprint is in the ignored set."""
+        entry = self.file_knowledge.get(fingerprint)
+        return entry is not None and 'ignored' in entry
 
     def _save_results(self):
         """Persist last_report to disk."""
@@ -4613,8 +4650,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         # Migrate: separate delete_duplicate from delete_wrong for existing results
         self._migrate_duplicate_actions()
 
-        # Load ignored items
-        self._load_ignored()
+        # Load file knowledge table (migrates legacy audit_ignored.json)
+        self._load_file_knowledge()
 
     def _migrate_duplicate_actions(self):
         """One-time migration: change recommended_action from delete_wrong to
@@ -4711,10 +4748,10 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         items = self.last_report.get('flagged', [])
 
-        # Filter out ignored items (by fingerprint)
-        if self.ignored:
+        # Filter out ignored items (by fingerprint in file knowledge table)
+        if self.file_knowledge:
             items = [i for i in items
-                     if i.get('file_fingerprint') not in self.ignored]
+                     if not self._is_ignored(i.get('file_fingerprint'))]
 
         # Filter by fixed status
         if filter_fixed == 'true':
@@ -4899,7 +4936,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         total_ignored = 0
         flagged = []
         for item in all_flagged:
-            if self.ignored and item.get('file_fingerprint') in self.ignored:
+            if self.file_knowledge and self._is_ignored(item.get('file_fingerprint')):
                 total_ignored += 1
             else:
                 flagged.append(item)
@@ -4985,21 +5022,24 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             if not fingerprint:
                 return {'success': False, 'error': 'Could not compute fingerprint'}
 
-        self.ignored[fingerprint] = {
+        entry = self.file_knowledge.setdefault(fingerprint, {})
+        entry['ignored'] = {
             'reason': reason or '',
             'ignored_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
             'item_id': item_id,
             'title': '%s / %s' % (item.get('folder', ''), item.get('file', '')),
         }
-        self._save_ignored()
+        self._save_file_knowledge()
 
         log.info('Ignored audit item %s (fingerprint %s): %s',
                  (item_id, fingerprint, item.get('folder', '')))
 
+        n_ignored = sum(1 for v in self.file_knowledge.values()
+                        if 'ignored' in v)
         return {
             'success': True,
             'fingerprint': fingerprint,
-            'total_ignored': len(self.ignored),
+            'total_ignored': n_ignored,
         }
 
     def unignoreView(self, fingerprint=None, **kwargs):
@@ -5007,24 +5047,33 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         if not fingerprint:
             return {'success': False, 'error': 'fingerprint is required'}
 
-        if fingerprint not in self.ignored:
+        entry = self.file_knowledge.get(fingerprint)
+        if not entry or 'ignored' not in entry:
             return {'success': False, 'error': 'Fingerprint not found in ignored list'}
 
-        removed = self.ignored.pop(fingerprint)
-        self._save_ignored()
+        removed = entry.pop('ignored')
+        # Clean up entry if no other knowledge remains
+        if not entry:
+            del self.file_knowledge[fingerprint]
+        self._save_file_knowledge()
 
         log.info('Un-ignored audit item (fingerprint %s): %s',
                  (fingerprint, removed.get('title', '')))
 
+        n_ignored = sum(1 for v in self.file_knowledge.values()
+                        if 'ignored' in v)
         return {
             'success': True,
-            'total_ignored': len(self.ignored),
+            'total_ignored': n_ignored,
         }
 
     def ignoredView(self, **kwargs):
         """API handler: list all currently ignored items."""
         items = []
-        for fp, info in self.ignored.items():
+        for fp, entry in self.file_knowledge.items():
+            info = entry.get('ignored')
+            if not info:
+                continue
             items.append({
                 'fingerprint': fp,
                 'title': info.get('title', ''),

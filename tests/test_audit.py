@@ -39,6 +39,8 @@ from couchpotato.core.plugins.audit import (
     check_audio_language,
     normalize_language,
 )
+import json
+import os
 import re
 
 
@@ -2343,3 +2345,140 @@ class TestComputeRecommendedActionUnknownAudio:
     def test_duplicate_beats_unknown_audio(self):
         """duplicate + unknown_audio → delete_duplicate (higher priority)."""
         assert compute_recommended_action(self._flags('duplicate', 'unknown_audio')) == 'delete_duplicate'
+
+
+class TestFileKnowledge:
+    """Tests for the unified file knowledge table (migration + helpers).
+
+    Uses a lightweight mock of the Audit plugin to test persistence logic
+    without needing the full CouchPotato framework.
+    """
+
+    class _MockPlugin:
+        """Minimal duck-type of Audit with just the file knowledge methods."""
+        file_knowledge = {}
+
+        def __init__(self, data_dir):
+            self._data_dir = data_dir
+
+        def _get_file_knowledge_path(self):
+            return os.path.join(self._data_dir, 'audit_file_knowledge.json')
+
+        def _get_ignored_path(self):
+            return os.path.join(self._data_dir, 'audit_ignored.json')
+
+    @staticmethod
+    def _bind(plugin):
+        """Bind the real Audit methods onto our mock instance."""
+        from couchpotato.core.plugins.audit import Audit
+        import types
+        for name in ('_load_file_knowledge', '_save_file_knowledge',
+                     '_is_ignored'):
+            method = getattr(Audit, name)
+            setattr(plugin, name, types.MethodType(method, plugin))
+
+    def test_is_ignored_empty(self):
+        """Empty file_knowledge → nothing is ignored."""
+        p = self._MockPlugin('/tmp')
+        self._bind(p)
+        assert p._is_ignored('123:abc') is False
+
+    def test_is_ignored_with_entry(self):
+        """Entry with 'ignored' key → is ignored."""
+        p = self._MockPlugin('/tmp')
+        self._bind(p)
+        p.file_knowledge = {'123:abc': {'ignored': {'reason': 'test'}}}
+        assert p._is_ignored('123:abc') is True
+
+    def test_is_ignored_entry_without_ignored_key(self):
+        """Entry without 'ignored' key (e.g. only whisper data) → not ignored."""
+        p = self._MockPlugin('/tmp')
+        self._bind(p)
+        p.file_knowledge = {'123:abc': {'whisper': {'language': 'en'}}}
+        assert p._is_ignored('123:abc') is False
+
+    def test_save_and_load_roundtrip(self, tmp_path):
+        """Save then load preserves data."""
+        p = self._MockPlugin(str(tmp_path))
+        self._bind(p)
+        p.file_knowledge = {
+            '100:aabbccdd': {
+                'ignored': {'reason': 'test', 'ignored_at': '2025-01-01T00:00:00'},
+            },
+            '200:11223344': {
+                'whisper': {'language': 'en', 'confidence': 0.95},
+            },
+        }
+        p._save_file_knowledge()
+
+        # Load into a fresh instance
+        p2 = self._MockPlugin(str(tmp_path))
+        self._bind(p2)
+        p2._load_file_knowledge()
+        assert p2.file_knowledge == p.file_knowledge
+
+    def test_migrate_from_legacy_ignored(self, tmp_path):
+        """Legacy audit_ignored.json is migrated to file_knowledge format."""
+        legacy = {
+            '100:aabbccdd': {
+                'reason': 'not a movie',
+                'ignored_at': '2025-01-01T00:00:00',
+                'item_id': 'abc123',
+                'title': 'folder / file.mkv',
+            },
+            '200:11223344': {
+                'reason': '',
+                'ignored_at': '2025-01-02T00:00:00',
+                'item_id': 'def456',
+                'title': 'other / movie.mkv',
+            },
+        }
+        legacy_path = os.path.join(str(tmp_path), 'audit_ignored.json')
+        with open(legacy_path, 'w') as f:
+            json.dump(legacy, f)
+
+        p = self._MockPlugin(str(tmp_path))
+        self._bind(p)
+        p._load_file_knowledge()
+
+        # Verify migration
+        assert len(p.file_knowledge) == 2
+        assert p._is_ignored('100:aabbccdd') is True
+        assert p.file_knowledge['100:aabbccdd']['ignored']['reason'] == 'not a movie'
+        assert p._is_ignored('200:11223344') is True
+
+        # Legacy file renamed to .bak
+        assert not os.path.exists(legacy_path)
+        assert os.path.exists(legacy_path + '.bak')
+
+        # New file created
+        assert os.path.exists(os.path.join(str(tmp_path), 'audit_file_knowledge.json'))
+
+    def test_migrate_skipped_when_knowledge_exists(self, tmp_path):
+        """If file_knowledge file exists, legacy file is NOT read."""
+        # Write a legacy file
+        legacy_path = os.path.join(str(tmp_path), 'audit_ignored.json')
+        with open(legacy_path, 'w') as f:
+            json.dump({'old:fp': {'reason': 'old'}}, f)
+
+        # Write a knowledge file
+        knowledge_path = os.path.join(str(tmp_path), 'audit_file_knowledge.json')
+        with open(knowledge_path, 'w') as f:
+            json.dump({'new:fp': {'ignored': {'reason': 'new'}}}, f)
+
+        p = self._MockPlugin(str(tmp_path))
+        self._bind(p)
+        p._load_file_knowledge()
+
+        # Should load from knowledge file, not legacy
+        assert 'new:fp' in p.file_knowledge
+        assert 'old:fp' not in p.file_knowledge
+        # Legacy file untouched (not renamed)
+        assert os.path.exists(legacy_path)
+
+    def test_load_empty_state(self, tmp_path):
+        """No files at all → empty file_knowledge."""
+        p = self._MockPlugin(str(tmp_path))
+        self._bind(p)
+        p._load_file_knowledge()
+        assert p.file_knowledge == {}
