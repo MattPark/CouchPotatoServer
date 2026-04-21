@@ -151,7 +151,8 @@ var AuditSettingTab = new Class({
 			new Element('option', { 'value': 'edition', 'text': 'Edition' }),
 			new Element('option', { 'value': 'template', 'text': 'Template' }),
 			new Element('option', { 'value': 'duplicate', 'text': 'Duplicate' }),
-			new Element('option', { 'value': 'foreign_audio', 'text': 'Foreign Audio' })
+			new Element('option', { 'value': 'foreign_audio', 'text': 'Foreign Audio' }),
+			new Element('option', { 'value': 'unknown_audio', 'text': 'Unknown Audio' })
 		).inject(filters);
 
 		// Severity filter
@@ -177,6 +178,7 @@ var AuditSettingTab = new Class({
 			new Element('option', { 'value': 'delete_wrong', 'text': 'Delete Wrong' }),
 			new Element('option', { 'value': 'delete_duplicate', 'text': 'Delete Duplicate' }),
 			new Element('option', { 'value': 'delete_foreign', 'text': 'Delete Foreign Audio' }),
+			new Element('option', { 'value': 'verify_audio', 'text': 'Verify Audio (Whisper)' }),
 			new Element('option', { 'value': 'reassign_movie', 'text': 'Reassign Movie' }),
 			new Element('option', { 'value': 'needs_full', 'text': 'Needs Identification' }),
 			new Element('option', { 'value': 'manual_review', 'text': 'Manual Review' })
@@ -466,6 +468,7 @@ var AuditSettingTab = new Class({
 				'delete_wrong': 'Delete TV Episodes',
 				'delete_duplicate': 'Delete Duplicates',
 				'delete_foreign': 'Delete Foreign Audio',
+				'verify_audio': 'Verify Audio (Whisper)',
 				'reassign_movie': 'Reassign Movie',
 				'needs_full': 'Needs Identification',
 				'manual_review': 'Manual Review'
@@ -477,6 +480,7 @@ var AuditSettingTab = new Class({
 				'delete_wrong': '#f44336',
 				'delete_duplicate': '#e91e63',
 				'delete_foreign': '#ff5722',
+				'verify_audio': '#607d8b',
 				'reassign_movie': '#ff9800',
 				'needs_full': '#9e9e9e',
 				'manual_review': '#9e9e9e'
@@ -938,7 +942,8 @@ var AuditSettingTab = new Class({
 			{ action: 'rename_edition', label: 'Rename All Edition' },
 			{ action: 'delete_wrong', label: 'Delete All TV Episodes' },
 			{ action: 'delete_duplicate', label: 'Delete All Duplicates' },
-			{ action: 'delete_foreign', label: 'Delete All Foreign Audio' }
+			{ action: 'delete_foreign', label: 'Delete All Foreign Audio' },
+			{ action: 'verify_audio', label: 'Verify All Unknown Audio (Whisper)' }
 		];
 
 		batch_actions.each(function(ba){
@@ -1366,7 +1371,9 @@ var AuditSettingTab = new Class({
 			'tv_episode': 'TV',
 			'edition': 'ED',
 			'template': 'TPL',
-			'duplicate': 'DUP'
+			'duplicate': 'DUP',
+			'foreign_audio': 'LANG',
+			'unknown_audio': '?'
 		};
 		return icons[check] || check;
 	},
@@ -1379,6 +1386,7 @@ var AuditSettingTab = new Class({
 			'delete_wrong': 'Delete',
 			'delete_duplicate': 'Delete Duplicate',
 			'delete_foreign': 'Delete (Foreign Audio)',
+			'verify_audio': 'Verify Audio',
 			'reassign_movie': 'Reassign Movie',
 			'needs_full': 'Needs Identification',
 			'manual_review': 'Manual Review',
@@ -1400,6 +1408,7 @@ var AuditSettingTab = new Class({
 		if(has['tv_episode']) actions.push('delete_wrong');
 		if(has['duplicate']) actions.push('delete_duplicate');
 		if(has['foreign_audio']) actions.push('delete_foreign');
+		if(has['unknown_audio']) actions.push('verify_audio');
 		if(has['title'] && item.identification && item.identification.method !== 'skipped')
 			actions.push('reassign_movie');
 

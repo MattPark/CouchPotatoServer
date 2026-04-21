@@ -37,6 +37,7 @@ from couchpotato.core.plugins.audit import (
     _format_audio_channels,
     _extract_audio_tracks,
     check_audio_language,
+    normalize_language,
 )
 import re
 
@@ -2115,20 +2116,24 @@ class TestCheckAudioLanguage:
         assert result is not None
         assert 'ja' in result['detail']
 
-    def test_unknown_language_skips(self):
-        """Empty language on any track → benefit of the doubt, no flag."""
+    def test_empty_language_with_foreign_flags_unknown(self):
+        """Foreign + empty language → unknown_audio (needs whisper)."""
         tracks = [
             {'codec': 'AAC', 'channels': '2.0', 'language': 'fr'},
             {'codec': 'AAC', 'channels': '2.0', 'language': ''},
         ]
-        assert check_audio_language(tracks) is None
+        result = check_audio_language(tracks)
+        assert result is not None
+        assert result['check'] == 'unknown_audio'
 
-    def test_all_unknown_language_skips(self):
-        """All tracks with empty language → benefit of the doubt."""
+    def test_all_empty_language_flags_unknown(self):
+        """All tracks with empty language → unknown_audio (needs whisper)."""
         tracks = [
             {'codec': 'AAC', 'channels': '2.0', 'language': ''},
         ]
-        assert check_audio_language(tracks) is None
+        result = check_audio_language(tracks)
+        assert result is not None
+        assert result['check'] == 'unknown_audio'
 
     def test_custom_accepted_languages(self):
         """Custom accepted_languages parameter works."""
@@ -2154,3 +2159,187 @@ class TestCheckAudioLanguage:
         assert result is not None
         # Should show 'fr' only once
         assert result['detail'] == 'All audio tracks are non-English: fr'
+
+    def test_locale_code_en_us_no_flag(self):
+        """en-US should match en (BCP-47 locale prefix)."""
+        tracks = [{'codec': 'DD+', 'channels': '5.1', 'language': 'en-US'}]
+        assert check_audio_language(tracks) is None
+
+    def test_locale_code_en_gb_no_flag(self):
+        """en-GB should match en."""
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': 'en-GB'}]
+        assert check_audio_language(tracks) is None
+
+    def test_locale_code_fr_fr_still_flags(self):
+        """fr-FR should NOT match en — still foreign."""
+        tracks = [{'codec': 'AC3', 'channels': '5.1', 'language': 'fr-FR'}]
+        result = check_audio_language(tracks)
+        assert result is not None
+        assert 'fr-FR' in result['detail']
+
+    def test_locale_code_mixed_en_us_and_fr(self):
+        """en-US + fr-FR → has English, no flag."""
+        tracks = [
+            {'codec': 'AC3', 'channels': '5.1', 'language': 'fr-FR'},
+            {'codec': 'AC3', 'channels': '5.1', 'language': 'en-US'},
+        ]
+        assert check_audio_language(tracks) is None
+
+    def test_locale_code_custom_accepted(self):
+        """Locale prefix matching works with custom accepted_languages."""
+        tracks = [{'codec': 'DD+', 'channels': '2.0', 'language': 'da-DK'}]
+        # Danish not in default accepted
+        assert check_audio_language(tracks) is not None
+        # Danish in custom accepted
+        assert check_audio_language(tracks, accepted_languages=('en', 'da')) is None
+
+    # --- New: normalization-aware tests ---
+
+    def test_iso639_2_eng_no_flag(self):
+        """ISO 639-2 'eng' normalizes to 'en' → no flag."""
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': 'eng'}]
+        assert check_audio_language(tracks) is None
+
+    def test_full_name_english_no_flag(self):
+        """Full language name 'English' normalizes to 'en' → no flag."""
+        tracks = [{'codec': 'DTS', 'channels': '5.1', 'language': 'English'}]
+        assert check_audio_language(tracks) is None
+
+    def test_nonstandard_jap_flags(self):
+        """Non-standard 'jap' normalizes to 'ja' → foreign_audio."""
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': 'jap'}]
+        result = check_audio_language(tracks)
+        assert result is not None
+        assert result['check'] == 'foreign_audio'
+        assert 'jap' in result['detail']
+
+    def test_iso639_3_cmn_flags(self):
+        """ISO 639-3 'cmn' (Mandarin) normalizes to 'zh' → foreign_audio."""
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': 'cmn'}]
+        result = check_audio_language(tracks)
+        assert result is not None
+        assert result['check'] == 'foreign_audio'
+
+    def test_full_name_nederlands_flags(self):
+        """Full name 'Nederlands' normalizes to 'nl' → foreign_audio."""
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': 'Nederlands'}]
+        result = check_audio_language(tracks)
+        assert result is not None
+        assert result['check'] == 'foreign_audio'
+
+    def test_zxx_no_flag(self):
+        """zxx (no linguistic content) → no flag (intentional)."""
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': 'zxx'}]
+        assert check_audio_language(tracks) is None
+
+    def test_mul_flags_unknown(self):
+        """'mul' (multiple languages) → unknown_audio."""
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': 'mul'}]
+        result = check_audio_language(tracks)
+        assert result is not None
+        assert result['check'] == 'unknown_audio'
+
+    def test_und_flags_unknown(self):
+        """'und' (undetermined) → unknown_audio."""
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': 'und'}]
+        result = check_audio_language(tracks)
+        assert result is not None
+        assert result['check'] == 'unknown_audio'
+
+    def test_accepted_plus_empty_no_flag(self):
+        """Accepted track + empty track → no flag (early exit on accepted)."""
+        tracks = [
+            {'codec': 'DTS', 'channels': '5.1', 'language': 'en'},
+            {'codec': 'AAC', 'channels': '2.0', 'language': ''},
+        ]
+        assert check_audio_language(tracks) is None
+
+    def test_accepted_plus_und_no_flag(self):
+        """Accepted track + und track → no flag (early exit on accepted)."""
+        tracks = [
+            {'codec': 'AAC', 'channels': '2.0', 'language': 'und'},
+            {'codec': 'DTS', 'channels': '5.1', 'language': 'en'},
+        ]
+        assert check_audio_language(tracks) is None
+
+    def test_iso639_2_fra_custom_accepted(self):
+        """'fra' normalizes to 'fr', accepted when 'fr' is in accepted_languages."""
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': 'fra'}]
+        assert check_audio_language(tracks) is not None
+        assert check_audio_language(tracks, accepted_languages=('en', 'fr')) is None
+
+
+class TestNormalizeLanguage:
+    """Tests for normalize_language()."""
+
+    def test_bcp47_en_us(self):
+        """BCP-47 locale code en-US → en."""
+        assert normalize_language('en-US') == 'en'
+
+    def test_bcp47_fr_fr(self):
+        """BCP-47 locale code fr-FR → fr."""
+        assert normalize_language('fr-FR') == 'fr'
+
+    def test_iso639_2_eng(self):
+        """ISO 639-2 bibliographic code eng → en."""
+        assert normalize_language('eng') == 'en'
+
+    def test_iso639_2_ger(self):
+        """ISO 639-2 bibliographic code ger → de."""
+        assert normalize_language('ger') == 'de'
+
+    def test_iso639_3_cmn(self):
+        """ISO 639-3 cmn (Mandarin) → zh."""
+        assert normalize_language('cmn') == 'zh'
+
+    def test_iso639_3_yue(self):
+        """ISO 639-3 yue (Cantonese) → zh."""
+        assert normalize_language('yue') == 'zh'
+
+    def test_nonstandard_jap(self):
+        """Non-standard abbreviation jap → ja."""
+        assert normalize_language('jap') == 'ja'
+
+    def test_full_name_nederlands(self):
+        """Full name Nederlands → nl."""
+        assert normalize_language('Nederlands') == 'nl'
+
+    def test_full_name_english(self):
+        """Full name English → en."""
+        assert normalize_language('English') == 'en'
+
+    def test_case_insensitive(self):
+        """Case-insensitive: ENG → en."""
+        assert normalize_language('ENG') == 'en'
+
+    def test_passthrough_short_code(self):
+        """Unknown 2-letter code passes through unchanged."""
+        assert normalize_language('xx') == 'xx'
+
+    def test_passthrough_with_locale(self):
+        """Unknown code with locale suffix → base only."""
+        assert normalize_language('xx-YY') == 'xx'
+
+
+class TestComputeRecommendedActionUnknownAudio:
+    """Tests for compute_recommended_action with unknown_audio flags."""
+
+    @staticmethod
+    def _flags(*checks):
+        return [{'check': c, 'severity': 'LOW', 'detail': 'test'} for c in checks]
+
+    def test_unknown_audio_recommends_verify(self):
+        """unknown_audio alone → verify_audio."""
+        assert compute_recommended_action(self._flags('unknown_audio')) == 'verify_audio'
+
+    def test_unknown_audio_plus_template_recommends_verify(self):
+        """unknown_audio + template → verify_audio (higher priority)."""
+        assert compute_recommended_action(self._flags('unknown_audio', 'template')) == 'verify_audio'
+
+    def test_unknown_audio_plus_foreign_recommends_verify(self):
+        """unknown_audio + foreign_audio → verify_audio (unknown checked first)."""
+        assert compute_recommended_action(self._flags('unknown_audio', 'foreign_audio')) == 'verify_audio'
+
+    def test_duplicate_beats_unknown_audio(self):
+        """duplicate + unknown_audio → delete_duplicate (higher priority)."""
+        assert compute_recommended_action(self._flags('duplicate', 'unknown_audio')) == 'delete_duplicate'

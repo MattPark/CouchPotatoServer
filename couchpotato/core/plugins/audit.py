@@ -853,6 +853,7 @@ def compute_recommended_action(flags, identification=None, expected=None):
     Returns one of:
         'delete_wrong'       — TV episode or identified as non-movie
         'delete_duplicate'   — duplicate file (keep/delete decided by pick_best_duplicate)
+        'verify_audio'       — audio language tag missing, needs whisper verification
         'delete_foreign'     — all audio tracks are non-English (no accepted language)
         'rename_template'    — filename doesn't match template (superset of resolution/edition)
         'rename_resolution'  — resolution-only flag (right movie, wrong quality label)
@@ -879,6 +880,10 @@ def compute_recommended_action(flags, identification=None, expected=None):
     # distinguish duplicates from TV episodes
     if 'duplicate' in checks:
         return 'delete_duplicate'
+
+    # Unknown audio — language tag missing, needs whisper verification
+    if 'unknown_audio' in checks:
+        return 'verify_audio'
 
     # Foreign audio — all tracks are non-English, recommend deletion
     if 'foreign_audio' in checks:
@@ -1434,17 +1439,76 @@ def check_tv_episode(container_title):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Language normalization
+# ---------------------------------------------------------------------------
+
+# Maps non-standard language codes to ISO 639-1 base forms.
+# Covers ISO 639-2 (3-letter bibliographic & terminological), ISO 639-3
+# (extended), non-standard abbreviations, and full English language names.
+_LANGUAGE_ALIASES = {
+    # ISO 639-2 bibliographic / terminological → ISO 639-1
+    'eng': 'en', 'fra': 'fr', 'fre': 'fr', 'deu': 'de', 'ger': 'de',
+    'spa': 'es', 'ita': 'it', 'por': 'pt', 'rus': 'ru', 'jpn': 'ja',
+    'kor': 'ko', 'zho': 'zh', 'chi': 'zh', 'nld': 'nl', 'dut': 'nl',
+    'ara': 'ar', 'hin': 'hi', 'swe': 'sv', 'nor': 'no', 'dan': 'da',
+    'fin': 'fi', 'pol': 'pl', 'tur': 'tr', 'heb': 'he', 'tha': 'th',
+    'ron': 'ro', 'rum': 'ro', 'hun': 'hu', 'ces': 'cs', 'cze': 'cs',
+    'ell': 'el', 'gre': 'el', 'fas': 'fa', 'per': 'fa', 'ind': 'id',
+    'slv': 'sl', 'srp': 'sr', 'bos': 'bs', 'hrv': 'hr', 'ukr': 'uk',
+    'cat': 'ca', 'glg': 'gl', 'eus': 'eu', 'baq': 'eu',
+    'vie': 'vi', 'msa': 'ms', 'may': 'ms', 'tgl': 'tl',
+    # ISO 639-3 macro-language → ISO 639-1 parent
+    'cmn': 'zh',  # Mandarin → Chinese
+    'yue': 'zh',  # Cantonese → Chinese
+    # Non-standard abbreviations seen in the wild
+    'jap': 'ja',
+    # Full English language names (lowercased for lookup)
+    'english': 'en', 'french': 'fr', 'german': 'de', 'spanish': 'es',
+    'italian': 'it', 'portuguese': 'pt', 'russian': 'ru', 'japanese': 'ja',
+    'korean': 'ko', 'chinese': 'zh', 'dutch': 'nl', 'nederlands': 'nl',
+    'arabic': 'ar', 'hindi': 'hi', 'swedish': 'sv', 'norwegian': 'no',
+    'danish': 'da', 'finnish': 'fi', 'polish': 'pl', 'turkish': 'tr',
+    'hebrew': 'he', 'thai': 'th', 'hungarian': 'hu', 'czech': 'cs',
+    'greek': 'el', 'persian': 'fa', 'romanian': 'ro',
+}
+
+# Special ISO 639-2 codes that are NOT spoken languages.
+# zxx = no linguistic content (instrumental, silent film, music video).
+_NO_LINGUISTIC_CONTENT = {'zxx'}
+# und = undetermined, mul = multiple languages — treat as unknown (needs
+# whisper verification to determine actual language).
+_UNDETERMINED_LANGUAGE = {'und', 'mul'}
+
+
+def normalize_language(raw):
+    """Normalize a language tag to its ISO 639-1 base form.
+
+    Handles BCP-47 locale codes (en-US → en), ISO 639-2/3 codes
+    (eng → en, cmn → zh), non-standard abbreviations (jap → ja),
+    and full language names (Nederlands → nl).
+
+    Returns the normalized 2-letter code, or the original base lowercased
+    if no alias is found.
+    """
+    base = raw.split('-')[0].lower()
+    return _LANGUAGE_ALIASES.get(base, base)
+
+
 def check_audio_language(audio_tracks, accepted_languages=('en',)):
-    """Check 4b: Non-English audio.
+    """Check 4b: Non-English / unknown audio.
 
     Flags files where no audio track contains an accepted language.
-    - No tracks at all → flag (no audio means no accepted language).
-    - Any track with empty/unknown language → skip (benefit of the doubt).
-    - All tracks have known languages, none accepted → flag.
+    - No tracks at all → flag as foreign_audio.
+    - Track tagged 'zxx' (no linguistic content) → skip (not a problem).
+    - Track tagged 'und'/'mul' or empty → flag as unknown_audio (needs
+      whisper verification).
+    - All tracks have known languages, none accepted → flag as foreign_audio.
     - Any track in accepted_languages → no flag.
 
-    The accepted_languages parameter defaults to ('en',) but is designed
-    to be swapped for a user-configurable list in a future release.
+    Language matching normalizes codes via normalize_language() so that
+    BCP-47 locale codes (en-US), ISO 639-2/3 (eng, cmn), non-standard
+    abbreviations (jap), and full names (Nederlands) all resolve correctly.
 
     Returns a flag dict or None.
     """
@@ -1455,26 +1519,55 @@ def check_audio_language(audio_tracks, accepted_languages=('en',)):
             'detail': 'No audio tracks detected',
         }
 
-    languages = []
-    for t in audio_tracks:
-        lang = t.get('language', '')
-        if not lang:
-            # Unknown language — benefit of the doubt, don't flag
-            return None
-        languages.append(lang)
-
-    # Check if any track is in the accepted set
     accepted = {a.lower() for a in accepted_languages}
-    if any(lang.lower() in accepted for lang in languages):
-        return None
+    has_unknown = False
+    languages = []  # list of (raw_tag, normalized) tuples
+
+    for t in audio_tracks:
+        raw = t.get('language', '')
+        if not raw:
+            has_unknown = True
+            continue
+
+        base = raw.split('-')[0].lower()
+
+        # zxx = no linguistic content — intentional, not a problem
+        if base in _NO_LINGUISTIC_CONTENT:
+            return None
+
+        # und/mul = undetermined/multiple — treat as unknown
+        if base in _UNDETERMINED_LANGUAGE:
+            has_unknown = True
+            continue
+
+        normalized = normalize_language(raw)
+        languages.append((raw, normalized))
+
+        # Early exit: found an accepted language track
+        if normalized in accepted:
+            return None
+
+    # If any track had unknown language and no accepted track was found
+    if has_unknown:
+        return {
+            'check': 'unknown_audio',
+            'severity': 'LOW',
+            'detail': 'Audio track(s) have no language tag — needs verification',
+        }
+
+    # All tracks had known languages but none were empty/unknown
+    if not languages:
+        # All tracks were zxx/und/mul but zxx returns early above,
+        # so this means all were und/mul → already handled above.
+        # Safety fallback:
+        return {
+            'check': 'unknown_audio',
+            'severity': 'LOW',
+            'detail': 'Audio track(s) have no language tag — needs verification',
+        }
 
     # All tracks are known non-accepted languages
-    unique_langs = []
-    seen = set()
-    for lang in languages:
-        if lang not in seen:
-            unique_langs.append(lang)
-            seen.add(lang)
+    unique_langs = list(dict.fromkeys(raw for raw, _ in languages))
 
     return {
         'check': 'foreign_audio',
@@ -3302,6 +3395,7 @@ VALID_FIX_ACTIONS = {
     'delete_wrong',
     'delete_duplicate',
     'delete_foreign',
+    'verify_audio',
     'rename_edition',
     'rename_template',
 }
@@ -3898,6 +3992,12 @@ def generate_fix_preview(item, action):
         return _preview_rename_edition(item)
     elif action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
         return _preview_delete_wrong(item)
+    elif action == 'verify_audio':
+        return {
+            'action': 'verify_audio',
+            'current_path': item.get('file_path', ''),
+            'description': 'Run whisper.cpp language detection on audio track(s)',
+        }
     elif action == 'reassign_movie':
         return _preview_reassign_movie(item)
     else:
@@ -4282,7 +4382,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'desc': 'Preview what a fix action would change (dry run)',
             'params': {
                 'item_id': {'desc': '12-char hex ID of the flagged item'},
-                'action': {'desc': 'Fix action: rename_template, rename_resolution, reassign_movie, delete_wrong, delete_duplicate, delete_foreign, rename_edition'},
+                'action': {'desc': 'Fix action: rename_template, rename_resolution, reassign_movie, delete_wrong, delete_duplicate, delete_foreign, verify_audio, rename_edition'},
             },
         })
 
@@ -4290,7 +4390,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'desc': 'Execute a fix action on a flagged item',
             'params': {
                 'item_id': {'desc': '12-char hex ID of the flagged item'},
-                'action': {'desc': 'Fix action: rename_template, rename_resolution, reassign_movie, delete_wrong, delete_duplicate, delete_foreign, rename_edition'},
+                'action': {'desc': 'Fix action: rename_template, rename_resolution, reassign_movie, delete_wrong, delete_duplicate, delete_foreign, verify_audio, rename_edition'},
                 'confirm': {'desc': 'Must be 1 to confirm execution'},
             },
         })
@@ -5223,6 +5323,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             success, details = execute_fix_rename_edition(item)
         elif action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
             success, details = execute_fix_delete_wrong(item)
+        elif action == 'verify_audio':
+            return {'success': False, 'error': 'Use audit.verify endpoint for whisper verification'}
         elif action == 'reassign_movie':
             success, details = execute_fix_reassign_movie(item)
         else:
@@ -5494,6 +5596,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                     success, details = execute_fix_rename_edition(item)
                 elif action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
                     success, details = execute_fix_delete_wrong(item)
+                elif action == 'verify_audio':
+                    success, details = False, {'error': 'Use audit.verify.batch for whisper verification'}
                 elif action == 'reassign_movie':
                     success, details = execute_fix_reassign_movie(item)
                 else:

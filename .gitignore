@@ -16,3 +16,6 @@ nosetests.xml
 /.vs
 
 .DS_Store
+
+# Project instructions (private, not for public repo)
+AGENTS.md
