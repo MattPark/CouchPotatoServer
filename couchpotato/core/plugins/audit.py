@@ -1590,8 +1590,13 @@ WHISPER_SAMPLE_SECONDS = 30
 WHISPER_MIN_CONFIDENCE = 0.70
 
 
-def _extract_audio_sample(file_path, offset_seconds, duration, output_path):
+def _extract_audio_sample(file_path, offset_seconds, duration, output_path,
+                          track_index=None):
     """Extract a mono 16kHz WAV audio sample from a video file using ffmpeg.
+
+    If track_index is given, extracts from that specific audio stream
+    (0-based index among audio streams).  Otherwise extracts the default
+    audio stream.
 
     Returns True on success, False on failure.
     """
@@ -1599,6 +1604,10 @@ def _extract_audio_sample(file_path, offset_seconds, duration, output_path):
         'ffmpeg', '-y',
         '-ss', str(offset_seconds),
         '-i', file_path,
+    ]
+    if track_index is not None:
+        cmd += ['-map', '0:a:%d' % track_index]
+    cmd += [
         '-t', str(duration),
         '-vn', '-ar', '16000', '-ac', '1', '-f', 'wav',
         output_path,
@@ -1608,8 +1617,9 @@ def _extract_audio_sample(file_path, offset_seconds, duration, output_path):
             cmd, capture_output=True, timeout=60,
         )
         if result.returncode != 0:
-            log.warning('ffmpeg sample extraction failed (rc=%d) at offset %ds: %s',
+            log.warning('ffmpeg sample extraction failed (rc=%d) at offset %ds track=%s: %s',
                         (result.returncode, int(offset_seconds),
+                         track_index if track_index is not None else 'default',
                          result.stderr[-200:] if result.stderr else ''))
             return False
         return True
@@ -1679,15 +1689,68 @@ def _get_media_duration(file_path):
         return 0.0
 
 
-def whisper_verify_audio(file_path, model_path=DEFAULT_WHISPER_MODEL):
-    """Verify the spoken language of a media file using whisper.cpp.
+def _verify_single_track(file_path, duration, track_index, model_path, tmp_dir,
+                         basename):
+    """Verify one audio track using multi-sample whisper detection.
 
-    Extracts a 30-second audio sample from the middle of the file, runs
-    whisper-cli for auto language detection.  If confidence is below 0.70,
-    retries with samples at 25% and 75% of runtime and takes the best.
+    Returns {'language': str, 'confidence': float, 'samples': list}
+    """
+    prefix = 't%d' % track_index if track_index is not None else 'default'
+
+    # First try: middle of file (50%)
+    offset = max(0, (duration * 0.5) - (WHISPER_SAMPLE_SECONDS / 2))
+    wav_path = os.path.join(tmp_dir, '%s_50.wav' % prefix)
+
+    if not _extract_audio_sample(file_path, offset, WHISPER_SAMPLE_SECONDS,
+                                 wav_path, track_index=track_index):
+        return {'language': None, 'confidence': 0.0, 'samples': [],
+                'error': 'Failed to extract audio'}
+
+    lang, conf = _run_whisper_detection(wav_path, model_path)
+    samples = [{'offset_pct': 50, 'language': lang, 'confidence': conf}]
+    log.info('Whisper track %s @50%%: lang=%s conf=%.3f for %s',
+             (prefix, lang, conf, basename))
+
+    if lang and conf >= WHISPER_MIN_CONFIDENCE:
+        return {'language': lang, 'confidence': conf, 'samples': samples}
+
+    # Multi-sample retry at 25% and 75%
+    for pct in (25, 75):
+        offset = max(0, (duration * pct / 100) - (WHISPER_SAMPLE_SECONDS / 2))
+        wav_path = os.path.join(tmp_dir, '%s_%d.wav' % (prefix, pct))
+
+        if not _extract_audio_sample(file_path, offset, WHISPER_SAMPLE_SECONDS,
+                                     wav_path, track_index=track_index):
+            continue
+
+        lang2, conf2 = _run_whisper_detection(wav_path, model_path)
+        samples.append({'offset_pct': pct, 'language': lang2, 'confidence': conf2})
+        log.info('Whisper track %s @%d%%: lang=%s conf=%.3f for %s',
+                 (prefix, pct, lang2, conf2, basename))
+
+    best = max(samples, key=lambda s: s['confidence'])
+    return {'language': best['language'], 'confidence': best['confidence'],
+            'samples': samples}
+
+
+def whisper_verify_audio(file_path, audio_tracks=None,
+                         model_path=DEFAULT_WHISPER_MODEL):
+    """Verify the spoken language of each audio track using whisper.cpp.
+
+    If audio_tracks is provided (list of dicts with at least 'language' key),
+    each track is verified independently and the result includes per-track
+    details.  Otherwise falls back to verifying the default audio stream.
 
     Returns a dict:
-        {'language': 'en', 'confidence': 0.95, 'samples': [...]}
+        {
+            'tracks': [
+                {'track_index': 0, 'tagged_language': 'fr',
+                 'language': 'en', 'confidence': 0.95, 'samples': [...]},
+                ...
+            ],
+            'language': 'en',       # best overall detection
+            'confidence': 0.95,
+        }
     or on failure:
         {'error': 'reason', 'language': None, 'confidence': 0.0}
     """
@@ -1709,54 +1772,54 @@ def whisper_verify_audio(file_path, model_path=DEFAULT_WHISPER_MODEL):
         return {'error': 'File too short for analysis (%.1fs)' % duration,
                 'language': None, 'confidence': 0.0}
 
-    log.info('Whisper verify starting: %s (%.0fs duration)', (basename, duration))
+    num_tracks = len(audio_tracks) if audio_tracks else 0
+    log.info('Whisper verify starting: %s (%.0fs duration, %d audio tracks)',
+             (basename, duration, num_tracks or 1))
 
     tmp_dir = tempfile.mkdtemp(prefix='whisper_')
     try:
-        samples = []
+        if audio_tracks and len(audio_tracks) > 0:
+            # Verify each track independently
+            track_results = []
+            for idx, track_info in enumerate(audio_tracks):
+                tagged = track_info.get('language', '')
+                result = _verify_single_track(
+                    file_path, duration, idx, model_path, tmp_dir, basename)
+                result['track_index'] = idx
+                result['tagged_language'] = tagged
+                track_results.append(result)
+                log.info('Whisper track %d (%s): detected %s (%.1f%%) for %s',
+                         (idx, tagged, result['language'],
+                          result['confidence'] * 100, basename))
 
-        # First try: middle of file (50%)
-        offset = max(0, (duration * 0.5) - (WHISPER_SAMPLE_SECONDS / 2))
-        wav_path = os.path.join(tmp_dir, 'sample_50.wav')
-
-        if not _extract_audio_sample(file_path, offset, WHISPER_SAMPLE_SECONDS, wav_path):
-            return {'error': 'Failed to extract audio sample',
-                    'language': None, 'confidence': 0.0}
-
-        lang, conf = _run_whisper_detection(wav_path, model_path)
-        samples.append({'offset_pct': 50, 'language': lang, 'confidence': conf})
-        log.info('Whisper sample @50%%: lang=%s conf=%.3f for %s',
-                 (lang, conf, basename))
-
-        # If confidence is good enough, return immediately
-        if lang and conf >= WHISPER_MIN_CONFIDENCE:
-            log.info('Whisper verify done (1 sample): %s → %s (%.1f%%)',
-                     (basename, lang, conf * 100))
-            return {'language': lang, 'confidence': conf, 'samples': samples}
-
-        # Multi-sample retry at 25% and 75%
-        for pct in (25, 75):
-            offset = max(0, (duration * pct / 100) - (WHISPER_SAMPLE_SECONDS / 2))
-            wav_path = os.path.join(tmp_dir, 'sample_%d.wav' % pct)
-
-            if not _extract_audio_sample(file_path, offset, WHISPER_SAMPLE_SECONDS, wav_path):
-                continue
-
-            lang2, conf2 = _run_whisper_detection(wav_path, model_path)
-            samples.append({'offset_pct': pct, 'language': lang2, 'confidence': conf2})
-            log.info('Whisper sample @%d%%: lang=%s conf=%.3f for %s',
-                     (pct, lang2, conf2, basename))
-
-        # Pick the result with highest confidence across all samples
-        best = max(samples, key=lambda s: s['confidence'])
-        log.info('Whisper verify done (%d samples): %s → %s (%.1f%%)',
-                 (len(samples), basename, best['language'],
-                  best['confidence'] * 100))
-        return {
-            'language': best['language'],
-            'confidence': best['confidence'],
-            'samples': samples,
-        }
+            # Overall best = highest confidence across all tracks
+            best = max(track_results, key=lambda t: t['confidence'])
+            return {
+                'tracks': track_results,
+                'language': best['language'],
+                'confidence': best['confidence'],
+            }
+        else:
+            # Single default track (no track info available)
+            result = _verify_single_track(
+                file_path, duration, None, model_path, tmp_dir, basename)
+            if 'error' in result:
+                return {'error': result['error'],
+                        'language': None, 'confidence': 0.0}
+            log.info('Whisper verify done: %s → %s (%.1f%%)',
+                     (basename, result['language'],
+                      result['confidence'] * 100))
+            return {
+                'tracks': [{
+                    'track_index': 0,
+                    'tagged_language': '',
+                    'language': result['language'],
+                    'confidence': result['confidence'],
+                    'samples': result.get('samples', []),
+                }],
+                'language': result['language'],
+                'confidence': result['confidence'],
+            }
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -5298,9 +5361,10 @@ class Audit(Plugin if _CP_AVAILABLE else object):
     def _apply_whisper_result(self, item, result):
         """Apply whisper verification to an item: update flags and knowledge.
 
-        If whisper detected an accepted language → remove unknown_audio flag.
-        If whisper detected a non-accepted language → replace unknown_audio
-        with foreign_audio.
+        Examines per-track results.  If any track is in an accepted language,
+        the foreign/unknown flags are cleared.  Otherwise, a foreign_audio
+        flag is added with per-track detail.
+
         Stores the result in file_knowledge for future reference.
         """
         fingerprint = item.get('file_fingerprint')
@@ -5310,35 +5374,47 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 'language': result.get('language'),
                 'confidence': result.get('confidence', 0.0),
                 'verified_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                'samples': result.get('samples', []),
+                'tracks': result.get('tracks', []),
             }
             self._save_file_knowledge()
 
-        detected = result.get('language')
-        if not detected:
-            return  # whisper failed, leave flags as-is
+        tracks = result.get('tracks', [])
+        if not tracks:
+            return  # no results, leave flags as-is
 
-        # Normalize the detected language and check acceptance
-        normalized = normalize_language(detected)
+        # Check if ANY track detected an accepted language
         accepted = {'en'}  # TODO: read from config
-        is_accepted = normalized in accepted
+        any_accepted = False
+        track_details = []
+        for t in tracks:
+            lang = t.get('language')
+            if not lang:
+                continue
+            normalized = normalize_language(lang)
+            if normalized in accepted:
+                any_accepted = True
+            conf = t.get('confidence', 0)
+            tagged = t.get('tagged_language', '?')
+            track_details.append(
+                'Track %d (%s): %s %.0f%%' % (
+                    t.get('track_index', 0), tagged, lang, conf * 100))
 
         # Update flags: remove unknown_audio and existing foreign_audio,
-        # then re-add foreign_audio only if whisper confirmed non-accepted
+        # then re-add foreign_audio only if no track is accepted
         flags = item.get('flags', [])
         new_flags = [f for f in flags
                      if f['check'] not in ('unknown_audio', 'foreign_audio')]
 
-        if is_accepted:
-            # Whisper confirmed accepted language — clear the flag
+        if any_accepted:
+            # At least one track is accepted — clear the flag
             pass
         else:
-            # Whisper detected a foreign language
+            detail = 'Whisper: ' + '; '.join(track_details) if track_details \
+                else 'Whisper: no language detected'
             new_flags.append({
                 'check': 'foreign_audio',
                 'severity': 'LOW',
-                'detail': 'Whisper detected language: %s (%.0f%% confidence)' % (
-                    detected, result.get('confidence', 0) * 100),
+                'detail': detail,
             })
 
         item['flags'] = new_flags
@@ -5376,7 +5452,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 }
 
         # Run whisper
-        result = whisper_verify_audio(file_path)
+        audio_tracks = item.get('actual', {}).get('audio_tracks', [])
+        result = whisper_verify_audio(file_path, audio_tracks=audio_tracks)
 
         if 'error' in result:
             return {
@@ -5396,7 +5473,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'whisper': {
                 'language': result['language'],
                 'confidence': result['confidence'],
-                'samples': result.get('samples', []),
+                'tracks': result.get('tracks', []),
             },
             'recommended_action': item.get('recommended_action'),
         }
@@ -5472,7 +5549,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 self._apply_whisper_result(item, cached)
                 completed += 1
             else:
-                result = whisper_verify_audio(file_path)
+                audio_tracks = item.get('actual', {}).get('audio_tracks', [])
+                result = whisper_verify_audio(file_path,
+                                              audio_tracks=audio_tracks)
                 if 'error' in result:
                     failed += 1
                     log.error('Verify batch failed for %s: %s',

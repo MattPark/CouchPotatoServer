@@ -2533,8 +2533,8 @@ class TestWhisperVerifyAudio:
 
         assert result['language'] == 'en'
         assert result['confidence'] == 0.95
-        assert len(result['samples']) == 1
-        assert result['samples'][0]['offset_pct'] == 50
+        assert len(result['tracks']) == 1
+        assert result['tracks'][0]['samples'][0]['offset_pct'] == 50
         # Only one whisper call (no retry)
         assert mock_whisper.call_count == 1
 
@@ -2562,7 +2562,7 @@ class TestWhisperVerifyAudio:
 
         assert result['language'] == 'en'
         assert result['confidence'] == 0.85  # best of all samples
-        assert len(result['samples']) == 3
+        assert len(result['tracks'][0]['samples']) == 3
         assert mock_whisper.call_count == 3
 
     @mock.patch('couchpotato.core.plugins.audit.shutil.rmtree')
@@ -2584,7 +2584,7 @@ class TestWhisperVerifyAudio:
 
         assert result['language'] is None
         assert result['confidence'] == 0.0
-        assert len(result['samples']) == 3
+        assert len(result['tracks'][0]['samples']) == 3
 
     @mock.patch('couchpotato.core.plugins.audit.shutil.rmtree')
     @mock.patch('couchpotato.core.plugins.audit._extract_audio_sample',
@@ -2669,7 +2669,9 @@ class TestApplyWhisperResult:
             'flag_count': 1,
             'recommended_action': 'verify_audio',
         }
-        result = {'language': 'en', 'confidence': 0.95, 'samples': []}
+        result = {'language': 'en', 'confidence': 0.95,
+                  'tracks': [{'track_index': 0, 'tagged_language': '',
+                              'language': 'en', 'confidence': 0.95}]}
 
         p._apply_whisper_result(item, result)
 
@@ -2690,14 +2692,16 @@ class TestApplyWhisperResult:
             'flag_count': 1,
             'recommended_action': 'verify_audio',
         }
-        result = {'language': 'fr', 'confidence': 0.92, 'samples': []}
+        result = {'language': 'fr', 'confidence': 0.92,
+                  'tracks': [{'track_index': 0, 'tagged_language': 'fr',
+                              'language': 'fr', 'confidence': 0.92}]}
 
         p._apply_whisper_result(item, result)
 
         checks = {f['check'] for f in item['flags']}
         assert 'unknown_audio' not in checks
         assert 'foreign_audio' in checks
-        assert 'Whisper detected' in item['flags'][0]['detail']
+        assert 'Whisper' in item['flags'][0]['detail']
 
     def test_stores_in_file_knowledge(self):
         """Result is stored in file_knowledge table."""
@@ -2712,7 +2716,9 @@ class TestApplyWhisperResult:
             'recommended_action': 'verify_audio',
         }
         result = {'language': 'en', 'confidence': 0.95,
-                  'samples': [{'offset_pct': 50, 'language': 'en', 'confidence': 0.95}]}
+                  'tracks': [{'track_index': 0, 'tagged_language': '',
+                              'language': 'en', 'confidence': 0.95,
+                              'samples': [{'offset_pct': 50, 'language': 'en', 'confidence': 0.95}]}]}
 
         p._apply_whisper_result(item, result)
 
@@ -2720,7 +2726,7 @@ class TestApplyWhisperResult:
         whisper_data = p.file_knowledge['300:eeff']['whisper']
         assert whisper_data['language'] == 'en'
         assert whisper_data['confidence'] == 0.95
-        assert len(whisper_data['samples']) == 1
+        assert len(whisper_data['tracks']) == 1
 
     def test_failed_detection_leaves_flags(self):
         """Whisper returns None language → flags unchanged."""
@@ -2756,13 +2762,17 @@ class TestApplyWhisperResult:
             'flag_count': 1,
             'recommended_action': 'delete_foreign',
         }
-        result = {'language': 'ja', 'confidence': 0.97, 'samples': []}
+        result = {
+            'language': 'ja', 'confidence': 0.97,
+            'tracks': [{'track_index': 0, 'tagged_language': 'ja',
+                         'language': 'ja', 'confidence': 0.97, 'samples': []}],
+        }
 
         p._apply_whisper_result(item, result)
 
         foreign_flags = [f for f in item['flags'] if f['check'] == 'foreign_audio']
         assert len(foreign_flags) == 1, 'Should have exactly one foreign_audio flag'
-        assert 'Whisper detected' in foreign_flags[0]['detail']
+        assert 'Whisper' in foreign_flags[0]['detail']
 
     def test_whisper_english_clears_foreign_audio(self):
         """Item with foreign_audio + whisper says English → flag removed."""
@@ -2779,7 +2789,11 @@ class TestApplyWhisperResult:
             'flag_count': 1,
             'recommended_action': 'delete_foreign',
         }
-        result = {'language': 'en', 'confidence': 0.99, 'samples': []}
+        result = {
+            'language': 'en', 'confidence': 0.99,
+            'tracks': [{'track_index': 0, 'tagged_language': 'de',
+                         'language': 'en', 'confidence': 0.99, 'samples': []}],
+        }
 
         p._apply_whisper_result(item, result)
 

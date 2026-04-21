@@ -1374,9 +1374,22 @@ var AuditSettingTab = new Class({
 
 				if(json && json.success){
 					var w = json.whisper || {};
-					var lang = w.language || '?';
-					var conf = w.confidence ? Math.round(w.confidence * 100) + '%' : '';
-					var msg = 'Detected: ' + lang + (conf ? ' (' + conf + ')' : '');
+					var tracks = w.tracks || [];
+
+					// Build per-track summary
+					var msg;
+					if(tracks.length > 1){
+						var parts = [];
+						tracks.each(function(t){
+							var tconf = t.confidence ? Math.round(t.confidence * 100) + '%' : '?';
+							parts.push('Track ' + t.track_index + ' (' + (t.tagged_language || '?') + '): ' + (t.language || '?') + ' ' + tconf);
+						});
+						msg = parts.join(', ');
+					} else {
+						var lang = w.language || '?';
+						var conf = w.confidence ? Math.round(w.confidence * 100) + '%' : '';
+						msg = 'Detected: ' + lang + (conf ? ' (' + conf + ')' : '');
+					}
 					if(json.cached) msg += ' (cached)';
 
 					if(btn.set) btn.set('text', msg);
@@ -1391,8 +1404,7 @@ var AuditSettingTab = new Class({
 								var check = check_el.get('text');
 								if(check === 'unknown_audio' || check === 'foreign_audio'){
 									var detail_el = row.getElement('.audit_flag_detail');
-									if(detail_el)
-										detail_el.set('text', 'Whisper detected language: ' + lang + ' (' + conf + ' confidence)');
+									if(detail_el) detail_el.set('text', msg);
 									if(check === 'unknown_audio' && json.recommended_action !== 'verify_audio')
 										check_el.set('text', json.recommended_action === 'delete_foreign' ? 'foreign_audio' : 'cleared');
 								}
