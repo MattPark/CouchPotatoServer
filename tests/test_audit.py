@@ -38,10 +38,13 @@ from couchpotato.core.plugins.audit import (
     _extract_audio_tracks,
     check_audio_language,
     normalize_language,
+    whisper_verify_audio,
+    _run_whisper_detection,
 )
 import json
 import os
 import re
+from unittest import mock
 
 
 # ---------------------------------------------------------------------------
@@ -2482,3 +2485,258 @@ class TestFileKnowledge:
         self._bind(p)
         p._load_file_knowledge()
         assert p.file_knowledge == {}
+
+
+class TestWhisperVerifyAudio:
+    """Tests for whisper language verification functions."""
+
+    def test_file_not_found(self):
+        """Non-existent file → error."""
+        result = whisper_verify_audio('/nonexistent/movie.mkv')
+        assert result['error'] == 'File not found'
+        assert result['language'] is None
+
+    def test_model_not_found(self, tmp_path):
+        """Non-existent model → error."""
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        result = whisper_verify_audio(str(f), model_path='/nonexistent/model.bin')
+        assert 'model not found' in result['error'].lower()
+        assert result['language'] is None
+
+    @mock.patch('couchpotato.core.plugins.audit._get_media_duration', return_value=5.0)
+    def test_file_too_short(self, mock_dur, tmp_path):
+        """File shorter than 10 seconds → error."""
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        model = tmp_path / 'model.bin'
+        model.write_bytes(b'\x00' * 100)
+        result = whisper_verify_audio(str(f), model_path=str(model))
+        assert 'too short' in result['error'].lower()
+
+    @mock.patch('couchpotato.core.plugins.audit.shutil.rmtree')
+    @mock.patch('couchpotato.core.plugins.audit._run_whisper_detection',
+                return_value=('en', 0.95))
+    @mock.patch('couchpotato.core.plugins.audit._extract_audio_sample',
+                return_value=True)
+    @mock.patch('couchpotato.core.plugins.audit._get_media_duration',
+                return_value=120.0)
+    def test_high_confidence_single_sample(self, mock_dur, mock_extract,
+                                           mock_whisper, mock_rmtree, tmp_path):
+        """High confidence (>0.70) on first sample → returns immediately."""
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        model = tmp_path / 'model.bin'
+        model.write_bytes(b'\x00' * 100)
+
+        result = whisper_verify_audio(str(f), model_path=str(model))
+
+        assert result['language'] == 'en'
+        assert result['confidence'] == 0.95
+        assert len(result['samples']) == 1
+        assert result['samples'][0]['offset_pct'] == 50
+        # Only one whisper call (no retry)
+        assert mock_whisper.call_count == 1
+
+    @mock.patch('couchpotato.core.plugins.audit.shutil.rmtree')
+    @mock.patch('couchpotato.core.plugins.audit._run_whisper_detection')
+    @mock.patch('couchpotato.core.plugins.audit._extract_audio_sample',
+                return_value=True)
+    @mock.patch('couchpotato.core.plugins.audit._get_media_duration',
+                return_value=120.0)
+    def test_low_confidence_triggers_retry(self, mock_dur, mock_extract,
+                                            mock_whisper, mock_rmtree, tmp_path):
+        """Low confidence on first sample → retries at 25% and 75%."""
+        # First call: low confidence. Second and third: better.
+        mock_whisper.side_effect = [
+            ('en', 0.50),   # 50% — low
+            ('en', 0.85),   # 25% — high
+            ('en', 0.80),   # 75% — decent
+        ]
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        model = tmp_path / 'model.bin'
+        model.write_bytes(b'\x00' * 100)
+
+        result = whisper_verify_audio(str(f), model_path=str(model))
+
+        assert result['language'] == 'en'
+        assert result['confidence'] == 0.85  # best of all samples
+        assert len(result['samples']) == 3
+        assert mock_whisper.call_count == 3
+
+    @mock.patch('couchpotato.core.plugins.audit.shutil.rmtree')
+    @mock.patch('couchpotato.core.plugins.audit._run_whisper_detection',
+                return_value=(None, 0.0))
+    @mock.patch('couchpotato.core.plugins.audit._extract_audio_sample',
+                return_value=True)
+    @mock.patch('couchpotato.core.plugins.audit._get_media_duration',
+                return_value=120.0)
+    def test_whisper_fails_all_samples(self, mock_dur, mock_extract,
+                                       mock_whisper, mock_rmtree, tmp_path):
+        """Whisper returns nothing for all samples → language is None."""
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        model = tmp_path / 'model.bin'
+        model.write_bytes(b'\x00' * 100)
+
+        result = whisper_verify_audio(str(f), model_path=str(model))
+
+        assert result['language'] is None
+        assert result['confidence'] == 0.0
+        assert len(result['samples']) == 3
+
+    @mock.patch('couchpotato.core.plugins.audit.shutil.rmtree')
+    @mock.patch('couchpotato.core.plugins.audit._extract_audio_sample',
+                return_value=False)
+    @mock.patch('couchpotato.core.plugins.audit._get_media_duration',
+                return_value=120.0)
+    def test_extract_fails(self, mock_dur, mock_extract,
+                            mock_rmtree, tmp_path):
+        """Audio extraction failure → error."""
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        model = tmp_path / 'model.bin'
+        model.write_bytes(b'\x00' * 100)
+
+        result = whisper_verify_audio(str(f), model_path=str(model))
+
+        assert 'error' in result
+        assert 'extract' in result['error'].lower()
+
+
+class TestRunWhisperDetection:
+    """Tests for _run_whisper_detection output parsing."""
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    def test_parses_language_from_stderr(self, mock_run):
+        """Parses 'auto-detected language: en (p = 0.95)' from stderr."""
+        mock_run.return_value = mock.Mock(
+            stderr='whisper_full_with_state: auto-detected language: en (p = 0.95)\n',
+            stdout='[00:00:00.000 --> 00:00:05.000] Hello world\n',
+        )
+        lang, conf = _run_whisper_detection('/tmp/test.wav', '/models/model.bin')
+        assert lang == 'en'
+        assert abs(conf - 0.95) < 0.001
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    def test_no_match_returns_none(self, mock_run):
+        """No language detection line → returns (None, 0.0)."""
+        mock_run.return_value = mock.Mock(
+            stderr='whisper_init_from_file: loaded model\n',
+            stdout='',
+        )
+        lang, conf = _run_whisper_detection('/tmp/test.wav', '/models/model.bin')
+        assert lang is None
+        assert conf == 0.0
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run',
+                side_effect=Exception('command not found'))
+    def test_exception_returns_none(self, mock_run):
+        """Exception during subprocess → returns (None, 0.0)."""
+        lang, conf = _run_whisper_detection('/tmp/test.wav', '/models/model.bin')
+        assert lang is None
+        assert conf == 0.0
+
+
+class TestApplyWhisperResult:
+    """Tests for _apply_whisper_result flag reclassification."""
+
+    class _MockPlugin:
+        file_knowledge = {}
+        last_report = None
+
+        def _save_file_knowledge(self):
+            pass
+
+    @staticmethod
+    def _bind(plugin):
+        from couchpotato.core.plugins.audit import Audit
+        import types
+        for name in ('_apply_whisper_result',):
+            method = getattr(Audit, name)
+            setattr(plugin, name, types.MethodType(method, plugin))
+
+    def test_english_detected_clears_flag(self):
+        """Whisper detects English → unknown_audio flag removed, no new flags."""
+        p = self._MockPlugin()
+        self._bind(p)
+
+        item = {
+            'item_id': 'test123',
+            'file_fingerprint': '100:aabb',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW', 'detail': 'test'}],
+            'flag_count': 1,
+            'recommended_action': 'verify_audio',
+        }
+        result = {'language': 'en', 'confidence': 0.95, 'samples': []}
+
+        p._apply_whisper_result(item, result)
+
+        checks = {f['check'] for f in item['flags']}
+        assert 'unknown_audio' not in checks
+        assert 'foreign_audio' not in checks
+        assert item['flag_count'] == 0
+
+    def test_foreign_detected_reclassifies(self):
+        """Whisper detects French → unknown_audio replaced with foreign_audio."""
+        p = self._MockPlugin()
+        self._bind(p)
+
+        item = {
+            'item_id': 'test456',
+            'file_fingerprint': '200:ccdd',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW', 'detail': 'test'}],
+            'flag_count': 1,
+            'recommended_action': 'verify_audio',
+        }
+        result = {'language': 'fr', 'confidence': 0.92, 'samples': []}
+
+        p._apply_whisper_result(item, result)
+
+        checks = {f['check'] for f in item['flags']}
+        assert 'unknown_audio' not in checks
+        assert 'foreign_audio' in checks
+        assert 'Whisper detected' in item['flags'][0]['detail']
+
+    def test_stores_in_file_knowledge(self):
+        """Result is stored in file_knowledge table."""
+        p = self._MockPlugin()
+        self._bind(p)
+
+        item = {
+            'item_id': 'test789',
+            'file_fingerprint': '300:eeff',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW', 'detail': 'test'}],
+            'flag_count': 1,
+            'recommended_action': 'verify_audio',
+        }
+        result = {'language': 'en', 'confidence': 0.95,
+                  'samples': [{'offset_pct': 50, 'language': 'en', 'confidence': 0.95}]}
+
+        p._apply_whisper_result(item, result)
+
+        assert '300:eeff' in p.file_knowledge
+        whisper_data = p.file_knowledge['300:eeff']['whisper']
+        assert whisper_data['language'] == 'en'
+        assert whisper_data['confidence'] == 0.95
+        assert len(whisper_data['samples']) == 1
+
+    def test_failed_detection_leaves_flags(self):
+        """Whisper returns None language → flags unchanged."""
+        p = self._MockPlugin()
+        self._bind(p)
+
+        item = {
+            'item_id': 'testfail',
+            'file_fingerprint': '400:1122',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW', 'detail': 'test'}],
+            'flag_count': 1,
+            'recommended_action': 'verify_audio',
+        }
+        result = {'language': None, 'confidence': 0.0, 'samples': []}
+
+        p._apply_whisper_result(item, result)
+
+        checks = {f['check'] for f in item['flags']}
+        assert 'unknown_audio' in checks

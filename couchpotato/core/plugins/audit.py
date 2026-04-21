@@ -49,6 +49,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import zlib
@@ -1574,6 +1575,152 @@ def check_audio_language(audio_tracks, accepted_languages=('en',)):
         'severity': 'LOW',
         'detail': 'All audio tracks are non-English: %s' % ', '.join(unique_langs),
     }
+
+
+# ---------------------------------------------------------------------------
+# Whisper audio language verification
+# ---------------------------------------------------------------------------
+
+_WHISPER_LANG_RE = re.compile(
+    r'auto-detected language:\s*(\w+)\s*\(p\s*=\s*([\d.]+)\)'
+)
+
+DEFAULT_WHISPER_MODEL = '/models/ggml-tiny.bin'
+WHISPER_SAMPLE_SECONDS = 30
+WHISPER_MIN_CONFIDENCE = 0.70
+
+
+def _extract_audio_sample(file_path, offset_seconds, duration, output_path):
+    """Extract a mono 16kHz WAV audio sample from a video file using ffmpeg.
+
+    Returns True on success, False on failure.
+    """
+    cmd = [
+        'ffmpeg', '-y',
+        '-ss', str(offset_seconds),
+        '-i', file_path,
+        '-t', str(duration),
+        '-vn', '-ar', '16000', '-ac', '1', '-f', 'wav',
+        output_path,
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, timeout=60,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, Exception):
+        return False
+
+
+def _run_whisper_detection(wav_path, model_path):
+    """Run whisper-cli on a WAV file and parse the detected language.
+
+    Returns (language, confidence) or (None, 0.0) on failure.
+    """
+    cmd = [
+        'whisper-cli',
+        '-m', model_path,
+        '-f', wav_path,
+        '-l', 'auto',
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120,
+        )
+        # Language detection is printed to stderr
+        output = result.stderr + result.stdout
+        match = _WHISPER_LANG_RE.search(output)
+        if match:
+            return match.group(1), float(match.group(2))
+        return None, 0.0
+    except (subprocess.TimeoutExpired, Exception):
+        return None, 0.0
+
+
+def _get_media_duration(file_path):
+    """Get the duration of a media file in seconds using ffprobe.
+
+    Returns duration as float, or 0.0 on failure.
+    """
+    cmd = [
+        'ffprobe', '-v', 'quiet',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        file_path,
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30,
+        )
+        return float(result.stdout.strip())
+    except (ValueError, subprocess.TimeoutExpired, Exception):
+        return 0.0
+
+
+def whisper_verify_audio(file_path, model_path=DEFAULT_WHISPER_MODEL):
+    """Verify the spoken language of a media file using whisper.cpp.
+
+    Extracts a 30-second audio sample from the middle of the file, runs
+    whisper-cli for auto language detection.  If confidence is below 0.70,
+    retries with samples at 25% and 75% of runtime and takes the best.
+
+    Returns a dict:
+        {'language': 'en', 'confidence': 0.95, 'samples': [...]}
+    or on failure:
+        {'error': 'reason', 'language': None, 'confidence': 0.0}
+    """
+    if not os.path.isfile(file_path):
+        return {'error': 'File not found', 'language': None, 'confidence': 0.0}
+
+    if not os.path.isfile(model_path):
+        return {'error': 'Whisper model not found: %s' % model_path,
+                'language': None, 'confidence': 0.0}
+
+    duration = _get_media_duration(file_path)
+    if duration < 10:
+        return {'error': 'File too short for analysis (%.1fs)' % duration,
+                'language': None, 'confidence': 0.0}
+
+    tmp_dir = tempfile.mkdtemp(prefix='whisper_')
+    try:
+        samples = []
+
+        # First try: middle of file (50%)
+        offset_pcts = [50]
+        offset = max(0, (duration * 0.5) - (WHISPER_SAMPLE_SECONDS / 2))
+        wav_path = os.path.join(tmp_dir, 'sample_50.wav')
+
+        if not _extract_audio_sample(file_path, offset, WHISPER_SAMPLE_SECONDS, wav_path):
+            return {'error': 'Failed to extract audio sample',
+                    'language': None, 'confidence': 0.0}
+
+        lang, conf = _run_whisper_detection(wav_path, model_path)
+        samples.append({'offset_pct': 50, 'language': lang, 'confidence': conf})
+
+        # If confidence is good enough, return immediately
+        if lang and conf >= WHISPER_MIN_CONFIDENCE:
+            return {'language': lang, 'confidence': conf, 'samples': samples}
+
+        # Multi-sample retry at 25% and 75%
+        for pct in (25, 75):
+            offset = max(0, (duration * pct / 100) - (WHISPER_SAMPLE_SECONDS / 2))
+            wav_path = os.path.join(tmp_dir, 'sample_%d.wav' % pct)
+
+            if not _extract_audio_sample(file_path, offset, WHISPER_SAMPLE_SECONDS, wav_path):
+                continue
+
+            lang2, conf2 = _run_whisper_detection(wav_path, model_path)
+            samples.append({'offset_pct': pct, 'language': lang2, 'confidence': conf2})
+
+        # Pick the result with highest confidence across all samples
+        best = max(samples, key=lambda s: s['confidence'])
+        return {
+            'language': best['language'],
+            'confidence': best['confidence'],
+            'samples': samples,
+        }
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def check_edition(container_title, filename):
@@ -4335,6 +4482,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
     # Fix progress tracking
     fix_in_progress = False
 
+    # Whisper verification progress tracking
+    verify_in_progress = False
+
     def __init__(self):
         if not _CP_AVAILABLE:
             return
@@ -4444,8 +4594,24 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'desc': 'List all currently ignored items',
         })
 
+        addApiView('audit.verify', self.verifyView, docs={
+            'desc': 'Run whisper language verification on a single item',
+            'params': {
+                'item_id': {'desc': '12-char hex ID of the flagged item'},
+            },
+        })
+
+        addApiView('audit.verify.batch', self.verifyBatchView, docs={
+            'desc': 'Run whisper verification on all unknown_audio items',
+        })
+
+        addApiView('audit.verify.progress', self.verifyProgressView, docs={
+            'desc': 'Get progress of a running batch verification',
+        })
+
         addEvent('audit.run_scan', self._run_scan)
         addEvent('audit.run_batch_fix', self._run_batch_fix)
+        addEvent('audit.run_verify_batch', self._run_verify_batch)
 
         # Load persisted results on startup
         self._load_results()
@@ -5087,6 +5253,219 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'total': len(items),
         }
 
+    # -------------------------------------------------------------------
+    # Whisper audio language verification
+    # -------------------------------------------------------------------
+
+    def _apply_whisper_result(self, item, result):
+        """Apply whisper verification to an item: update flags and knowledge.
+
+        If whisper detected an accepted language → remove unknown_audio flag.
+        If whisper detected a non-accepted language → replace unknown_audio
+        with foreign_audio.
+        Stores the result in file_knowledge for future reference.
+        """
+        fingerprint = item.get('file_fingerprint')
+        if fingerprint:
+            entry = self.file_knowledge.setdefault(fingerprint, {})
+            entry['whisper'] = {
+                'language': result.get('language'),
+                'confidence': result.get('confidence', 0.0),
+                'verified_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                'samples': result.get('samples', []),
+            }
+            self._save_file_knowledge()
+
+        detected = result.get('language')
+        if not detected:
+            return  # whisper failed, leave flags as-is
+
+        # Normalize the detected language and check acceptance
+        normalized = normalize_language(detected)
+        accepted = {'en'}  # TODO: read from config
+        is_accepted = normalized in accepted
+
+        # Update flags: remove unknown_audio, potentially add foreign_audio
+        flags = item.get('flags', [])
+        new_flags = [f for f in flags if f['check'] != 'unknown_audio']
+
+        if is_accepted:
+            # Whisper confirmed accepted language — clear the flag
+            pass
+        else:
+            # Whisper detected a foreign language
+            new_flags.append({
+                'check': 'foreign_audio',
+                'severity': 'LOW',
+                'detail': 'Whisper detected language: %s (%.0f%% confidence)' % (
+                    detected, result.get('confidence', 0) * 100),
+            })
+
+        item['flags'] = new_flags
+        item['flag_count'] = len(new_flags)
+
+        # Recompute recommended action
+        item['recommended_action'] = compute_recommended_action(
+            new_flags, item.get('identification'), item.get('expected')
+        )
+
+    def verifyView(self, item_id=None, **kwargs):
+        """API handler: run whisper verification on a single item."""
+        if not item_id:
+            return {'success': False, 'error': 'item_id is required'}
+
+        item = self._find_item(item_id)
+        if not item:
+            return {'success': False, 'error': 'Item not found: %s' % item_id}
+
+        file_path = item.get('file_path', '')
+        if not file_path or not os.path.isfile(file_path):
+            return {'success': False, 'error': 'File not accessible: %s' % file_path}
+
+        # Check if already verified via file_knowledge
+        fingerprint = item.get('file_fingerprint')
+        if fingerprint:
+            cached = self.file_knowledge.get(fingerprint, {}).get('whisper')
+            if cached and cached.get('language'):
+                return {
+                    'success': True,
+                    'item_id': item_id,
+                    'cached': True,
+                    'whisper': cached,
+                    'recommended_action': item.get('recommended_action'),
+                }
+
+        # Run whisper
+        result = whisper_verify_audio(file_path)
+
+        if 'error' in result:
+            return {
+                'success': False,
+                'error': result['error'],
+                'item_id': item_id,
+            }
+
+        # Apply result (update flags, knowledge table)
+        self._apply_whisper_result(item, result)
+        self._save_results()
+
+        return {
+            'success': True,
+            'item_id': item_id,
+            'cached': False,
+            'whisper': {
+                'language': result['language'],
+                'confidence': result['confidence'],
+                'samples': result.get('samples', []),
+            },
+            'recommended_action': item.get('recommended_action'),
+        }
+
+    def verifyBatchView(self, **kwargs):
+        """API handler: run whisper verification on all unknown_audio items."""
+        if self.verify_in_progress and self.verify_in_progress.get('active'):
+            return {
+                'success': False,
+                'error': 'A batch verification is already in progress',
+                'verify_progress': self.verify_in_progress,
+            }
+
+        if not self.last_report:
+            return {'success': False, 'error': 'No scan results available'}
+
+        # Find all unfixed items with unknown_audio flags
+        items = [
+            i for i in self.last_report.get('flagged', [])
+            if not i.get('fixed')
+            and any(f['check'] == 'unknown_audio' for f in i.get('flags', []))
+            and not self._is_ignored(i.get('file_fingerprint'))
+        ]
+
+        if not items:
+            return {'success': False, 'error': 'No unknown_audio items to verify'}
+
+        # Start async verification
+        fireEventAsync(
+            'audit.run_verify_batch',
+            items=items,
+        )
+
+        return {
+            'success': True,
+            'total': len(items),
+            'message': 'Batch verification started — check audit.verify.progress for status',
+        }
+
+    def _run_verify_batch(self, items):
+        """Run whisper verification on a batch of items (background thread)."""
+        total = len(items)
+        completed = 0
+        failed = 0
+
+        self.verify_in_progress = {
+            'active': True,
+            'total': total,
+            'completed': 0,
+            'failed': 0,
+            'current_item': '',
+        }
+
+        for item in items:
+            file_path = item.get('file_path', '')
+            self.verify_in_progress['current_item'] = item.get('folder', '')
+
+            if not file_path or not os.path.isfile(file_path):
+                failed += 1
+                log.error('Verify batch: file not accessible: %s', (file_path,))
+                self.verify_in_progress['completed'] = completed + failed
+                self.verify_in_progress['failed'] = failed
+                continue
+
+            # Check cache
+            fingerprint = item.get('file_fingerprint')
+            cached = None
+            if fingerprint:
+                cached = self.file_knowledge.get(fingerprint, {}).get('whisper')
+
+            if cached and cached.get('language'):
+                # Already verified — apply cached result
+                self._apply_whisper_result(item, cached)
+                completed += 1
+            else:
+                result = whisper_verify_audio(file_path)
+                if 'error' in result:
+                    failed += 1
+                    log.error('Verify batch failed for %s: %s',
+                              (item.get('folder', ''), result['error']))
+                else:
+                    self._apply_whisper_result(item, result)
+                    completed += 1
+
+            self.verify_in_progress['completed'] = completed + failed
+            self.verify_in_progress['failed'] = failed
+
+        # Save results
+        self._save_results()
+
+        self.verify_in_progress = {
+            'active': False,
+            'total': total,
+            'completed': completed,
+            'failed': failed,
+            'current_item': '',
+        }
+
+        log.info('Batch verification complete: %s/%s verified, %s failed',
+                 (completed, total, failed))
+
+    def verifyProgressView(self, **kwargs):
+        """API handler: return current batch verification progress."""
+        return {
+            'verify_progress': self.verify_in_progress if self.verify_in_progress else {
+                'active': False,
+            },
+        }
+
     def _find_item(self, item_id):
         """Find a flagged item by its item_id.
 
@@ -5373,7 +5752,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         elif action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
             success, details = execute_fix_delete_wrong(item)
         elif action == 'verify_audio':
-            return {'success': False, 'error': 'Use audit.verify endpoint for whisper verification'}
+            return self.verifyView(item_id=item.get('item_id'))
         elif action == 'reassign_movie':
             success, details = execute_fix_reassign_movie(item)
         else:
@@ -5646,7 +6025,18 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 elif action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
                     success, details = execute_fix_delete_wrong(item)
                 elif action == 'verify_audio':
-                    success, details = False, {'error': 'Use audit.verify.batch for whisper verification'}
+                    # Run whisper inline during batch
+                    file_path = item.get('file_path', '')
+                    if file_path and os.path.isfile(file_path):
+                        wr = whisper_verify_audio(file_path)
+                        if 'error' not in wr:
+                            self._apply_whisper_result(item, wr)
+                            success = True
+                            details = {'language': wr['language'], 'confidence': wr['confidence']}
+                        else:
+                            success, details = False, {'error': wr['error']}
+                    else:
+                        success, details = False, {'error': 'File not accessible'}
                 elif action == 'reassign_movie':
                     success, details = execute_fix_reassign_movie(item)
                 else:

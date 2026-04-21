@@ -13,7 +13,7 @@ RUN cmake -B build \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
       -DWHISPER_BUILD_TESTS=OFF \
-      -DWHISPER_BUILD_EXAMPLES=OFF \
+      -DWHISPER_BUILD_EXAMPLES=ON \
       -DWHISPER_BUILD_SERVER=OFF \
       -DBUILD_SHARED_LIBS=OFF \
     && cmake --build build --config Release -j$(nproc) --target whisper-cli
