@@ -1607,13 +1607,26 @@ def _extract_audio_sample(file_path, offset_seconds, duration, output_path):
         result = subprocess.run(
             cmd, capture_output=True, timeout=60,
         )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, Exception):
+        if result.returncode != 0:
+            log.warning('ffmpeg sample extraction failed (rc=%d) at offset %ds: %s',
+                        (result.returncode, int(offset_seconds),
+                         result.stderr[-200:] if result.stderr else ''))
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        log.warning('ffmpeg timed out extracting sample at offset %ds from %s',
+                    (int(offset_seconds), os.path.basename(file_path)))
+        return False
+    except Exception as e:
+        log.error('ffmpeg error extracting sample: %s', (e,))
         return False
 
 
 def _run_whisper_detection(wav_path, model_path):
     """Run whisper-cli on a WAV file and parse the detected language.
+
+    Uses --detect-language (-dl) to exit immediately after detection,
+    avoiding unnecessary full transcription.
 
     Returns (language, confidence) or (None, 0.0) on failure.
     """
@@ -1622,18 +1635,27 @@ def _run_whisper_detection(wav_path, model_path):
         '-m', model_path,
         '-f', wav_path,
         '-l', 'auto',
+        '-dl',
     ]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120,
+            cmd, capture_output=True, text=True, timeout=60,
         )
         # Language detection is printed to stderr
         output = result.stderr + result.stdout
         match = _WHISPER_LANG_RE.search(output)
         if match:
             return match.group(1), float(match.group(2))
+        log.debug('Whisper: no language match in output for %s (rc=%d, '
+                   'stdout=%d bytes, stderr=%d bytes)',
+                   (os.path.basename(wav_path), result.returncode,
+                    len(result.stdout), len(result.stderr)))
         return None, 0.0
-    except (subprocess.TimeoutExpired, Exception):
+    except subprocess.TimeoutExpired:
+        log.warning('Whisper: timed out on %s', (wav_path,))
+        return None, 0.0
+    except Exception as e:
+        log.error('Whisper: unexpected error on %s: %s', (wav_path, e))
         return None, 0.0
 
 
@@ -1669,24 +1691,31 @@ def whisper_verify_audio(file_path, model_path=DEFAULT_WHISPER_MODEL):
     or on failure:
         {'error': 'reason', 'language': None, 'confidence': 0.0}
     """
+    basename = os.path.basename(file_path)
+
     if not os.path.isfile(file_path):
+        log.warning('Whisper verify: file not found: %s', (basename,))
         return {'error': 'File not found', 'language': None, 'confidence': 0.0}
 
     if not os.path.isfile(model_path):
+        log.error('Whisper verify: model not found: %s', (model_path,))
         return {'error': 'Whisper model not found: %s' % model_path,
                 'language': None, 'confidence': 0.0}
 
     duration = _get_media_duration(file_path)
     if duration < 10:
+        log.warning('Whisper verify: file too short (%.1fs): %s',
+                    (duration, basename))
         return {'error': 'File too short for analysis (%.1fs)' % duration,
                 'language': None, 'confidence': 0.0}
+
+    log.info('Whisper verify starting: %s (%.0fs duration)', (basename, duration))
 
     tmp_dir = tempfile.mkdtemp(prefix='whisper_')
     try:
         samples = []
 
         # First try: middle of file (50%)
-        offset_pcts = [50]
         offset = max(0, (duration * 0.5) - (WHISPER_SAMPLE_SECONDS / 2))
         wav_path = os.path.join(tmp_dir, 'sample_50.wav')
 
@@ -1696,9 +1725,13 @@ def whisper_verify_audio(file_path, model_path=DEFAULT_WHISPER_MODEL):
 
         lang, conf = _run_whisper_detection(wav_path, model_path)
         samples.append({'offset_pct': 50, 'language': lang, 'confidence': conf})
+        log.info('Whisper sample @50%%: lang=%s conf=%.3f for %s',
+                 (lang, conf, basename))
 
         # If confidence is good enough, return immediately
         if lang and conf >= WHISPER_MIN_CONFIDENCE:
+            log.info('Whisper verify done (1 sample): %s → %s (%.1f%%)',
+                     (basename, lang, conf * 100))
             return {'language': lang, 'confidence': conf, 'samples': samples}
 
         # Multi-sample retry at 25% and 75%
@@ -1711,9 +1744,14 @@ def whisper_verify_audio(file_path, model_path=DEFAULT_WHISPER_MODEL):
 
             lang2, conf2 = _run_whisper_detection(wav_path, model_path)
             samples.append({'offset_pct': pct, 'language': lang2, 'confidence': conf2})
+            log.info('Whisper sample @%d%%: lang=%s conf=%.3f for %s',
+                     (pct, lang2, conf2, basename))
 
         # Pick the result with highest confidence across all samples
         best = max(samples, key=lambda s: s['confidence'])
+        log.info('Whisper verify done (%d samples): %s → %s (%.1f%%)',
+                 (len(samples), basename, best['language'],
+                  best['confidence'] * 100))
         return {
             'language': best['language'],
             'confidence': best['confidence'],
