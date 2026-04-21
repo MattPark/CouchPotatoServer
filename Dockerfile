@@ -1,3 +1,26 @@
+##############################################################################
+# Stage 1: Build whisper-cli from whisper.cpp (CPU-only, static libs)
+##############################################################################
+FROM alpine:edge AS whisper-builder
+
+RUN apk add --no-cache cmake g++ make git linux-headers
+
+RUN git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git /whisper
+
+WORKDIR /whisper
+
+RUN cmake -B build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
+      -DWHISPER_BUILD_TESTS=OFF \
+      -DWHISPER_BUILD_EXAMPLES=OFF \
+      -DWHISPER_BUILD_SERVER=OFF \
+      -DBUILD_SHARED_LIBS=OFF \
+    && cmake --build build --config Release -j$(nproc) --target whisper-cli
+
+##############################################################################
+# Stage 2: Runtime image
+##############################################################################
 FROM ghcr.io/linuxserver/baseimage-alpine:edge
 
 # set labels
@@ -22,7 +45,9 @@ RUN \
     py3-pip \
     py3-lxml \
     mediainfo \
-    libarchive-tools && \
+    libarchive-tools \
+    ffmpeg \
+    libgomp && \
   echo "**** install pip packages ****" && \
   pip3 install --no-cache-dir --break-system-packages \
     tinydb \
@@ -44,6 +69,9 @@ RUN \
     pymediainfo && \
   echo "**** cleanup ****" && \
   rm -rf /tmp/*
+
+# copy whisper-cli from builder stage
+COPY --from=whisper-builder /whisper/build/bin/whisper-cli /usr/local/bin/whisper-cli
 
 # copy local files
 COPY root/ /
