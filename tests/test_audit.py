@@ -40,7 +40,6 @@ from couchpotato.core.plugins.audit import (
     normalize_language,
     whisper_verify_audio,
     _run_whisper_detection,
-    compute_file_fingerprint,
     _scan_single_file,
 )
 import json
