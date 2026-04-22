@@ -114,7 +114,9 @@ _SPECS = {
                                                     'keyfn': lambda d: str(d.get('category_id', ''))},
     'notification':       {'type': 'notification', 'sort': lambda d: d.get('time', 0)},
     'notification_unread':{'type': 'notification', 'filt': lambda d: not d.get('read'),
-                                                    'sort': lambda d: d.get('time', 0)},
+                                                     'sort': lambda d: d.get('time', 0)},
+    'file_knowledge':     {'type': 'file_knowledge', 'match': lambda d, k: d.get('current_fingerprint') == k,
+                                                     'keyfn': lambda d: d.get('current_fingerprint')},
 }
 
 

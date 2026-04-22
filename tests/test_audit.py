@@ -42,7 +42,6 @@ from couchpotato.core.plugins.audit import (
     _run_whisper_detection,
     _scan_single_file,
 )
-import json
 import os
 import re
 from unittest import mock
@@ -2352,140 +2351,191 @@ class TestComputeRecommendedActionUnknownAudio:
 
 
 class TestFileKnowledge:
-    """Tests for the unified file knowledge table (migration + helpers).
+    """Tests for the DB-backed file knowledge system.
 
-    Uses a lightweight mock of the Audit plugin to test persistence logic
-    without needing the full CouchPotato framework.
+    Uses a real TinyDB instance (temp file) and mocks get_db() to return it.
     """
 
-    class _MockPlugin:
-        """Minimal duck-type of Audit with just the file knowledge methods."""
-        file_knowledge = {}
-
-        def __init__(self, data_dir):
-            self._data_dir = data_dir
-
-        def _get_file_knowledge_path(self):
-            return os.path.join(self._data_dir, 'audit_file_knowledge.json')
-
-        def _get_ignored_path(self):
-            return os.path.join(self._data_dir, 'audit_ignored.json')
+    @staticmethod
+    def _make_db(tmp_path):
+        """Create a real CouchDB instance backed by a temp directory."""
+        from couchpotato.core.db import CouchDB
+        db_dir = str(tmp_path / 'db')
+        os.makedirs(db_dir, exist_ok=True)
+        db = CouchDB(db_dir)
+        db.create()
+        return db
 
     @staticmethod
-    def _bind(plugin):
-        """Bind the real Audit methods onto our mock instance."""
+    def _make_plugin():
+        """Create a minimal mock that has the Audit DB methods bound."""
         from couchpotato.core.plugins.audit import Audit
         import types
-        for name in ('_load_file_knowledge', '_save_file_knowledge',
-                     '_is_ignored'):
+
+        class _MockPlugin:
+            pass
+
+        p = _MockPlugin()
+        for name in ('_get_knowledge', '_get_or_create_knowledge',
+                     '_update_knowledge', '_is_ignored',
+                     '_get_knowledge_stats', '_upsert_scan_knowledge',
+                     '_prune_file_knowledge', '_ensure_original_hashes',
+                     '_post_modification_update'):
             method = getattr(Audit, name)
-            setattr(plugin, name, types.MethodType(method, plugin))
+            setattr(p, name, types.MethodType(method, p))
+        return p
 
-    def test_is_ignored_empty(self):
-        """Empty file_knowledge → nothing is ignored."""
-        p = self._MockPlugin('/tmp')
-        self._bind(p)
-        assert p._is_ignored('123:abc') is False
+    def test_get_knowledge_not_found(self, tmp_path):
+        """Missing fingerprint returns None."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            assert p._get_knowledge('nonexistent:fp') is None
 
-    def test_is_ignored_with_entry(self):
-        """Entry with 'ignored' key → is ignored."""
-        p = self._MockPlugin('/tmp')
-        self._bind(p)
-        p.file_knowledge = {'123:abc': {'ignored': {'reason': 'test'}}}
-        assert p._is_ignored('123:abc') is True
+    def test_get_or_create_creates_new(self, tmp_path):
+        """First call creates a new doc."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('100:aabbccdd', '/movies/a.mkv',
+                                             release_id='rel1', media_id='med1')
+            assert doc is not None
+            assert doc['_t'] == 'file_knowledge'
+            assert doc['original_fingerprint'] == '100:aabbccdd'
+            assert doc['current_fingerprint'] == '100:aabbccdd'
+            assert doc['release_id'] == 'rel1'
+            assert doc['media_id'] == 'med1'
+            assert doc['file_path'] == '/movies/a.mkv'
+            assert doc['crc32'] is None
+            assert doc['opensubtitles_hash'] is None
+            assert doc['ignored'] is None
+            assert doc['whisper'] is None
+            assert doc['modified'] is False
+            assert doc['modifications'] == []
 
-    def test_is_ignored_entry_without_ignored_key(self):
-        """Entry without 'ignored' key (e.g. only whisper data) → not ignored."""
-        p = self._MockPlugin('/tmp')
-        self._bind(p)
-        p.file_knowledge = {'123:abc': {'whisper': {'language': 'en'}}}
-        assert p._is_ignored('123:abc') is False
+    def test_get_or_create_returns_existing(self, tmp_path):
+        """Second call returns existing doc, updates last_seen."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc1 = p._get_or_create_knowledge('100:aabbccdd', '/movies/a.mkv')
+            first_seen = doc1['first_seen']
+            doc2 = p._get_or_create_knowledge('100:aabbccdd', '/movies/a.mkv')
+            assert doc2['_id'] == doc1['_id']
+            assert doc2['first_seen'] == first_seen
 
-    def test_save_and_load_roundtrip(self, tmp_path):
-        """Save then load preserves data."""
-        p = self._MockPlugin(str(tmp_path))
-        self._bind(p)
-        p.file_knowledge = {
-            '100:aabbccdd': {
-                'ignored': {'reason': 'test', 'ignored_at': '2025-01-01T00:00:00'},
-            },
-            '200:11223344': {
-                'whisper': {'language': 'en', 'confidence': 0.95},
-            },
-        }
-        p._save_file_knowledge()
+    def test_get_or_create_updates_path(self, tmp_path):
+        """If file_path changed (file moved), it's updated."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc1 = p._get_or_create_knowledge('100:aabbccdd', '/movies/a.mkv')
+            doc2 = p._get_or_create_knowledge('100:aabbccdd', '/movies/b.mkv')
+            assert doc2['file_path'] == '/movies/b.mkv'
+            assert doc2['_id'] == doc1['_id']
 
-        # Load into a fresh instance
-        p2 = self._MockPlugin(str(tmp_path))
-        self._bind(p2)
-        p2._load_file_knowledge()
-        assert p2.file_knowledge == p.file_knowledge
+    def test_get_or_create_backfills_ids(self, tmp_path):
+        """Missing release_id/media_id are backfilled on subsequent call."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc1 = p._get_or_create_knowledge('100:aabbccdd', '/movies/a.mkv')
+            assert doc1['release_id'] is None
+            doc2 = p._get_or_create_knowledge('100:aabbccdd', '/movies/a.mkv',
+                                              release_id='rel1', media_id='med1')
+            assert doc2['release_id'] == 'rel1'
+            assert doc2['media_id'] == 'med1'
 
-    def test_migrate_from_legacy_ignored(self, tmp_path):
-        """Legacy audit_ignored.json is migrated to file_knowledge format."""
-        legacy = {
-            '100:aabbccdd': {
-                'reason': 'not a movie',
-                'ignored_at': '2025-01-01T00:00:00',
-                'item_id': 'abc123',
-                'title': 'folder / file.mkv',
-            },
-            '200:11223344': {
-                'reason': '',
-                'ignored_at': '2025-01-02T00:00:00',
-                'item_id': 'def456',
-                'title': 'other / movie.mkv',
-            },
-        }
-        legacy_path = os.path.join(str(tmp_path), 'audit_ignored.json')
-        with open(legacy_path, 'w') as f:
-            json.dump(legacy, f)
+    def test_is_ignored_empty(self, tmp_path):
+        """No docs → nothing is ignored."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            assert p._is_ignored('123:abc') is False
 
-        p = self._MockPlugin(str(tmp_path))
-        self._bind(p)
-        p._load_file_knowledge()
+    def test_is_ignored_with_entry(self, tmp_path):
+        """Doc with ignored field → is ignored."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('123:abc', '/movies/a.mkv')
+            doc['ignored'] = {'reason': 'test'}
+            p._update_knowledge(doc)
+            assert p._is_ignored('123:abc') is True
 
-        # Verify migration
-        assert len(p.file_knowledge) == 2
-        assert p._is_ignored('100:aabbccdd') is True
-        assert p.file_knowledge['100:aabbccdd']['ignored']['reason'] == 'not a movie'
-        assert p._is_ignored('200:11223344') is True
+    def test_is_ignored_entry_without_ignored_key(self, tmp_path):
+        """Doc without ignored field (e.g. only whisper data) → not ignored."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('123:abc', '/movies/a.mkv')
+            doc['whisper'] = {'language': 'en'}
+            p._update_knowledge(doc)
+            assert p._is_ignored('123:abc') is False
 
-        # Legacy file renamed to .bak
-        assert not os.path.exists(legacy_path)
-        assert os.path.exists(legacy_path + '.bak')
+    def test_is_ignored_null_fingerprint(self, tmp_path):
+        """None fingerprint → not ignored (no crash)."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            assert p._is_ignored(None) is False
+            assert p._is_ignored('') is False
 
-        # New file created
-        assert os.path.exists(os.path.join(str(tmp_path), 'audit_file_knowledge.json'))
+    def test_get_knowledge_stats(self, tmp_path):
+        """Stats reflect actual DB contents."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            # Empty
+            stats = p._get_knowledge_stats()
+            assert stats['total'] == 0
 
-    def test_migrate_skipped_when_knowledge_exists(self, tmp_path):
-        """If file_knowledge file exists, legacy file is NOT read."""
-        # Write a legacy file
-        legacy_path = os.path.join(str(tmp_path), 'audit_ignored.json')
-        with open(legacy_path, 'w') as f:
-            json.dump({'old:fp': {'reason': 'old'}}, f)
+            # Add some docs
+            doc1 = p._get_or_create_knowledge('aaa:1111', '/a.mkv')
+            doc1['ignored'] = {'reason': ''}
+            p._update_knowledge(doc1)
 
-        # Write a knowledge file
-        knowledge_path = os.path.join(str(tmp_path), 'audit_file_knowledge.json')
-        with open(knowledge_path, 'w') as f:
-            json.dump({'new:fp': {'ignored': {'reason': 'new'}}}, f)
+            doc2 = p._get_or_create_knowledge('bbb:2222', '/b.mkv')
+            doc2['whisper'] = {'language': 'en'}
+            p._update_knowledge(doc2)
 
-        p = self._MockPlugin(str(tmp_path))
-        self._bind(p)
-        p._load_file_knowledge()
+            doc3 = p._get_or_create_knowledge('ccc:3333', '/c.mkv')
+            doc3['identification'] = {'method': 'srrdb_crc'}
+            p._update_knowledge(doc3)
 
-        # Should load from knowledge file, not legacy
-        assert 'new:fp' in p.file_knowledge
-        assert 'old:fp' not in p.file_knowledge
-        # Legacy file untouched (not renamed)
-        assert os.path.exists(legacy_path)
+            stats = p._get_knowledge_stats()
+            assert stats['total'] == 3
+            assert stats['ignored'] == 1
+            assert stats['whisper_verified'] == 1
+            assert stats['identified'] == 1
+            assert stats['modified'] == 0
 
-    def test_load_empty_state(self, tmp_path):
-        """No files at all → empty file_knowledge."""
-        p = self._MockPlugin(str(tmp_path))
-        self._bind(p)
-        p._load_file_knowledge()
-        assert p.file_knowledge == {}
+    def test_upsert_scan_knowledge(self, tmp_path):
+        """Upsert creates docs for all seen files."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            seen_fps = {
+                'aaa:1111': '/movies/a.mkv',
+                'bbb:2222': '/movies/b.mkv',
+                'ccc:3333': '/movies/c.mkv',
+            }
+            release_by_filepath = {
+                '/movies/a.mkv': {'release_id': 'r1', 'media_id': 'm1'},
+                '/movies/b.mkv': {'release_id': 'r2', 'media_id': 'm2'},
+            }
+            p._upsert_scan_knowledge(seen_fps, release_by_filepath, [])
+
+            # All three should exist
+            assert p._get_knowledge('aaa:1111') is not None
+            assert p._get_knowledge('bbb:2222') is not None
+            assert p._get_knowledge('ccc:3333') is not None
+
+            # Release info populated where available
+            doc_a = p._get_knowledge('aaa:1111')
+            assert doc_a['release_id'] == 'r1'
+            doc_c = p._get_knowledge('ccc:3333')
+            assert doc_c['release_id'] is None  # not in release_by_filepath
 
 
 class TestWhisperVerifyAudio:
@@ -2641,27 +2691,41 @@ class TestRunWhisperDetection:
 
 
 class TestApplyWhisperResult:
-    """Tests for _apply_whisper_result flag reclassification."""
+    """Tests for _apply_whisper_result flag reclassification.
 
-    class _MockPlugin:
-        file_knowledge = {}
-        last_report = None
-
-        def _save_file_knowledge(self):
-            pass
+    Uses a real TinyDB instance and mocks get_db() to provide DB-backed
+    file_knowledge lookups (_get_or_create_knowledge / _update_knowledge).
+    """
 
     @staticmethod
-    def _bind(plugin):
+    def _make_db(tmp_path):
+        from couchpotato.core.db import CouchDB
+        db_dir = str(tmp_path / 'db')
+        os.makedirs(db_dir, exist_ok=True)
+        db = CouchDB(db_dir)
+        db.create()
+        return db
+
+    @staticmethod
+    def _make_plugin():
         from couchpotato.core.plugins.audit import Audit
         import types
-        for name in ('_apply_whisper_result',):
-            method = getattr(Audit, name)
-            setattr(plugin, name, types.MethodType(method, plugin))
 
-    def test_english_detected_clears_flag(self):
+        class _MockPlugin:
+            last_report = None
+
+        p = _MockPlugin()
+        for name in ('_apply_whisper_result',
+                      '_get_knowledge', '_get_or_create_knowledge',
+                      '_update_knowledge'):
+            method = getattr(Audit, name)
+            setattr(p, name, types.MethodType(method, p))
+        return p
+
+    def test_english_detected_clears_flag(self, tmp_path):
         """Whisper detects English → unknown_audio flag removed, no new flags."""
-        p = self._MockPlugin()
-        self._bind(p)
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
 
         item = {
             'item_id': 'test123',
@@ -2674,17 +2738,18 @@ class TestApplyWhisperResult:
                   'tracks': [{'track_index': 0, 'tagged_language': '',
                               'language': 'en', 'confidence': 0.95}]}
 
-        p._apply_whisper_result(item, result)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
 
         checks = {f['check'] for f in item['flags']}
         assert 'unknown_audio' not in checks
         assert 'foreign_audio' not in checks
         assert item['flag_count'] == 0
 
-    def test_foreign_detected_reclassifies(self):
+    def test_foreign_detected_reclassifies(self, tmp_path):
         """Whisper detects French → unknown_audio replaced with foreign_audio."""
-        p = self._MockPlugin()
-        self._bind(p)
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
 
         item = {
             'item_id': 'test456',
@@ -2697,17 +2762,18 @@ class TestApplyWhisperResult:
                   'tracks': [{'track_index': 0, 'tagged_language': 'fr',
                               'language': 'fr', 'confidence': 0.92}]}
 
-        p._apply_whisper_result(item, result)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
 
         checks = {f['check'] for f in item['flags']}
         assert 'unknown_audio' not in checks
         assert 'foreign_audio' in checks
         assert 'Whisper' in item['flags'][0]['detail']
 
-    def test_stores_in_file_knowledge(self):
-        """Result is stored in file_knowledge table."""
-        p = self._MockPlugin()
-        self._bind(p)
+    def test_stores_in_file_knowledge(self, tmp_path):
+        """Result is stored in file_knowledge DB doc."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
 
         item = {
             'item_id': 'test789',
@@ -2721,18 +2787,20 @@ class TestApplyWhisperResult:
                               'language': 'en', 'confidence': 0.95,
                               'samples': [{'offset_pct': 50, 'language': 'en', 'confidence': 0.95}]}]}
 
-        p._apply_whisper_result(item, result)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
 
-        assert '300:eeff' in p.file_knowledge
-        whisper_data = p.file_knowledge['300:eeff']['whisper']
+            doc = p._get_knowledge('300:eeff')
+        assert doc is not None
+        whisper_data = doc['whisper']
         assert whisper_data['language'] == 'en'
         assert whisper_data['confidence'] == 0.95
         assert len(whisper_data['tracks']) == 1
 
-    def test_failed_detection_leaves_flags(self):
+    def test_failed_detection_leaves_flags(self, tmp_path):
         """Whisper returns None language → flags unchanged."""
-        p = self._MockPlugin()
-        self._bind(p)
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
 
         item = {
             'item_id': 'testfail',
@@ -2743,15 +2811,16 @@ class TestApplyWhisperResult:
         }
         result = {'language': None, 'confidence': 0.0, 'samples': []}
 
-        p._apply_whisper_result(item, result)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
 
         checks = {f['check'] for f in item['flags']}
         assert 'unknown_audio' in checks
 
-    def test_existing_foreign_audio_not_duplicated(self):
+    def test_existing_foreign_audio_not_duplicated(self, tmp_path):
         """Item with existing foreign_audio + verify → single foreign_audio flag."""
-        p = self._MockPlugin()
-        self._bind(p)
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
 
         item = {
             'item_id': 'testdedup',
@@ -2769,16 +2838,17 @@ class TestApplyWhisperResult:
                          'language': 'ja', 'confidence': 0.97, 'samples': []}],
         }
 
-        p._apply_whisper_result(item, result)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
 
         foreign_flags = [f for f in item['flags'] if f['check'] == 'foreign_audio']
         assert len(foreign_flags) == 1, 'Should have exactly one foreign_audio flag'
         assert 'Whisper' in foreign_flags[0]['detail']
 
-    def test_whisper_english_clears_foreign_audio(self):
+    def test_whisper_english_clears_foreign_audio(self, tmp_path):
         """Item with foreign_audio + whisper says English → flag removed."""
-        p = self._MockPlugin()
-        self._bind(p)
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
 
         item = {
             'item_id': 'testclear',
@@ -2796,7 +2866,8 @@ class TestApplyWhisperResult:
                          'language': 'en', 'confidence': 0.99, 'samples': []}],
         }
 
-        p._apply_whisper_result(item, result)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
 
         checks = {f['check'] for f in item['flags']}
         assert 'foreign_audio' not in checks
@@ -2814,7 +2885,7 @@ class TestSeenFingerprints:
     @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
                 return_value='12345:abcdef0123456789')
     def test_clean_file_adds_fingerprint(self, mock_fp, mock_meta, tmp_path):
-        """Clean (unflagged) files still add their fingerprint to the set."""
+        """Clean (unflagged) files still add their fingerprint to the dict."""
         f = tmp_path / 'Movie (2020) 1080p.mkv'
         f.write_bytes(b'\x00' * 100)
         mock_meta.return_value = {
@@ -2824,7 +2895,7 @@ class TestSeenFingerprints:
                 {'codec': 'AAC', 'channels': '2.0', 'language': 'en'}
             ],
         }
-        seen = set()
+        seen = {}
         result = _scan_single_file(
             str(f), folder_title='Movie', folder_year=2020,
             imdb_id='tt0000001', db_entry={'title': 'Movie', 'runtime': 120},
@@ -2834,12 +2905,13 @@ class TestSeenFingerprints:
         )
         assert result is None, 'File should be clean (no flags)'
         assert '12345:abcdef0123456789' in seen
+        assert seen['12345:abcdef0123456789'] == str(f)
 
     @mock.patch('couchpotato.core.plugins.audit.extract_file_meta')
     @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
                 return_value='99999:ffff000011112222')
     def test_flagged_file_adds_fingerprint(self, mock_fp, mock_meta, tmp_path):
-        """Flagged files also add their fingerprint to the set."""
+        """Flagged files also add their fingerprint to the dict."""
         f = tmp_path / 'Movie (2020) 1080p.mkv'
         f.write_bytes(b'\x00' * 100)
         mock_meta.return_value = {
@@ -2849,7 +2921,7 @@ class TestSeenFingerprints:
                 {'codec': 'AAC', 'channels': '2.0', 'language': 'fr'}
             ],
         }
-        seen = set()
+        seen = {}
         result = _scan_single_file(
             str(f), folder_title='Movie', folder_year=2020,
             imdb_id='tt0000001', db_entry={'title': 'Movie', 'runtime': 120},
@@ -2859,12 +2931,13 @@ class TestSeenFingerprints:
         )
         assert result is not None, 'File should be flagged (foreign audio)'
         assert '99999:ffff000011112222' in seen
+        assert seen['99999:ffff000011112222'] == str(f)
         assert result['file_fingerprint'] == '99999:ffff000011112222'
 
     @mock.patch('couchpotato.core.plugins.audit.extract_file_meta')
     @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
                 return_value='12345:abcdef0123456789')
-    def test_none_seen_set_is_safe(self, mock_fp, mock_meta, tmp_path):
+    def test_none_seen_dict_is_safe(self, mock_fp, mock_meta, tmp_path):
         """Passing seen_fingerprints=None doesn't crash."""
         f = tmp_path / 'Movie (2020) 1080p.mkv'
         f.write_bytes(b'\x00' * 100)
@@ -2891,75 +2964,184 @@ class TestSeenFingerprints:
 # ---------------------------------------------------------------------------
 
 class TestPruneFileKnowledge:
-    """Tests for _prune_file_knowledge."""
-
-    class _MockPlugin:
-        file_knowledge = {}
-        _saved = False
-
-        def _save_file_knowledge(self):
-            self._saved = True
+    """Tests for DB-backed _prune_file_knowledge."""
 
     @staticmethod
-    def _bind(plugin):
+    def _make_db(tmp_path):
+        from couchpotato.core.db import CouchDB
+        db_dir = str(tmp_path / 'db')
+        os.makedirs(db_dir, exist_ok=True)
+        db = CouchDB(db_dir)
+        db.create()
+        return db
+
+    @staticmethod
+    def _make_plugin():
         from couchpotato.core.plugins.audit import Audit
-        plugin._prune_file_knowledge = Audit._prune_file_knowledge.__get__(
-            plugin, type(plugin))
+        import types
 
-    def test_removes_stale_entries(self):
-        """Entries not in seen set are removed."""
-        p = self._MockPlugin()
-        self._bind(p)
-        p.file_knowledge = {
-            'aaa:1111': {'whisper': {'language': 'en'}},
-            'bbb:2222': {'ignored': {'reason': ''}},
-            'ccc:3333': {'whisper': {'language': 'fr'}},
-        }
-        seen = {'aaa:1111', 'ccc:3333'}
-        p._prune_file_knowledge(seen)
-        assert 'bbb:2222' not in p.file_knowledge
-        assert 'aaa:1111' in p.file_knowledge
-        assert 'ccc:3333' in p.file_knowledge
-        assert p._saved
+        class _MockPlugin:
+            pass
 
-    def test_no_stale_entries(self):
-        """When all entries are in seen set, nothing is removed."""
-        p = self._MockPlugin()
-        self._bind(p)
-        p.file_knowledge = {
-            'aaa:1111': {'whisper': {'language': 'en'}},
-        }
-        p._prune_file_knowledge({'aaa:1111', 'bbb:2222'})
-        assert 'aaa:1111' in p.file_knowledge
-        assert not p._saved  # no change, no save needed
+        p = _MockPlugin()
+        for name in ('_get_knowledge', '_get_or_create_knowledge',
+                     '_update_knowledge', '_prune_file_knowledge'):
+            method = getattr(Audit, name)
+            setattr(p, name, types.MethodType(method, p))
+        return p
 
-    def test_empty_knowledge(self):
-        """Empty knowledge table is a no-op."""
-        p = self._MockPlugin()
-        self._bind(p)
-        p.file_knowledge = {}
-        p._prune_file_knowledge({'aaa:1111'})
-        assert not p._saved
+    def test_removes_stale_entries(self, tmp_path):
+        """Entries not in seen dict are removed."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._get_or_create_knowledge('aaa:1111', '/a.mkv')
+            p._get_or_create_knowledge('bbb:2222', '/b.mkv')
+            p._get_or_create_knowledge('ccc:3333', '/c.mkv')
 
-    def test_empty_seen_set(self):
-        """Empty seen set is a no-op (safety: don't wipe everything)."""
-        p = self._MockPlugin()
-        self._bind(p)
-        p.file_knowledge = {
-            'aaa:1111': {'whisper': {'language': 'en'}},
-        }
-        p._prune_file_knowledge(set())
-        assert 'aaa:1111' in p.file_knowledge
-        assert not p._saved
+            seen = {'aaa:1111': '/a.mkv', 'ccc:3333': '/c.mkv'}
+            p._prune_file_knowledge(seen)
 
-    def test_all_stale(self):
+            assert p._get_knowledge('bbb:2222') is None
+            assert p._get_knowledge('aaa:1111') is not None
+            assert p._get_knowledge('ccc:3333') is not None
+
+    def test_no_stale_entries(self, tmp_path):
+        """When all entries are in seen dict, nothing is removed."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._get_or_create_knowledge('aaa:1111', '/a.mkv')
+
+            seen = {'aaa:1111': '/a.mkv', 'bbb:2222': '/b.mkv'}
+            p._prune_file_knowledge(seen)
+
+            assert p._get_knowledge('aaa:1111') is not None
+
+    def test_empty_knowledge(self, tmp_path):
+        """Empty DB is a no-op."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._prune_file_knowledge({'aaa:1111': '/a.mkv'})
+            # Should not raise
+
+    def test_empty_seen_dict(self, tmp_path):
+        """Empty seen dict is a no-op (safety: don't wipe everything)."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._get_or_create_knowledge('aaa:1111', '/a.mkv')
+            p._prune_file_knowledge({})
+            assert p._get_knowledge('aaa:1111') is not None
+
+    def test_all_stale(self, tmp_path):
         """All entries stale — all removed."""
-        p = self._MockPlugin()
-        self._bind(p)
-        p.file_knowledge = {
-            'aaa:1111': {'ignored': {'reason': ''}},
-            'bbb:2222': {'whisper': {'language': 'ja'}},
-        }
-        p._prune_file_knowledge({'ccc:3333', 'ddd:4444'})
-        assert len(p.file_knowledge) == 0
-        assert p._saved
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._get_or_create_knowledge('aaa:1111', '/a.mkv')
+            p._get_or_create_knowledge('bbb:2222', '/b.mkv')
+
+            seen = {'ccc:3333': '/c.mkv', 'ddd:4444': '/d.mkv'}
+            p._prune_file_knowledge(seen)
+
+            assert p._get_knowledge('aaa:1111') is None
+            assert p._get_knowledge('bbb:2222') is None
+
+
+class TestEnsureOriginalHashes:
+    """Tests for _ensure_original_hashes pre-modification guard."""
+
+    @staticmethod
+    def _make_db(tmp_path):
+        from couchpotato.core.db import CouchDB
+        db_dir = str(tmp_path / 'db')
+        os.makedirs(db_dir, exist_ok=True)
+        db = CouchDB(db_dir)
+        db.create()
+        return db
+
+    @staticmethod
+    def _make_plugin():
+        from couchpotato.core.plugins.audit import Audit
+        import types
+
+        class _MockPlugin:
+            pass
+
+        p = _MockPlugin()
+        for name in ('_get_knowledge', '_get_or_create_knowledge',
+                     '_update_knowledge', '_ensure_original_hashes',
+                     '_post_modification_update'):
+            method = getattr(Audit, name)
+            setattr(p, name, types.MethodType(method, p))
+        return p
+
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef0123456789')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_computes_missing_hashes(self, mock_crc, mock_os_hash, tmp_path):
+        """Computes CRC32 and OS hash when both are None."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('100:aabb', '/movies/a.mkv')
+            assert doc['crc32'] is None
+            assert doc['opensubtitles_hash'] is None
+
+            p._ensure_original_hashes(doc, '/movies/a.mkv')
+
+            # Verify hashes stored
+            refreshed = p._get_knowledge('100:aabb')
+            assert refreshed['crc32'] == 'DEADBEEF'
+            assert refreshed['opensubtitles_hash'] == 'abcdef0123456789'
+            mock_crc.assert_called_once_with('/movies/a.mkv')
+            mock_os_hash.assert_called_once_with('/movies/a.mkv')
+
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32')
+    def test_skips_when_already_present(self, mock_crc, mock_os_hash, tmp_path):
+        """No-op when both hashes already exist."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('100:aabb', '/movies/a.mkv')
+            doc['crc32'] = 'EXISTING'
+            doc['opensubtitles_hash'] = 'EXISTING_HASH'
+            p._update_knowledge(doc)
+
+            p._ensure_original_hashes(doc, '/movies/a.mkv')
+
+            mock_crc.assert_not_called()
+            mock_os_hash.assert_not_called()
+
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:newfingerprint')
+    def test_post_modification_update(self, mock_fp, tmp_path):
+        """After modification, current_fingerprint changes, original stays."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('100:aabb', '/movies/a.mkv')
+            doc['crc32'] = 'DEADBEEF'
+            p._update_knowledge(doc)
+
+            p._post_modification_update(doc, '/movies/a.mkv',
+                                        'relabel_audio', 'Track 0: de -> en')
+
+            # Lookup by NEW fingerprint should work
+            updated = p._get_knowledge('999:newfingerprint')
+            assert updated is not None
+            assert updated['original_fingerprint'] == '100:aabb'
+            assert updated['current_fingerprint'] == '999:newfingerprint'
+            assert updated['modified'] is True
+            assert len(updated['modifications']) == 1
+            assert updated['modifications'][0]['type'] == 'relabel_audio'
+            # Original hash preserved
+            assert updated['crc32'] == 'DEADBEEF'
+
+            # Old fingerprint no longer resolves
+            old = p._get_knowledge('100:aabb')
+            assert old is None

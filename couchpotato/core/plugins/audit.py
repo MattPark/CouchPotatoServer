@@ -64,10 +64,12 @@ except ImportError:
 
 # Plugin integration — only available when running inside CouchPotato
 try:
+    from couchpotato import get_db
     from couchpotato.api import addApiView
     from couchpotato.core.event import addEvent, fireEvent, fireEventAsync
     from couchpotato.core.logger import CPLog
     from couchpotato.core.plugins.base import Plugin
+    from couchpotato.core.db import RecordNotFound
     from couchpotato.environment import Env
     _CP_AVAILABLE = True
 except ImportError:
@@ -278,12 +280,14 @@ def load_cp_database(db_path):
         media_by_imdb: dict mapping IMDB ID → {title, year, runtime, _id}
         files_by_media_id: dict mapping media _id → list of file paths
         media_by_title: dict mapping (normalized_title, year) → {title, year, runtime, _id, imdb_id}
+        release_by_filepath: dict mapping file path → {release_id, media_id}
     """
     with open(db_path, 'r') as f:
         data = json.load(f).get('_default', {})
 
     media_by_imdb = {}
     files_by_media_id = {}
+    release_by_filepath = {}
 
     # First pass: collect media records
     for doc in data.values():
@@ -302,9 +306,15 @@ def load_cp_database(db_path):
     for doc in data.values():
         if doc.get('_t') == 'release' and doc.get('status') == 'done':
             media_id = doc.get('media_id', '')
+            release_id = doc.get('_id', '')
             movie_files = doc.get('files', {}).get('movie', [])
             if media_id and movie_files:
                 files_by_media_id.setdefault(media_id, []).extend(movie_files)
+                for fp in movie_files:
+                    release_by_filepath[fp] = {
+                        'release_id': release_id,
+                        'media_id': media_id,
+                    }
 
     # Build title+year index for IMDB enrichment
     media_by_title = {}
@@ -318,7 +328,7 @@ def load_cp_database(db_path):
             'imdb_id': imdb_id,
         }
 
-    return media_by_imdb, files_by_media_id, media_by_title
+    return media_by_imdb, files_by_media_id, media_by_title, release_by_filepath
 
 
 # ---------------------------------------------------------------------------
@@ -2582,7 +2592,7 @@ def lookup_imdb_id(imdb_id, db_path=None):
     # Strategy 1: local CP database
     if db_path:
         try:
-            media_by_imdb, _, _ = load_cp_database(db_path)
+            media_by_imdb, _, _, _ = load_cp_database(db_path)
             if imdb_id in media_by_imdb:
                 entry = media_by_imdb[imdb_id]
                 return {
@@ -2904,10 +2914,10 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
         flags.append(flag)
 
     # Compute fingerprint for all files (clean or flagged) so that
-    # file_knowledge cleanup can detect orphaned entries after a scan.
+    # file_knowledge records can be created/updated and stale entries pruned.
     fingerprint = compute_file_fingerprint(filepath)
     if seen_fingerprints is not None and fingerprint:
-        seen_fingerprints.add(fingerprint)
+        seen_fingerprints[fingerprint] = filepath
 
     if not flags:
         return None
@@ -3483,7 +3493,7 @@ def scan_library(movies_dir, db_path, scan_path=None, full=False,
         dict with scan results
     """
     _log_info('Loading CP database from %s...' % db_path)
-    media_by_imdb, files_by_media_id, media_by_title = load_cp_database(db_path)
+    media_by_imdb, files_by_media_id, media_by_title, release_by_filepath = load_cp_database(db_path)
     _log_info('Loaded %s movies from database' % len(media_by_imdb))
 
     # Read renamer template once for template conformance check
@@ -3517,7 +3527,7 @@ def scan_library(movies_dir, db_path, scan_path=None, full=False,
     flagged = []
     scanned = 0
     errors = 0
-    seen_fingerprints = set()
+    seen_fingerprints = {}  # fingerprint → filepath, for DB upsert + pruning
     lock = threading.Lock()
 
     # Clamp workers to sane range
@@ -3646,6 +3656,7 @@ def scan_library(movies_dir, db_path, scan_path=None, full=False,
         'cancelled': was_cancelled,
         'flagged': flagged,
         'seen_fingerprints': seen_fingerprints,
+        'release_by_filepath': release_by_filepath,
     }
 
 
@@ -4594,7 +4605,6 @@ class Audit(Plugin if _CP_AVAILABLE else object):
     in_progress = False
     last_report = None
     _cancel = [False]   # mutable list so the scan loop can observe changes
-    file_knowledge = {} # fingerprint -> {ignored: {...}, whisper: {...}, ...}
 
     # Fix progress tracking
     fix_in_progress = False
@@ -4743,87 +4753,226 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         data_dir = Env.get('data_dir')
         return os.path.join(data_dir, 'audit_actions.jsonl')
 
-    def _get_ignored_path(self):
-        """Get the path to the legacy ignored items file (for migration)."""
-        data_dir = Env.get('data_dir')
-        return os.path.join(data_dir, 'audit_ignored.json')
+    # ------------------------------------------------------------------
+    # File knowledge — DB-backed (file_knowledge documents in TinyDB)
+    # ------------------------------------------------------------------
 
-    def _get_file_knowledge_path(self):
-        """Get the path to the unified file knowledge table."""
-        data_dir = Env.get('data_dir')
-        return os.path.join(data_dir, 'audit_file_knowledge.json')
+    def _get_knowledge(self, fingerprint):
+        """Look up a file_knowledge doc by current_fingerprint.
 
-    def _load_file_knowledge(self):
-        """Load the unified file knowledge table from disk.
-
-        On first run, migrates the legacy audit_ignored.json into the new
-        format and renames the old file to .bak.
+        Returns the doc dict, or None if not found.
         """
-        path = self._get_file_knowledge_path()
-
-        if os.path.isfile(path):
-            try:
-                with open(path, 'r') as f:
-                    self.file_knowledge = json.load(f)
-                n_ignored = sum(1 for v in self.file_knowledge.values()
-                                if 'ignored' in v)
-                log.info('Loaded file knowledge table (%s entries, %s ignored) from %s',
-                         (len(self.file_knowledge), n_ignored, path))
-            except Exception as e:
-                log.error('Failed to load file knowledge table: %s', (e,))
-                self.file_knowledge = {}
-            return
-
-        # Migrate from legacy audit_ignored.json if it exists
-        legacy_path = self._get_ignored_path()
-        if os.path.isfile(legacy_path):
-            try:
-                with open(legacy_path, 'r') as f:
-                    old_ignored = json.load(f)
-                self.file_knowledge = {}
-                for fp, info in old_ignored.items():
-                    self.file_knowledge[fp] = {'ignored': info}
-                self._save_file_knowledge()
-                # Rename old file so migration only happens once
-                os.rename(legacy_path, legacy_path + '.bak')
-                log.info('Migrated %s ignored items from %s to file knowledge table',
-                         (len(old_ignored), legacy_path))
-            except Exception as e:
-                log.error('Failed to migrate legacy ignored file: %s', (e,))
-                self.file_knowledge = {}
-        else:
-            self.file_knowledge = {}
-
-    def _save_file_knowledge(self):
-        """Persist the unified file knowledge table to disk."""
-        path = self._get_file_knowledge_path()
+        if not fingerprint:
+            return None
         try:
-            tmp_path = path + '.tmp'
-            with open(tmp_path, 'w') as f:
-                json.dump(self.file_knowledge, f)
-            os.replace(tmp_path, path)
-        except Exception as e:
-            log.error('Failed to save file knowledge table: %s', (e,))
+            db = get_db()
+            result = db.get('file_knowledge', fingerprint, with_doc=True)
+            return result['doc']
+        except RecordNotFound:
+            return None
+
+    def _get_or_create_knowledge(self, fingerprint, file_path,
+                                 release_id=None, media_id=None):
+        """Get existing or create new file_knowledge doc.
+
+        On existing docs, updates last_seen and file_path if changed.
+        On new docs, sets original_fingerprint = current_fingerprint.
+        Returns the doc dict.
+        """
+        if not fingerprint:
+            return None
+        doc = self._get_knowledge(fingerprint)
+        now = time.strftime('%Y-%m-%dT%H:%M:%S')
+        if doc:
+            changed = False
+            if doc.get('file_path') != file_path:
+                doc['file_path'] = file_path
+                changed = True
+            if doc.get('last_seen') != now:
+                doc['last_seen'] = now
+                changed = True
+            # Backfill release/media IDs if they were missing
+            if release_id and not doc.get('release_id'):
+                doc['release_id'] = release_id
+                changed = True
+            if media_id and not doc.get('media_id'):
+                doc['media_id'] = media_id
+                changed = True
+            if changed:
+                self._update_knowledge(doc)
+            return doc
+        else:
+            doc = {
+                '_t': 'file_knowledge',
+                'release_id': release_id,
+                'media_id': media_id,
+                'file_path': file_path,
+                'original_fingerprint': fingerprint,
+                'current_fingerprint': fingerprint,
+                'crc32': None,
+                'opensubtitles_hash': None,
+                'srrdb': None,
+                'opensubtitles': None,
+                'identification': None,
+                'ignored': None,
+                'whisper': None,
+                'modified': False,
+                'modifications': [],
+                'first_seen': now,
+                'last_seen': now,
+            }
+            return get_db().insert(doc)
+
+    def _update_knowledge(self, doc):
+        """Update a file_knowledge doc in the DB."""
+        try:
+            get_db().update(doc)
+        except RecordNotFound:
+            log.error('Failed to update file_knowledge doc: %s not found',
+                      (doc.get('_id'),))
 
     def _is_ignored(self, fingerprint):
-        """Check whether a file fingerprint is in the ignored set."""
-        entry = self.file_knowledge.get(fingerprint)
-        return entry is not None and 'ignored' in entry
+        """Check whether a file fingerprint is marked as ignored."""
+        doc = self._get_knowledge(fingerprint)
+        return doc is not None and doc.get('ignored') is not None
+
+    def _get_knowledge_stats(self):
+        """Return summary stats about file_knowledge docs in the DB."""
+        try:
+            db = get_db()
+            all_docs = db._docs_for_type('file_knowledge')
+            total = len(all_docs)
+            n_ignored = sum(1 for d in all_docs.values()
+                           if d.get('ignored') is not None)
+            n_whisper = sum(1 for d in all_docs.values()
+                           if d.get('whisper') is not None)
+            n_identified = sum(1 for d in all_docs.values()
+                               if d.get('identification') is not None)
+            n_modified = sum(1 for d in all_docs.values()
+                             if d.get('modified'))
+            return {
+                'total': total,
+                'ignored': n_ignored,
+                'whisper_verified': n_whisper,
+                'identified': n_identified,
+                'modified': n_modified,
+            }
+        except Exception:
+            return {'total': 0, 'ignored': 0, 'whisper_verified': 0,
+                    'identified': 0, 'modified': 0}
+
+    def _upsert_scan_knowledge(self, seen_fingerprints, release_by_filepath,
+                               flagged_items):
+        """Create/update file_knowledge DB docs for all scanned files.
+
+        Called after a scan completes.  Iterates both clean and flagged files
+        (via seen_fingerprints dict) and ensures each has a knowledge record.
+
+        Args:
+            seen_fingerprints: dict mapping fingerprint → file_path (all files)
+            release_by_filepath: dict mapping file_path → {release_id, media_id}
+            flagged_items: list of flagged item dicts (for enriching knowledge)
+        """
+        created = 0
+        updated = 0
+        for fingerprint, file_path in seen_fingerprints.items():
+            rel_info = release_by_filepath.get(file_path, {})
+            release_id = rel_info.get('release_id')
+            media_id = rel_info.get('media_id')
+            doc = self._get_knowledge(fingerprint)
+            if doc:
+                updated += 1
+            else:
+                created += 1
+            self._get_or_create_knowledge(
+                fingerprint, file_path,
+                release_id=release_id,
+                media_id=media_id,
+            )
+        log.info('File knowledge upsert: %s created, %s updated (%s total)',
+                 (created, updated, created + updated))
 
     def _prune_file_knowledge(self, seen_fingerprints):
-        """Remove file_knowledge entries whose fingerprints were not seen
+        """Remove file_knowledge DB docs whose fingerprints were not seen
         during the last complete scan.  This cleans up entries for files
         that have been deleted, re-encoded, or replaced."""
-        if not seen_fingerprints or not self.file_knowledge:
+        if not seen_fingerprints:
             return
-        stale = set(self.file_knowledge.keys()) - seen_fingerprints
+        db = get_db()
+        all_docs = db._docs_for_type('file_knowledge')
+        if not all_docs:
+            return
+        seen_set = set(seen_fingerprints)
+        stale = []
+        for _id, doc in all_docs.items():
+            fp = doc.get('current_fingerprint')
+            if fp and fp not in seen_set:
+                stale.append(doc)
         if not stale:
             log.info('File knowledge cleanup: no stale entries found')
             return
-        for fp in stale:
-            del self.file_knowledge[fp]
-        self._save_file_knowledge()
-        log.info('File knowledge cleanup: removed %s stale entries', (len(stale),))
+        for doc in stale:
+            try:
+                db.delete(doc)
+            except RecordNotFound:
+                pass
+        log.info('File knowledge cleanup: removed %s stale entries',
+                 (len(stale),))
+
+    def _ensure_original_hashes(self, knowledge_doc, file_path):
+        """Ensure CRC32 and OpenSubtitles hash are stored before file modification.
+
+        Computes any missing hashes from the CURRENT file (which must still be
+        the original if modified==False).  Must be called BEFORE any file
+        modification.
+
+        Returns the updated doc.
+        """
+        if not knowledge_doc or not file_path:
+            return knowledge_doc
+        changed = False
+        if knowledge_doc.get('crc32') is None:
+            log.info('Computing CRC32 for %s (pre-modification guard)...',
+                     (os.path.basename(file_path),))
+            crc_hex = compute_crc32(file_path)
+            knowledge_doc['crc32'] = crc_hex
+            changed = True
+        if knowledge_doc.get('opensubtitles_hash') is None:
+            log.info('Computing OpenSubtitles hash for %s (pre-modification guard)...',
+                     (os.path.basename(file_path),))
+            os_hash = compute_opensubtitles_hash(file_path)
+            knowledge_doc['opensubtitles_hash'] = os_hash
+            changed = True
+        if changed:
+            self._update_knowledge(knowledge_doc)
+        return knowledge_doc
+
+    def _post_modification_update(self, knowledge_doc, file_path,
+                                  mod_type, detail=''):
+        """Update file_knowledge after modifying a file.
+
+        Computes a new fingerprint for the modified file and updates
+        current_fingerprint while preserving original_fingerprint and
+        the original hashes (CRC32, OpenSubtitles hash).
+
+        Args:
+            knowledge_doc: The file_knowledge doc (must have original hashes)
+            file_path: Path to the modified file
+            mod_type: Type of modification (e.g. 'relabel_audio')
+            detail: Human-readable detail (e.g. 'Track 0: de -> en')
+        """
+        new_fp = compute_file_fingerprint(file_path)
+        knowledge_doc['current_fingerprint'] = new_fp
+        knowledge_doc['modified'] = True
+        knowledge_doc.setdefault('modifications', []).append({
+            'type': mod_type,
+            'date': time.strftime('%Y-%m-%dT%H:%M:%S'),
+            'detail': detail,
+        })
+        self._update_knowledge(knowledge_doc)
+        log.info('Updated fingerprint after %s: %s -> %s',
+                 (mod_type, knowledge_doc.get('original_fingerprint', '?')[:20],
+                  new_fp[:20] if new_fp else '?'))
 
     def _save_results(self):
         """Persist last_report to disk."""
@@ -4948,8 +5097,12 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         # Migrate: separate delete_duplicate from delete_wrong for existing results
         self._migrate_duplicate_actions()
 
-        # Load file knowledge table (migrates legacy audit_ignored.json)
-        self._load_file_knowledge()
+        # Log file knowledge stats from DB
+        stats = self._get_knowledge_stats()
+        if stats['total']:
+            log.info('File knowledge: %s entries (%s ignored, %s whisper, %s identified)',
+                     (stats['total'], stats['ignored'], stats['whisper_verified'],
+                      stats['identified']))
 
     def _migrate_duplicate_actions(self):
         """One-time migration: change recommended_action from delete_wrong to
@@ -5026,11 +5179,19 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             self.last_report['scan_timestamp'] = time.strftime(
                 '%Y-%m-%dT%H:%M:%S'
             )
-            # Extract fingerprints before saving (set is not JSON-serializable
-            # and not needed on disk)
-            seen_fps = self.last_report.pop('seen_fingerprints', set())
+            # Extract fingerprints and release mapping before saving
+            # (dict is not JSON-serializable and mapping not needed on disk)
+            seen_fps = self.last_report.pop('seen_fingerprints', {})
+            release_by_filepath = self.last_report.pop('release_by_filepath', {})
             # Persist to disk
             self._save_results()
+
+            # Upsert file_knowledge DB docs for all scanned files
+            if seen_fps:
+                self._upsert_scan_knowledge(
+                    seen_fps, release_by_filepath,
+                    self.last_report.get('flagged', []),
+                )
 
             # Prune stale file_knowledge entries after a complete full-library
             # scan (not cancelled, not a single-folder scan).
@@ -5054,10 +5215,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         items = self.last_report.get('flagged', [])
 
-        # Filter out ignored items (by fingerprint in file knowledge table)
-        if self.file_knowledge:
-            items = [i for i in items
-                     if not self._is_ignored(i.get('file_fingerprint'))]
+        # Filter out ignored items (by fingerprint in file knowledge DB)
+        items = [i for i in items
+                 if not self._is_ignored(i.get('file_fingerprint'))]
 
         # Filter by fixed status
         if filter_fixed == 'true':
@@ -5242,7 +5402,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         total_ignored = 0
         flagged = []
         for item in all_flagged:
-            if self.file_knowledge and self._is_ignored(item.get('file_fingerprint')):
+            if self._is_ignored(item.get('file_fingerprint')):
                 total_ignored += 1
             else:
                 flagged.append(item)
@@ -5306,6 +5466,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                     'unidentified': ident_unidentified,
                      'skipped': ident_skipped,
                 },
+                'file_knowledge': self._get_knowledge_stats(),
             },
         }
 
@@ -5328,24 +5489,25 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             if not fingerprint:
                 return {'success': False, 'error': 'Could not compute fingerprint'}
 
-        entry = self.file_knowledge.setdefault(fingerprint, {})
-        entry['ignored'] = {
+        doc = self._get_or_create_knowledge(fingerprint, item.get('file_path', ''))
+        if not doc:
+            return {'success': False, 'error': 'Failed to create knowledge record'}
+        doc['ignored'] = {
             'reason': reason or '',
             'ignored_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
             'item_id': item_id,
             'title': '%s / %s' % (item.get('folder', ''), item.get('file', '')),
         }
-        self._save_file_knowledge()
+        self._update_knowledge(doc)
 
         log.info('Ignored audit item %s (fingerprint %s): %s',
                  (item_id, fingerprint, item.get('folder', '')))
 
-        n_ignored = sum(1 for v in self.file_knowledge.values()
-                        if 'ignored' in v)
+        stats = self._get_knowledge_stats()
         return {
             'success': True,
             'fingerprint': fingerprint,
-            'total_ignored': n_ignored,
+            'total_ignored': stats['ignored'],
         }
 
     def unignoreView(self, fingerprint=None, **kwargs):
@@ -5353,40 +5515,42 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         if not fingerprint:
             return {'success': False, 'error': 'fingerprint is required'}
 
-        entry = self.file_knowledge.get(fingerprint)
-        if not entry or 'ignored' not in entry:
+        doc = self._get_knowledge(fingerprint)
+        if not doc or doc.get('ignored') is None:
             return {'success': False, 'error': 'Fingerprint not found in ignored list'}
 
-        removed = entry.pop('ignored')
-        # Clean up entry if no other knowledge remains
-        if not entry:
-            del self.file_knowledge[fingerprint]
-        self._save_file_knowledge()
+        removed = doc.get('ignored', {})
+        doc['ignored'] = None
+        self._update_knowledge(doc)
 
         log.info('Un-ignored audit item (fingerprint %s): %s',
                  (fingerprint, removed.get('title', '')))
 
-        n_ignored = sum(1 for v in self.file_knowledge.values()
-                        if 'ignored' in v)
+        stats = self._get_knowledge_stats()
         return {
             'success': True,
-            'total_ignored': n_ignored,
+            'total_ignored': stats['ignored'],
         }
 
     def ignoredView(self, **kwargs):
         """API handler: list all currently ignored items."""
         items = []
-        for fp, entry in self.file_knowledge.items():
-            info = entry.get('ignored')
-            if not info:
-                continue
-            items.append({
-                'fingerprint': fp,
-                'title': info.get('title', ''),
-                'reason': info.get('reason', ''),
-                'ignored_at': info.get('ignored_at', ''),
-                'item_id': info.get('item_id', ''),
-            })
+        try:
+            db = get_db()
+            all_docs = db._docs_for_type('file_knowledge')
+            for _id, doc in all_docs.items():
+                info = doc.get('ignored')
+                if not info:
+                    continue
+                items.append({
+                    'fingerprint': doc.get('current_fingerprint', ''),
+                    'title': info.get('title', ''),
+                    'reason': info.get('reason', ''),
+                    'ignored_at': info.get('ignored_at', ''),
+                    'item_id': info.get('item_id', ''),
+                })
+        except Exception as e:
+            log.error('Failed to list ignored items: %s', (e,))
         items.sort(key=lambda x: x.get('ignored_at', ''), reverse=True)
         return {
             'ignored': items,
@@ -5404,18 +5568,20 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         the foreign/unknown flags are cleared.  Otherwise, a foreign_audio
         flag is added with per-track detail.
 
-        Stores the result in file_knowledge for future reference.
+        Stores the result in the file_knowledge DB doc for future reference.
         """
         fingerprint = item.get('file_fingerprint')
         if fingerprint:
-            entry = self.file_knowledge.setdefault(fingerprint, {})
-            entry['whisper'] = {
-                'language': result.get('language'),
-                'confidence': result.get('confidence', 0.0),
-                'verified_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                'tracks': result.get('tracks', []),
-            }
-            self._save_file_knowledge()
+            doc = self._get_or_create_knowledge(fingerprint,
+                                                item.get('file_path', ''))
+            if doc:
+                doc['whisper'] = {
+                    'language': result.get('language'),
+                    'confidence': result.get('confidence', 0.0),
+                    'verified_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'tracks': result.get('tracks', []),
+                }
+                self._update_knowledge(doc)
 
         tracks = result.get('tracks', [])
         if not tracks:
@@ -5477,10 +5643,11 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         if not file_path or not os.path.isfile(file_path):
             return {'success': False, 'error': 'File not accessible: %s' % file_path}
 
-        # Check if already verified via file_knowledge
+        # Check if already verified via file_knowledge DB
         fingerprint = item.get('file_fingerprint')
         if fingerprint:
-            cached = self.file_knowledge.get(fingerprint, {}).get('whisper')
+            doc = self._get_knowledge(fingerprint)
+            cached = doc.get('whisper') if doc else None
             if cached and cached.get('language'):
                 return {
                     'success': True,
@@ -5581,7 +5748,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             fingerprint = item.get('file_fingerprint')
             cached = None
             if fingerprint:
-                cached = self.file_knowledge.get(fingerprint, {}).get('whisper')
+                doc = self._get_knowledge(fingerprint)
+                cached = doc.get('whisper') if doc else None
 
             if cached and cached.get('language'):
                 # Already verified — apply cached result
@@ -5832,7 +6000,6 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                         'new_status': new_db_status, 'changed': False}
 
             # Update the movie status directly via get_db
-            from couchpotato import get_db
             db = get_db()
             m = db.get('id', media_id)
             m['status'] = new_db_status
