@@ -2795,7 +2795,8 @@ def detect_duplicates(file_results):
 def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
                       expected_runtime, renamer_template, renamer_replace_doubles,
                       renamer_separator, full=False, force_full=False,
-                      cd_number=None, seen_fingerprints=None):
+                      cd_number=None, seen_fingerprints=None,
+                      knowledge_callback=None):
     """Scan one video file and return an audit result dict (or None if clean).
 
     This is the core per-file scanning logic extracted from scan_movie_folder().
@@ -2922,6 +2923,8 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
     fingerprint = compute_file_fingerprint(filepath)
     if seen_fingerprints is not None and fingerprint:
         seen_fingerprints[fingerprint] = filepath
+    if knowledge_callback and fingerprint:
+        knowledge_callback(fingerprint, filepath)
 
     if not flags:
         return None
@@ -3004,7 +3007,7 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
 def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
                    expected_runtime, renamer_template, renamer_replace_doubles,
                    renamer_separator, full=False, force_full=False,
-                   seen_fingerprints=None):
+                   seen_fingerprints=None, knowledge_callback=None):
     """Scan a multi-CD folder (all files have sequential cd tags).
 
     Scans each CD file individually with its cd_number, then aggregates
@@ -3033,6 +3036,7 @@ def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
             full=full, force_full=force_full,
             cd_number=cd_num,
             seen_fingerprints=seen_fingerprints,
+            knowledge_callback=knowledge_callback,
         )
         per_file_results.append((cd_num, filepath, result))
 
@@ -3161,7 +3165,8 @@ def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
 def _scan_variants(video_files, classification, folder_title, folder_year,
                    imdb_id, db_entry, expected_runtime, renamer_template,
                    renamer_replace_doubles, renamer_separator, full=False,
-                   force_full=False, seen_fingerprints=None):
+                   force_full=False, seen_fingerprints=None,
+                   knowledge_callback=None):
     """Scan a folder with multiple file variants (editions, qualities, dupes).
 
     When the folder contains a CD sub-group (sequential cd1..cdN alongside
@@ -3192,6 +3197,7 @@ def _scan_variants(video_files, classification, folder_title, folder_year,
         renamer_separator=renamer_separator,
         full=full,
         force_full=force_full,
+        knowledge_callback=knowledge_callback,
     )
 
     has_cd_subgroup = classification.get('has_cd_subgroup', False)
@@ -3387,7 +3393,8 @@ def _promote_clean_to_full(r, imdb_id, expected_runtime, folder_title,
 def scan_movie_folder(folder_path, folder_name, media_by_imdb,
                       full=False, force_full=False, media_by_title=None,
                       renamer_template=None, renamer_replace_doubles=True,
-                      renamer_separator='', seen_fingerprints=None):
+                      renamer_separator='', seen_fingerprints=None,
+                      knowledge_callback=None):
     """Scan a single movie folder and return audit results.
 
     Handles single-file, multi-CD, and variant (multi-file) folders.
@@ -3449,6 +3456,7 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
         renamer_separator=renamer_separator,
         full=full,
         force_full=force_full,
+        knowledge_callback=knowledge_callback,
     )
 
     # Classify files and dispatch
@@ -3477,7 +3485,8 @@ _SKIP = object()
 
 def scan_library(movies_dir, db_path, scan_path=None, full=False,
                  force_full=False, workers=DEFAULT_WORKERS,
-                 progress_callback=None, cancel_flag=None):
+                 progress_callback=None, cancel_flag=None,
+                 knowledge_callback=None):
     """Scan movie library for mislabeled files.
 
     Args:
@@ -3499,6 +3508,18 @@ def scan_library(movies_dir, db_path, scan_path=None, full=False,
     _log_info('Loading CP database from %s...' % db_path)
     media_by_imdb, files_by_media_id, media_by_title, release_by_filepath = load_cp_database(db_path)
     _log_info('Loaded %s movies from database' % len(media_by_imdb))
+
+    # Wrap knowledge_callback to inject release/media IDs from DB mapping
+    if knowledge_callback:
+        _raw_kb_callback = knowledge_callback
+
+        def _kb_callback(fingerprint, filepath):
+            rel_info = release_by_filepath.get(filepath, {})
+            _raw_kb_callback(fingerprint, filepath,
+                             release_id=rel_info.get('release_id'),
+                             media_id=rel_info.get('media_id'))
+
+        knowledge_callback = _kb_callback
 
     # Read renamer template once for template conformance check
     renamer_template = None
@@ -3557,6 +3578,7 @@ def scan_library(movies_dir, db_path, scan_path=None, full=False,
                 renamer_replace_doubles=renamer_replace_doubles,
                 renamer_separator=renamer_separator,
                 seen_fingerprints=seen_fingerprints,
+                knowledge_callback=knowledge_callback,
             )
             return result, False
         except Exception as e:
@@ -4869,8 +4891,10 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                                flagged_items):
         """Create/update file_knowledge DB docs for all scanned files.
 
-        Called after a scan completes.  Iterates both clean and flagged files
-        (via seen_fingerprints dict) and ensures each has a knowledge record.
+        NOTE: No longer called during normal scan flow — knowledge records are
+        now created incrementally via the knowledge_callback passed through the
+        scan pipeline.  This method is retained as a utility for manual
+        re-upserts or debugging.
 
         Args:
             seen_fingerprints: dict mapping fingerprint → file_path (all files)
@@ -5177,6 +5201,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 workers=workers,
                 progress_callback=self._on_progress,
                 cancel_flag=self._cancel,
+                knowledge_callback=self._get_or_create_knowledge,
             )
             self.last_report = report
             self.last_report['completed_at'] = time.time()
@@ -5186,16 +5211,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             # Extract fingerprints and release mapping before saving
             # (dict is not JSON-serializable and mapping not needed on disk)
             seen_fps = self.last_report.pop('seen_fingerprints', {})
-            release_by_filepath = self.last_report.pop('release_by_filepath', {})
+            self.last_report.pop('release_by_filepath', None)
             # Persist to disk
             self._save_results()
-
-            # Upsert file_knowledge DB docs for all scanned files
-            if seen_fps:
-                self._upsert_scan_knowledge(
-                    seen_fps, release_by_filepath,
-                    self.last_report.get('flagged', []),
-                )
 
             # Prune stale file_knowledge entries after a complete full-library
             # scan (not cancelled, not a single-folder scan).
