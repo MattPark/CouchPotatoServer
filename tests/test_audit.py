@@ -2381,7 +2381,7 @@ class TestFileKnowledge:
                      '_update_knowledge', '_is_ignored',
                      '_get_knowledge_stats', '_upsert_scan_knowledge',
                      '_prune_file_knowledge', '_ensure_original_hashes',
-                     '_post_modification_update'):
+                     '_post_modification_update', '_cache_identification'):
             method = getattr(Audit, name)
             setattr(p, name, types.MethodType(method, p))
         return p
@@ -3131,7 +3131,7 @@ class TestEnsureOriginalHashes:
         p = _MockPlugin()
         for name in ('_get_knowledge', '_get_or_create_knowledge',
                      '_update_knowledge', '_ensure_original_hashes',
-                     '_post_modification_update'):
+                     '_post_modification_update', '_cache_identification'):
             method = getattr(Audit, name)
             setattr(p, name, types.MethodType(method, p))
         return p
@@ -3203,3 +3203,258 @@ class TestEnsureOriginalHashes:
             # Old fingerprint no longer resolves
             old = p._get_knowledge('100:aabb')
             assert old is None
+
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:newfingerprint')
+    def test_post_modification_clears_identification(self, mock_fp, tmp_path):
+        """After modification, cached identification is cleared."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('100:aabb', '/movies/a.mkv')
+            doc['crc32'] = 'DEADBEEF'
+            doc['identification'] = {
+                'method': 'srrdb_crc',
+                'identified_title': 'Test Movie',
+                'confidence': 'high',
+            }
+            p._update_knowledge(doc)
+
+            p._post_modification_update(doc, '/movies/a.mkv',
+                                        'relabel_audio', 'Track 0: de -> en')
+
+            updated = p._get_knowledge('999:newfingerprint')
+            assert updated['identification'] is None
+            # Original hash preserved
+            assert updated['crc32'] == 'DEADBEEF'
+
+
+class TestCacheIdentification:
+    """Tests for _cache_identification method."""
+
+    @staticmethod
+    def _make_db(tmp_path):
+        from couchpotato.core.db import CouchDB
+        db_dir = str(tmp_path / 'db')
+        os.makedirs(db_dir, exist_ok=True)
+        db = CouchDB(db_dir)
+        db.create()
+        return db
+
+    @staticmethod
+    def _make_plugin():
+        from couchpotato.core.plugins.audit import Audit
+        import types
+
+        class _MockPlugin:
+            pass
+
+        p = _MockPlugin()
+        for name in ('_get_knowledge', '_get_or_create_knowledge',
+                     '_update_knowledge', '_cache_identification'):
+            method = getattr(Audit, name)
+            setattr(p, name, types.MethodType(method, p))
+        return p
+
+    def test_caches_positive_identification(self, tmp_path):
+        """Positive identification (srrdb_crc) is cached in knowledge doc."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._get_or_create_knowledge('100:aabb', '/movies/a.mkv')
+
+            ident = {
+                'method': 'srrdb_crc',
+                'identified_title': 'Test Movie',
+                'identified_year': 2020,
+                'confidence': 'high',
+                'crc32': 'DEADBEEF',
+            }
+            p._cache_identification('100:aabb', ident)
+
+            doc = p._get_knowledge('100:aabb')
+            assert doc['identification'] == ident
+            assert doc['crc32'] == 'DEADBEEF'
+
+    def test_caches_opensubtitles_hash(self, tmp_path):
+        """OpenSubtitles hash is extracted and cached."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._get_or_create_knowledge('100:aabb', '/movies/a.mkv')
+
+            ident = {
+                'method': 'opensubtitles_hash',
+                'identified_title': 'Test Movie',
+                'confidence': 'high',
+                'moviehash': 'abcdef0123456789',
+            }
+            p._cache_identification('100:aabb', ident)
+
+            doc = p._get_knowledge('100:aabb')
+            assert doc['identification'] == ident
+            assert doc['opensubtitles_hash'] == 'abcdef0123456789'
+
+    def test_caches_container_title(self, tmp_path):
+        """Container title identification is cached."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._get_or_create_knowledge('100:aabb', '/movies/a.mkv')
+
+            ident = {
+                'method': 'container_title',
+                'identified_title': 'Test Movie',
+                'confidence': 'high',
+            }
+            p._cache_identification('100:aabb', ident)
+
+            doc = p._get_knowledge('100:aabb')
+            assert doc['identification'] == ident
+
+    def test_skips_crc_not_found_identification(self, tmp_path):
+        """crc_not_found is NOT cached as identification (retry on next scan)."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._get_or_create_knowledge('100:aabb', '/movies/a.mkv')
+
+            ident = {
+                'method': 'crc_not_found',
+                'confidence': 'none',
+                'detail': 'CRC32 DEADBEEF not found in srrDB',
+                'crc32': 'DEADBEEF',
+            }
+            p._cache_identification('100:aabb', ident)
+
+            doc = p._get_knowledge('100:aabb')
+            # Identification NOT cached
+            assert doc['identification'] is None
+            # But CRC32 hash IS cached (avoid recomputing)
+            assert doc['crc32'] == 'DEADBEEF'
+
+    def test_does_not_overwrite_existing_hashes(self, tmp_path):
+        """Existing hashes are preserved (e.g. from pre-modification guard)."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('100:aabb', '/movies/a.mkv')
+            doc['crc32'] = 'ORIGINAL_CRC'
+            doc['opensubtitles_hash'] = 'ORIGINAL_OSH'
+            p._update_knowledge(doc)
+
+            ident = {
+                'method': 'srrdb_crc',
+                'identified_title': 'Test Movie',
+                'confidence': 'high',
+                'crc32': 'NEW_CRC',
+            }
+            p._cache_identification('100:aabb', ident)
+
+            doc = p._get_knowledge('100:aabb')
+            # Identification is updated
+            assert doc['identification'] == ident
+            # But existing hashes are NOT overwritten
+            assert doc['crc32'] == 'ORIGINAL_CRC'
+            assert doc['opensubtitles_hash'] == 'ORIGINAL_OSH'
+
+    def test_noop_for_none_fingerprint(self, tmp_path):
+        """None fingerprint does nothing (no crash)."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._cache_identification(None, {'method': 'srrdb_crc'})
+            p._cache_identification('', {'method': 'srrdb_crc'})
+
+    def test_noop_for_none_identification(self, tmp_path):
+        """None identification does nothing."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._get_or_create_knowledge('100:aabb', '/movies/a.mkv')
+            p._cache_identification('100:aabb', None)
+            doc = p._get_knowledge('100:aabb')
+            assert doc['identification'] is None
+
+    def test_noop_for_missing_doc(self, tmp_path):
+        """Fingerprint not in DB → does nothing (no crash)."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._cache_identification('nonexistent:fp', {'method': 'srrdb_crc'})
+
+
+class TestIdentifyCachedHashes:
+    """Tests for identify_flagged_file with cached hashes."""
+
+    @mock.patch('couchpotato.core.plugins.audit.srrdb_lookup_crc')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32')
+    @mock.patch('couchpotato.core.plugins.audit.opensubtitles_lookup_hash',
+                return_value=None)
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='aaaa')
+    def test_uses_cached_crc32(self, mock_os_hash, mock_os_lookup,
+                               mock_crc, mock_srr, tmp_path):
+        """When cached_crc32 is provided, compute_crc32 is not called."""
+        from couchpotato.core.plugins.audit import identify_flagged_file
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 1000)
+
+        mock_srr.return_value = {
+            'release': 'Test.Movie.2020.1080p',
+            'imdb_id': 'tt1234567',
+        }
+
+        with mock.patch('couchpotato.core.plugins.audit._CP_AVAILABLE', False):
+            result = identify_flagged_file(
+                str(f),
+                [{'check': 'title', 'severity': 'HIGH'}],
+                None,
+                cached_crc32='CACHEDCRC',
+            )
+
+        mock_crc.assert_not_called()
+        mock_srr.assert_called_once_with('CACHEDCRC')
+        assert result['method'] == 'srrdb_crc'
+        assert result['crc32'] == 'CACHEDCRC'
+
+    @mock.patch('couchpotato.core.plugins.audit.opensubtitles_lookup_hash')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash')
+    def test_uses_cached_opensubtitles_hash(self, mock_compute_osh,
+                                             mock_os_lookup, tmp_path):
+        """When cached_opensubtitles_hash is provided, compute is not called."""
+        from couchpotato.core.plugins.audit import identify_flagged_file
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 1000)
+
+        mock_os_lookup.return_value = {
+            'title': 'Test Movie',
+            'year': 2020,
+            'imdb_id': 'tt1234567',
+        }
+
+        with mock.patch('couchpotato.core.plugins.audit._CP_AVAILABLE', False), \
+             mock.patch('couchpotato.core.plugins.audit.OS_APP_API_KEY',
+                        'test-key', create=True):
+            # Need to mock the import path for standalone mode
+            import couchpotato.core.media.movie.providers.info.opensubtitles as os_mod
+            orig = getattr(os_mod, 'OS_APP_API_KEY', None)
+            os_mod.OS_APP_API_KEY = 'test-key'
+            try:
+                result = identify_flagged_file(
+                    str(f),
+                    [{'check': 'title', 'severity': 'HIGH'}],
+                    None,
+                    cached_opensubtitles_hash='CACHED_OSH',
+                )
+            finally:
+                if orig is None:
+                    delattr(os_mod, 'OS_APP_API_KEY')
+                else:
+                    os_mod.OS_APP_API_KEY = orig
+
+        mock_compute_osh.assert_not_called()
+        mock_os_lookup.assert_called_once_with('CACHED_OSH', 'test-key',
+                                                filepath=str(f))
+        assert result['method'] == 'opensubtitles_hash'
+        assert result['moviehash'] == 'CACHED_OSH'

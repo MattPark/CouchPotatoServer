@@ -2425,12 +2425,22 @@ def opensubtitles_lookup_hash(moviehash, api_key, filepath=None):
     return None
 
 
-def identify_flagged_file(filepath, flags, container_title_parsed):
+def identify_flagged_file(filepath, flags, container_title_parsed,
+                          cached_crc32=None, cached_opensubtitles_hash=None):
     """Try to identify what a flagged file actually is.
 
     Strategy A: Container title (already parsed)
     Strategy B: OpenSubtitles moviehash (fast, reads only 128KB)
     Strategy C: CRC32 → srrDB reverse lookup (slow, reads entire file)
+
+    Args:
+        filepath: Path to the video file.
+        flags: List of flag dicts from the scan.
+        container_title_parsed: Parsed container title metadata (or None).
+        cached_crc32: Pre-computed CRC32 hex string from file_knowledge DB.
+            If provided, Strategy C skips recomputing the hash.
+        cached_opensubtitles_hash: Pre-computed OpenSubtitles hash from
+            file_knowledge DB.  If provided, Strategy B skips recomputing.
     """
     identification = None
 
@@ -2499,8 +2509,12 @@ def identify_flagged_file(filepath, flags, container_title_parsed):
         except ImportError:
             pass
     if _os_api_key:
-        _log_info('Computing OpenSubtitles hash for %s...' % os.path.basename(filepath))
-        moviehash = compute_opensubtitles_hash(filepath)
+        if cached_opensubtitles_hash:
+            _log_info('Using cached OpenSubtitles hash for %s' % os.path.basename(filepath))
+            moviehash = cached_opensubtitles_hash
+        else:
+            _log_info('Computing OpenSubtitles hash for %s...' % os.path.basename(filepath))
+            moviehash = compute_opensubtitles_hash(filepath)
         if moviehash:
             _log_info('OpenSubtitles hash: %s' % moviehash)
             hit = opensubtitles_lookup_hash(moviehash, _os_api_key,
@@ -2540,16 +2554,20 @@ def identify_flagged_file(filepath, flags, container_title_parsed):
             _log_info('File too small for OpenSubtitles hash, skipping')
 
     # Strategy C: CRC32 reverse lookup on srrDB
-    _log_info('Computing CRC32 of %s...' % os.path.basename(filepath))
-    file_size = os.path.getsize(filepath)
-    file_size_gb = file_size / (1024 ** 3)
+    if cached_crc32:
+        _log_info('Using cached CRC32 for %s: %s' % (os.path.basename(filepath), cached_crc32))
+        crc_hex = cached_crc32
+    else:
+        _log_info('Computing CRC32 of %s...' % os.path.basename(filepath))
+        file_size = os.path.getsize(filepath)
+        file_size_gb = file_size / (1024 ** 3)
 
-    def progress(done, total):
-        pct = done / total * 100 if total else 0
-        print(f'\r  CRC32: {pct:.1f}% ({done / (1024**3):.1f}/{total / (1024**3):.1f} GB)',
-              end='', file=sys.stderr)
+        def progress(done, total):
+            pct = done / total * 100 if total else 0
+            print(f'\r  CRC32: {pct:.1f}% ({done / (1024**3):.1f}/{total / (1024**3):.1f} GB)',
+                  end='', file=sys.stderr)
 
-    crc_hex = compute_crc32(filepath, progress_callback=progress)
+        crc_hex = compute_crc32(filepath, progress_callback=progress)
     _log_info('CRC32: %s' % crc_hex)
 
     hit = srrdb_lookup_crc(crc_hex)
@@ -2924,7 +2942,9 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
     if seen_fingerprints is not None and fingerprint:
         seen_fingerprints[fingerprint] = filepath
     if knowledge_callback and fingerprint:
-        knowledge_callback(fingerprint, filepath)
+        knowledge_doc = knowledge_callback(fingerprint, filepath)
+    else:
+        knowledge_doc = None
 
     if not flags:
         return None
@@ -2974,9 +2994,21 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
                 'detail': 'Container title indicates TV episode content',
             }
         elif force_full or needs_identification(flags):
-            result['identification'] = identify_flagged_file(
-                filepath, flags, container_title_parsed
-            )
+            # Check knowledge doc for cached positive identification
+            cached_ident = knowledge_doc.get('identification') if knowledge_doc else None
+            if cached_ident and cached_ident.get('method') != 'crc_not_found':
+                result['identification'] = cached_ident
+                result['identification_cached'] = True
+            else:
+                # Pass cached hashes to avoid recomputing from file
+                cached_crc = knowledge_doc.get('crc32') if knowledge_doc else None
+                cached_osh = (knowledge_doc.get('opensubtitles_hash')
+                              if knowledge_doc else None)
+                result['identification'] = identify_flagged_file(
+                    filepath, flags, container_title_parsed,
+                    cached_crc32=cached_crc,
+                    cached_opensubtitles_hash=cached_osh,
+                )
         else:
             result['identification'] = {
                 'method': 'skipped',
@@ -3515,9 +3547,9 @@ def scan_library(movies_dir, db_path, scan_path=None, full=False,
 
         def _kb_callback(fingerprint, filepath):
             rel_info = release_by_filepath.get(filepath, {})
-            _raw_kb_callback(fingerprint, filepath,
-                             release_id=rel_info.get('release_id'),
-                             media_id=rel_info.get('media_id'))
+            return _raw_kb_callback(fingerprint, filepath,
+                                    release_id=rel_info.get('release_id'),
+                                    media_id=rel_info.get('media_id'))
 
         knowledge_callback = _kb_callback
 
@@ -4857,6 +4889,45 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             log.error('Failed to update file_knowledge doc: %s not found',
                       (doc.get('_id'),))
 
+    def _cache_identification(self, fingerprint, identification):
+        """Write identification result (and extracted hashes) to knowledge doc.
+
+        Called after identify_flagged_file() to cache the result so subsequent
+        scans can skip expensive CRC32/hash computation and network lookups.
+
+        Only caches "positive" identifications (not crc_not_found), so that
+        unresolved files get retried on the next scan in case srrDB was updated.
+        """
+        if not fingerprint or not identification:
+            return
+        method = identification.get('method', '')
+        if method == 'crc_not_found':
+            # Don't cache negative results — retry on next scan
+            # But DO cache the CRC32 hash to avoid recomputing it
+            doc = self._get_knowledge(fingerprint)
+            if doc and identification.get('crc32') and not doc.get('crc32'):
+                doc['crc32'] = identification['crc32']
+                self._update_knowledge(doc)
+            return
+        doc = self._get_knowledge(fingerprint)
+        if not doc:
+            return
+        changed = False
+        if doc.get('identification') != identification:
+            doc['identification'] = identification
+            changed = True
+        # Extract and cache hashes from the identification result
+        crc = identification.get('crc32')
+        if crc and not doc.get('crc32'):
+            doc['crc32'] = crc
+            changed = True
+        osh = identification.get('moviehash')
+        if osh and not doc.get('opensubtitles_hash'):
+            doc['opensubtitles_hash'] = osh
+            changed = True
+        if changed:
+            self._update_knowledge(doc)
+
     def _is_ignored(self, fingerprint):
         """Check whether a file fingerprint is marked as ignored."""
         doc = self._get_knowledge(fingerprint)
@@ -4992,6 +5063,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         new_fp = compute_file_fingerprint(file_path)
         knowledge_doc['current_fingerprint'] = new_fp
         knowledge_doc['modified'] = True
+        # Clear cached identification — file content changed, so hash-based
+        # identification (CRC32/OpenSubtitles) may no longer be valid.
+        knowledge_doc['identification'] = None
         knowledge_doc.setdefault('modifications', []).append({
             'type': mod_type,
             'date': time.strftime('%Y-%m-%dT%H:%M:%S'),
@@ -5214,6 +5288,32 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             self.last_report.pop('release_by_filepath', None)
             # Persist to disk
             self._save_results()
+
+            # Cache new identification results in file_knowledge DB docs.
+            # Only writes for items that were freshly identified (not cached).
+            flagged = self.last_report.get('flagged', [])
+            cached_count = 0
+            for item in flagged:
+                if item.get('identification_cached'):
+                    cached_count += 1
+                    continue
+                ident = item.get('identification')
+                fp = item.get('file_fingerprint')
+                if ident and fp and ident.get('method') not in (
+                    'skipped', 'tv_episode_detected',
+                ):
+                    self._cache_identification(fp, ident)
+            new_idents = sum(
+                1 for i in flagged
+                if i.get('identification')
+                and not i.get('identification_cached')
+                and i['identification'].get('method') not in (
+                    'skipped', 'tv_episode_detected',
+                )
+            )
+            if cached_count or new_idents:
+                log.info('Identification cache: %s cached hits, %s new results written',
+                         (cached_count, new_idents))
 
             # Prune stale file_knowledge entries after a complete full-library
             # scan (not cancelled, not a single-folder scan).
@@ -6159,9 +6259,19 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         log.info('Running identification on %s', (item.get('folder', item_id),))
 
+        # Look up cached hashes from knowledge doc to avoid recomputing
+        # (even though we always re-identify, we can skip CRC32 file reads)
+        fp = item.get('file_fingerprint')
+        knowledge_doc = self._get_knowledge(fp) if fp else None
+        cached_crc = knowledge_doc.get('crc32') if knowledge_doc else None
+        cached_osh = (knowledge_doc.get('opensubtitles_hash')
+                      if knowledge_doc else None)
+
         try:
             identification = identify_flagged_file(
-                filepath, flags, container_title_parsed
+                filepath, flags, container_title_parsed,
+                cached_crc32=cached_crc,
+                cached_opensubtitles_hash=cached_osh,
             )
         except Exception as e:
             log.error('Identification failed for %s: %s', (item_id, e))
@@ -6214,6 +6324,10 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         # Persist
         self._save_results()
+
+        # Cache identification result in knowledge doc
+        if fp:
+            self._cache_identification(fp, identification)
 
         log.info('Identification result for %s: method=%s action=%s', (
             item.get('folder', item_id),
