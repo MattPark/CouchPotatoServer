@@ -41,6 +41,7 @@ from couchpotato.core.plugins.audit import (
     whisper_verify_audio,
     _run_whisper_detection,
     _scan_single_file,
+    needs_identification,
 )
 import os
 import re
@@ -2688,6 +2689,63 @@ class TestRunWhisperDetection:
         lang, conf = _run_whisper_detection('/tmp/test.wav', '/models/model.bin')
         assert lang is None
         assert conf == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Smart skip logic for identification
+# ---------------------------------------------------------------------------
+
+class TestNeedsIdentification:
+    """Tests for needs_identification() smart skip logic."""
+
+    @staticmethod
+    def _flags(*checks):
+        return [{'check': c, 'severity': 'LOW', 'detail': 'test'} for c in checks]
+
+    def test_title_needs_identification(self):
+        assert needs_identification(self._flags('title')) is True
+
+    def test_runtime_needs_identification(self):
+        assert needs_identification(self._flags('runtime')) is True
+
+    def test_title_and_runtime(self):
+        assert needs_identification(self._flags('title', 'runtime')) is True
+
+    def test_template_only_skips(self):
+        assert needs_identification(self._flags('template')) is False
+
+    def test_resolution_only_skips(self):
+        assert needs_identification(self._flags('resolution')) is False
+
+    def test_edition_only_skips(self):
+        assert needs_identification(self._flags('edition')) is False
+
+    def test_naming_combo_skips(self):
+        assert needs_identification(self._flags('template', 'resolution', 'edition')) is False
+
+    def test_tv_episode_skips(self):
+        assert needs_identification(self._flags('tv_episode', 'title')) is False
+
+    def test_foreign_audio_only_skips(self):
+        assert needs_identification(self._flags('foreign_audio')) is False
+
+    def test_unknown_audio_only_skips(self):
+        assert needs_identification(self._flags('unknown_audio')) is False
+
+    def test_foreign_audio_plus_template_skips(self):
+        assert needs_identification(self._flags('foreign_audio', 'template')) is False
+
+    def test_foreign_audio_plus_title_needs(self):
+        """foreign_audio + title mismatch still needs identification."""
+        assert needs_identification(self._flags('foreign_audio', 'title')) is True
+
+    def test_unknown_audio_plus_resolution_skips(self):
+        assert needs_identification(self._flags('unknown_audio', 'resolution')) is False
+
+    def test_all_skip_checks_combined(self):
+        assert needs_identification(self._flags(
+            'resolution', 'edition', 'template', 'foreign_audio', 'unknown_audio'
+        )) is False
 
 
 class TestApplyWhisperResult:

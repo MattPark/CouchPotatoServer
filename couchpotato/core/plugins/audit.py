@@ -2209,6 +2209,9 @@ def needs_identification(flags):
       - Resolution + edition only → skip (quality label + edition fix, no ID needed)
       - Template-only → skip (naming fix, no ID needed)
       - Template + resolution/edition only → skip (naming fixes, no ID needed)
+      - Audio-only flags (foreign_audio, unknown_audio) → skip (language issue,
+        not identity issue — identification won't help resolve these)
+      - Audio flags + naming-fix flags → skip (combination of above)
       - Everything else → run (title mismatch, runtime mismatch, or
         multi-flag combinations are suspect and need identification)
 
@@ -2220,9 +2223,10 @@ def needs_identification(flags):
     if 'tv_episode' in checks:
         return False
 
-    # Pure naming-fix checks — no identification needed
-    naming_only = {'resolution', 'edition', 'template'}
-    if checks <= naming_only:
+    # Checks that never require identification — naming fixes and audio issues
+    skip_checks = {'resolution', 'edition', 'template',
+                   'foreign_audio', 'unknown_audio'}
+    if checks <= skip_checks:
         return False
 
     # Everything else is suspect — run identification
