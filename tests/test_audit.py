@@ -40,6 +40,8 @@ from couchpotato.core.plugins.audit import (
     normalize_language,
     whisper_verify_audio,
     _run_whisper_detection,
+    compute_file_fingerprint,
+    _scan_single_file,
 )
 import json
 import os
@@ -2800,3 +2802,165 @@ class TestApplyWhisperResult:
         checks = {f['check'] for f in item['flags']}
         assert 'foreign_audio' not in checks
         assert item['flag_count'] == 0
+
+
+# ---------------------------------------------------------------------------
+# Fingerprint collection during scan
+# ---------------------------------------------------------------------------
+
+class TestSeenFingerprints:
+    """Tests that _scan_single_file collects fingerprints for all files."""
+
+    @mock.patch('couchpotato.core.plugins.audit.extract_file_meta')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='12345:abcdef0123456789')
+    def test_clean_file_adds_fingerprint(self, mock_fp, mock_meta, tmp_path):
+        """Clean (unflagged) files still add their fingerprint to the set."""
+        f = tmp_path / 'Movie (2020) 1080p.mkv'
+        f.write_bytes(b'\x00' * 100)
+        mock_meta.return_value = {
+            'resolution_width': 1920, 'resolution_height': 1080,
+            'duration_min': 120.0, 'video_codec': 'HEVC',
+            'container_title': None, 'audio_tracks': [
+                {'codec': 'AAC', 'channels': '2.0', 'language': 'en'}
+            ],
+        }
+        seen = set()
+        result = _scan_single_file(
+            str(f), folder_title='Movie', folder_year=2020,
+            imdb_id='tt0000001', db_entry={'title': 'Movie', 'runtime': 120},
+            expected_runtime=120, renamer_template=None,
+            renamer_replace_doubles=True, renamer_separator='',
+            seen_fingerprints=seen,
+        )
+        assert result is None, 'File should be clean (no flags)'
+        assert '12345:abcdef0123456789' in seen
+
+    @mock.patch('couchpotato.core.plugins.audit.extract_file_meta')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='99999:ffff000011112222')
+    def test_flagged_file_adds_fingerprint(self, mock_fp, mock_meta, tmp_path):
+        """Flagged files also add their fingerprint to the set."""
+        f = tmp_path / 'Movie (2020) 1080p.mkv'
+        f.write_bytes(b'\x00' * 100)
+        mock_meta.return_value = {
+            'resolution_width': 1920, 'resolution_height': 1080,
+            'duration_min': 120.0, 'video_codec': 'HEVC',
+            'container_title': None, 'audio_tracks': [
+                {'codec': 'AAC', 'channels': '2.0', 'language': 'fr'}
+            ],
+        }
+        seen = set()
+        result = _scan_single_file(
+            str(f), folder_title='Movie', folder_year=2020,
+            imdb_id='tt0000001', db_entry={'title': 'Movie', 'runtime': 120},
+            expected_runtime=120, renamer_template=None,
+            renamer_replace_doubles=True, renamer_separator='',
+            seen_fingerprints=seen,
+        )
+        assert result is not None, 'File should be flagged (foreign audio)'
+        assert '99999:ffff000011112222' in seen
+        assert result['file_fingerprint'] == '99999:ffff000011112222'
+
+    @mock.patch('couchpotato.core.plugins.audit.extract_file_meta')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='12345:abcdef0123456789')
+    def test_none_seen_set_is_safe(self, mock_fp, mock_meta, tmp_path):
+        """Passing seen_fingerprints=None doesn't crash."""
+        f = tmp_path / 'Movie (2020) 1080p.mkv'
+        f.write_bytes(b'\x00' * 100)
+        mock_meta.return_value = {
+            'resolution_width': 1920, 'resolution_height': 1080,
+            'duration_min': 120.0, 'video_codec': 'HEVC',
+            'container_title': None, 'audio_tracks': [
+                {'codec': 'AAC', 'channels': '2.0', 'language': 'en'}
+            ],
+        }
+        # Should not raise
+        result = _scan_single_file(
+            str(f), folder_title='Movie', folder_year=2020,
+            imdb_id='tt0000001', db_entry={'title': 'Movie', 'runtime': 120},
+            expected_runtime=120, renamer_template=None,
+            renamer_replace_doubles=True, renamer_separator='',
+            seen_fingerprints=None,
+        )
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# File knowledge pruning
+# ---------------------------------------------------------------------------
+
+class TestPruneFileKnowledge:
+    """Tests for _prune_file_knowledge."""
+
+    class _MockPlugin:
+        file_knowledge = {}
+        _saved = False
+
+        def _save_file_knowledge(self):
+            self._saved = True
+
+    @staticmethod
+    def _bind(plugin):
+        from couchpotato.core.plugins.audit import Audit
+        plugin._prune_file_knowledge = Audit._prune_file_knowledge.__get__(
+            plugin, type(plugin))
+
+    def test_removes_stale_entries(self):
+        """Entries not in seen set are removed."""
+        p = self._MockPlugin()
+        self._bind(p)
+        p.file_knowledge = {
+            'aaa:1111': {'whisper': {'language': 'en'}},
+            'bbb:2222': {'ignored': {'reason': ''}},
+            'ccc:3333': {'whisper': {'language': 'fr'}},
+        }
+        seen = {'aaa:1111', 'ccc:3333'}
+        p._prune_file_knowledge(seen)
+        assert 'bbb:2222' not in p.file_knowledge
+        assert 'aaa:1111' in p.file_knowledge
+        assert 'ccc:3333' in p.file_knowledge
+        assert p._saved
+
+    def test_no_stale_entries(self):
+        """When all entries are in seen set, nothing is removed."""
+        p = self._MockPlugin()
+        self._bind(p)
+        p.file_knowledge = {
+            'aaa:1111': {'whisper': {'language': 'en'}},
+        }
+        p._prune_file_knowledge({'aaa:1111', 'bbb:2222'})
+        assert 'aaa:1111' in p.file_knowledge
+        assert not p._saved  # no change, no save needed
+
+    def test_empty_knowledge(self):
+        """Empty knowledge table is a no-op."""
+        p = self._MockPlugin()
+        self._bind(p)
+        p.file_knowledge = {}
+        p._prune_file_knowledge({'aaa:1111'})
+        assert not p._saved
+
+    def test_empty_seen_set(self):
+        """Empty seen set is a no-op (safety: don't wipe everything)."""
+        p = self._MockPlugin()
+        self._bind(p)
+        p.file_knowledge = {
+            'aaa:1111': {'whisper': {'language': 'en'}},
+        }
+        p._prune_file_knowledge(set())
+        assert 'aaa:1111' in p.file_knowledge
+        assert not p._saved
+
+    def test_all_stale(self):
+        """All entries stale — all removed."""
+        p = self._MockPlugin()
+        self._bind(p)
+        p.file_knowledge = {
+            'aaa:1111': {'ignored': {'reason': ''}},
+            'bbb:2222': {'whisper': {'language': 'ja'}},
+        }
+        p._prune_file_knowledge({'ccc:3333', 'ddd:4444'})
+        assert len(p.file_knowledge) == 0
+        assert p._saved

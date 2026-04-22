@@ -2781,7 +2781,7 @@ def detect_duplicates(file_results):
 def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
                       expected_runtime, renamer_template, renamer_replace_doubles,
                       renamer_separator, full=False, force_full=False,
-                      cd_number=None):
+                      cd_number=None, seen_fingerprints=None):
     """Scan one video file and return an audit result dict (or None if clean).
 
     This is the core per-file scanning logic extracted from scan_movie_folder().
@@ -2903,12 +2903,18 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
     if flag:
         flags.append(flag)
 
+    # Compute fingerprint for all files (clean or flagged) so that
+    # file_knowledge cleanup can detect orphaned entries after a scan.
+    fingerprint = compute_file_fingerprint(filepath)
+    if seen_fingerprints is not None and fingerprint:
+        seen_fingerprints.add(fingerprint)
+
     if not flags:
         return None
 
     result = {
         'item_id': compute_item_id(filepath),
-        'file_fingerprint': compute_file_fingerprint(filepath),
+        'file_fingerprint': fingerprint,
         'folder': os.path.basename(os.path.dirname(filepath)),
         'file': filename,
         'file_path': filepath,
@@ -2983,7 +2989,8 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
 
 def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
                    expected_runtime, renamer_template, renamer_replace_doubles,
-                   renamer_separator, full=False, force_full=False):
+                   renamer_separator, full=False, force_full=False,
+                   seen_fingerprints=None):
     """Scan a multi-CD folder (all files have sequential cd tags).
 
     Scans each CD file individually with its cd_number, then aggregates
@@ -3011,6 +3018,7 @@ def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
             renamer_separator=renamer_separator,
             full=full, force_full=force_full,
             cd_number=cd_num,
+            seen_fingerprints=seen_fingerprints,
         )
         per_file_results.append((cd_num, filepath, result))
 
@@ -3139,7 +3147,7 @@ def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
 def _scan_variants(video_files, classification, folder_title, folder_year,
                    imdb_id, db_entry, expected_runtime, renamer_template,
                    renamer_replace_doubles, renamer_separator, full=False,
-                   force_full=False):
+                   force_full=False, seen_fingerprints=None):
     """Scan a folder with multiple file variants (editions, qualities, dupes).
 
     When the folder contains a CD sub-group (sequential cd1..cdN alongside
@@ -3185,7 +3193,8 @@ def _scan_variants(video_files, classification, folder_title, folder_year,
     if has_cd_subgroup and cd_files:
         # Scan the CD sub-group as one logical unit
         cd_subgroup_paths = {fp for _, fp in cd_files}
-        cd_result = _scan_multi_cd(cd_files, **scan_kwargs)
+        cd_result = _scan_multi_cd(cd_files, **scan_kwargs,
+                                   seen_fingerprints=seen_fingerprints)
         if cd_result is not None:
             cd_result['_is_cd_subgroup'] = True
             full_results.append(cd_result)
@@ -3223,7 +3232,8 @@ def _scan_variants(video_files, classification, folder_title, folder_year,
         standalone_files = list(video_files)
 
     for filepath in standalone_files:
-        result = _scan_single_file(filepath, **scan_kwargs)
+        result = _scan_single_file(filepath, **scan_kwargs,
+                                   seen_fingerprints=seen_fingerprints)
         if result is not None:
             full_results.append(result)
         else:
@@ -3363,7 +3373,7 @@ def _promote_clean_to_full(r, imdb_id, expected_runtime, folder_title,
 def scan_movie_folder(folder_path, folder_name, media_by_imdb,
                       full=False, force_full=False, media_by_title=None,
                       renamer_template=None, renamer_replace_doubles=True,
-                      renamer_separator=''):
+                      renamer_separator='', seen_fingerprints=None):
     """Scan a single movie folder and return audit results.
 
     Handles single-file, multi-CD, and variant (multi-file) folders.
@@ -3433,15 +3443,18 @@ def scan_movie_folder(folder_path, folder_name, media_by_imdb,
     if classification['type'] == 'single':
         # Single file — original behavior
         filepath = video_files[0]
-        return _scan_single_file(filepath, **scan_kwargs)
+        return _scan_single_file(filepath, **scan_kwargs,
+                                 seen_fingerprints=seen_fingerprints)
 
     elif classification['type'] == 'multi_cd':
         # Multi-CD: scan each cd file, aggregate into one result
-        return _scan_multi_cd(classification['cd_files'], **scan_kwargs)
+        return _scan_multi_cd(classification['cd_files'], **scan_kwargs,
+                              seen_fingerprints=seen_fingerprints)
 
     else:
         # Variants: scan each file individually, return list of flagged results
-        return _scan_variants(video_files, classification, **scan_kwargs)
+        return _scan_variants(video_files, classification, **scan_kwargs,
+                              seen_fingerprints=seen_fingerprints)
 
 
 # Sentinel value for _scan_one: folder was not a directory, skip it
@@ -3504,6 +3517,7 @@ def scan_library(movies_dir, db_path, scan_path=None, full=False,
     flagged = []
     scanned = 0
     errors = 0
+    seen_fingerprints = set()
     lock = threading.Lock()
 
     # Clamp workers to sane range
@@ -3528,6 +3542,7 @@ def scan_library(movies_dir, db_path, scan_path=None, full=False,
                 renamer_template=renamer_template,
                 renamer_replace_doubles=renamer_replace_doubles,
                 renamer_separator=renamer_separator,
+                seen_fingerprints=seen_fingerprints,
             )
             return result, False
         except Exception as e:
@@ -3630,6 +3645,7 @@ def scan_library(movies_dir, db_path, scan_path=None, full=False,
         'total_errors': errors,
         'cancelled': was_cancelled,
         'flagged': flagged,
+        'seen_fingerprints': seen_fingerprints,
     }
 
 
@@ -4794,6 +4810,21 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         entry = self.file_knowledge.get(fingerprint)
         return entry is not None and 'ignored' in entry
 
+    def _prune_file_knowledge(self, seen_fingerprints):
+        """Remove file_knowledge entries whose fingerprints were not seen
+        during the last complete scan.  This cleans up entries for files
+        that have been deleted, re-encoded, or replaced."""
+        if not seen_fingerprints or not self.file_knowledge:
+            return
+        stale = set(self.file_knowledge.keys()) - seen_fingerprints
+        if not stale:
+            log.info('File knowledge cleanup: no stale entries found')
+            return
+        for fp in stale:
+            del self.file_knowledge[fp]
+        self._save_file_knowledge()
+        log.info('File knowledge cleanup: removed %s stale entries', (len(stale),))
+
     def _save_results(self):
         """Persist last_report to disk."""
         if not self.last_report:
@@ -4995,8 +5026,16 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             self.last_report['scan_timestamp'] = time.strftime(
                 '%Y-%m-%dT%H:%M:%S'
             )
+            # Extract fingerprints before saving (set is not JSON-serializable
+            # and not needed on disk)
+            seen_fps = self.last_report.pop('seen_fingerprints', set())
             # Persist to disk
             self._save_results()
+
+            # Prune stale file_knowledge entries after a complete full-library
+            # scan (not cancelled, not a single-folder scan).
+            if not report.get('cancelled') and not scan_path:
+                self._prune_file_knowledge(seen_fps)
         except Exception as e:
             log.error('Audit scan failed: %s', (e,))
         finally:
