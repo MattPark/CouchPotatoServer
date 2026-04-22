@@ -1169,12 +1169,12 @@ input[type=text],textarea{-webkit-appearance:none}
 .page.settings .audit_action_btn.primary:hover{opacity:.85}
 .page.settings .audit_action_btn.secondary{background:#1976d2;color:#fff}
 .page.settings .audit_action_btn.secondary:hover{opacity:.85}
-.page.settings .audit_action_btn.audit_full_btn{background:#1976d2;color:#fff;margin-left:8px}
+.page.settings .audit_action_btn.audit_full_btn{background:#1976d2;color:#fff}
 .page.settings .audit_action_btn.audit_full_btn:hover{opacity:.85}
 .page.settings .audit_action_btn.audit_full_running{opacity:.5;cursor:wait}
-.page.settings .audit_action_btn.audit_delete_btn{background:#c62828;color:#fff;margin-left:8px}
+.page.settings .audit_action_btn.audit_delete_btn{background:#c62828;color:#fff}
 .page.settings .audit_action_btn.audit_delete_btn:hover{opacity:.85}
-.page.settings .audit_action_btn.audit_ignore_btn{background:#757575;color:#fff;margin-left:8px}
+.page.settings .audit_action_btn.audit_ignore_btn{background:#757575;color:#fff}
 .page.settings .audit_action_btn.audit_ignore_btn:hover{opacity:.85}
 .page.settings .audit_action_btn.audit_ignore_btn.confirming{background:#c62828;animation:audit-pulse .6s ease-in-out infinite alternate}
 @keyframes audit-pulse{from{opacity:1}to{opacity:.7}}
