@@ -1284,7 +1284,7 @@ var AuditSettingTab = new Class({
 			'events': { 'click': self.closePreviewModal.bind(self) }
 		}).inject(footer);
 
-		new Element('a.audit_action_btn.primary', {
+		self._confirm_btn = new Element('a.audit_action_btn.primary', {
 			'text': 'Confirm & Execute',
 			'events': { 'click': function(e){
 				e.stop();
@@ -1307,6 +1307,20 @@ var AuditSettingTab = new Class({
 	executeFix: function(item_id, action, reset_status){
 		var self = this;
 
+		if(self._fix_in_progress) return;
+		self._fix_in_progress = true;
+
+		// Disable confirm button and show progress
+		if(self._confirm_btn){
+			self._confirm_btn.set('text', 'Executing\u2026');
+			self._confirm_btn.addClass('audit_full_running');
+			self._confirm_btn.removeEvents('click');
+		}
+		if(self._modal_keydown){
+			document.removeEvent('keydown', self._modal_keydown);
+			self._modal_keydown = null;
+		}
+
 		var data = { 'item_id': item_id, 'action': action, 'confirm': 1 };
 		if(reset_status){
 			data['reset_status'] = reset_status;
@@ -1321,6 +1335,7 @@ var AuditSettingTab = new Class({
 		Api.request('audit.fix', {
 			'data': data,
 			'onComplete': function(json){
+				self._fix_in_progress = false;
 				self.closePreviewModal();
 
 				if(json && json.success !== false){
@@ -1361,6 +1376,8 @@ var AuditSettingTab = new Class({
 
 	closePreviewModal: function(){
 		var self = this;
+		self._fix_in_progress = false;
+		self._confirm_btn = null;
 		if(self._modal_keydown){
 			document.removeEvent('keydown', self._modal_keydown);
 			self._modal_keydown = null;
