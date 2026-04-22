@@ -865,6 +865,7 @@ def compute_recommended_action(flags, identification=None, expected=None):
         'delete_wrong'       — TV episode or identified as non-movie
         'delete_duplicate'   — duplicate file (keep/delete decided by pick_best_duplicate)
         'verify_audio'       — audio language tag missing, needs whisper verification
+        'set_audio_language' — whisper verified language, container tags need updating
         'delete_foreign'     — all audio tracks are non-English (no accepted language)
         'rename_template'    — filename doesn't match template (superset of resolution/edition)
         'rename_resolution'  — resolution-only flag (right movie, wrong quality label)
@@ -895,6 +896,11 @@ def compute_recommended_action(flags, identification=None, expected=None):
     # Unknown audio — language tag missing, needs whisper verification
     if 'unknown_audio' in checks:
         return 'verify_audio'
+
+    # Audio mislabeled — whisper verified language but container tags are
+    # wrong/missing.  Recommend setting the correct language tags.
+    if 'audio_mislabeled' in checks:
+        return 'set_audio_language'
 
     # Foreign audio — all tracks are non-English, recommend deletion
     if 'foreign_audio' in checks:
@@ -1490,6 +1496,20 @@ _NO_LINGUISTIC_CONTENT = {'zxx'}
 # und = undetermined, mul = multiple languages — treat as unknown (needs
 # whisper verification to determine actual language).
 _UNDETERMINED_LANGUAGE = {'und', 'mul'}
+
+# ISO 639-1 (2-letter) → ISO 639-2/B (3-letter bibliographic) for MKV
+# language tags set via mkvpropedit.  Bibliographic codes are the traditional
+# default in Matroska containers.
+ISO_639_1_TO_639_2 = {
+    'en': 'eng', 'fr': 'fre', 'de': 'ger', 'es': 'spa', 'it': 'ita',
+    'pt': 'por', 'ru': 'rus', 'ja': 'jpn', 'ko': 'kor', 'zh': 'chi',
+    'nl': 'dut', 'ar': 'ara', 'hi': 'hin', 'sv': 'swe', 'no': 'nor',
+    'da': 'dan', 'fi': 'fin', 'pl': 'pol', 'tr': 'tur', 'he': 'heb',
+    'th': 'tha', 'ro': 'rum', 'hu': 'hun', 'cs': 'cze', 'el': 'gre',
+    'fa': 'per', 'id': 'ind', 'sl': 'slv', 'sr': 'srp', 'bs': 'bos',
+    'hr': 'hrv', 'uk': 'ukr', 'ca': 'cat', 'gl': 'glg', 'eu': 'baq',
+    'vi': 'vie', 'ms': 'may', 'tl': 'tgl',
+}
 
 
 def normalize_language(raw):
@@ -3731,6 +3751,7 @@ VALID_FIX_ACTIONS = {
     'verify_audio',
     'rename_edition',
     'rename_template',
+    'set_audio_language',
 }
 
 
@@ -4333,6 +4354,8 @@ def generate_fix_preview(item, action):
         }
     elif action == 'reassign_movie':
         return _preview_reassign_movie(item)
+    elif action == 'set_audio_language':
+        return {'error': 'set_audio_language preview requires instance method — use fixPreviewView'}
     else:
         return {'error': 'Unknown action: %s' % action}
 
@@ -5076,6 +5099,241 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                  (mod_type, knowledge_doc.get('original_fingerprint', '?')[:20],
                   new_fp[:20] if new_fp else '?'))
 
+    # -------------------------------------------------------------------
+    # Set Audio Language — preview and execute
+    # -------------------------------------------------------------------
+
+    def _preview_set_audio_language(self, item):
+        """Generate a preview for the set_audio_language fix action.
+
+        Reads whisper results from the file_knowledge DB and compares each
+        track's detected language with its container tag.  Returns a preview
+        dict describing per-track changes.
+
+        Requires whisper verification to have been run first.
+        """
+        file_path = item.get('file_path', '')
+        if not file_path or not os.path.isfile(file_path):
+            return {'error': 'File not found: %s' % file_path}
+
+        fp = item.get('file_fingerprint')
+        doc = self._get_knowledge(fp) if fp else None
+        whisper = doc.get('whisper') if doc else None
+        if not whisper or not whisper.get('tracks'):
+            return {'error': 'No whisper verification results — run Verify Audio first'}
+
+        is_mkv = file_path.lower().endswith('.mkv')
+        ext = os.path.splitext(file_path)[1].lower()
+        new_path = file_path
+        if not is_mkv:
+            new_path = os.path.splitext(file_path)[0] + '.mkv'
+
+        tracks = whisper['tracks']
+        audio_tracks = item.get('actual', {}).get('audio_tracks', [])
+        changes = []
+        for t in tracks:
+            idx = t.get('track_index', 0)
+            detected = t.get('language', '')
+            conf = t.get('confidence', 0)
+            tagged = t.get('tagged_language', '')
+            detected_norm = normalize_language(detected) if detected else ''
+            tagged_norm = normalize_language(tagged) if tagged else ''
+            # Get codec/channels info from audio_tracks if available
+            track_info = audio_tracks[idx] if idx < len(audio_tracks) else {}
+            codec = track_info.get('codec', '?')
+            channels = track_info.get('channels', '?')
+            needs_change = (
+                not tagged_norm
+                or tagged_norm in _UNDETERMINED_LANGUAGE
+                or tagged_norm != detected_norm
+            )
+            iso3 = ISO_639_1_TO_639_2.get(detected_norm, detected_norm)
+            changes.append({
+                'track_index': idx,
+                'codec': codec,
+                'channels': channels,
+                'current_tag': tagged or 'und',
+                'new_tag': iso3,
+                'new_tag_ietf': detected_norm,
+                'detected_language': detected,
+                'confidence': conf,
+                'needs_change': needs_change,
+            })
+
+        return {
+            'action': 'set_audio_language',
+            'current_path': file_path,
+            'new_path': new_path,
+            'is_mkv': is_mkv,
+            'remux': not is_mkv,
+            'method': 'mkvpropedit' if is_mkv else 'ffmpeg_remux',
+            'tracks': changes,
+            'description': ('In-place metadata edit via mkvpropedit'
+                            if is_mkv
+                            else 'Remux to MKV via ffmpeg (container change: %s → .mkv)'
+                            % ext),
+        }
+
+    def _execute_set_audio_language(self, item):
+        """Execute the set_audio_language fix: update container language tags.
+
+        For MKV files: uses mkvpropedit to edit metadata in-place.
+        For non-MKV files: uses ffmpeg to remux into MKV with correct tags,
+        deletes the original file, and updates all path references.
+
+        Returns (success, details_dict).
+        """
+        file_path = item.get('file_path', '')
+        if not file_path or not os.path.isfile(file_path):
+            return False, {'error': 'File not found: %s' % file_path}
+
+        fp = item.get('file_fingerprint')
+        doc = self._get_knowledge(fp) if fp else None
+        whisper = doc.get('whisper') if doc else None
+        if not whisper or not whisper.get('tracks'):
+            return False, {'error': 'No whisper results — run Verify Audio first'}
+
+        # Build the list of track changes
+        tracks = whisper['tracks']
+        track_changes = []
+        for t in tracks:
+            detected = t.get('language', '')
+            tagged = t.get('tagged_language', '')
+            detected_norm = normalize_language(detected) if detected else ''
+            tagged_norm = normalize_language(tagged) if tagged else ''
+            needs_change = (
+                not tagged_norm
+                or tagged_norm in _UNDETERMINED_LANGUAGE
+                or tagged_norm != detected_norm
+            )
+            if needs_change and detected_norm:
+                iso3 = ISO_639_1_TO_639_2.get(detected_norm, detected_norm)
+                track_changes.append({
+                    'track_index': t.get('track_index', 0),
+                    'iso3': iso3,
+                    'ietf': detected_norm,
+                    'detected': detected,
+                    'old_tag': tagged or 'und',
+                })
+
+        if not track_changes:
+            # All tags already correct — nothing to do
+            return True, {
+                'message': 'All audio tracks already correctly tagged',
+                'tracks_changed': 0,
+            }
+
+        # --- Pre-modification: ensure CRC32/OpenSubtitles hash ---
+        if doc:
+            self._ensure_original_hashes(doc, file_path)
+
+        is_mkv = file_path.lower().endswith('.mkv')
+
+        try:
+            if is_mkv:
+                # In-place edit via mkvpropedit
+                cmd = ['mkvpropedit', file_path]
+                for tc in track_changes:
+                    track_num = 'track:a%d' % (tc['track_index'] + 1)
+                    cmd.extend([
+                        '--edit', track_num,
+                        '--set', 'language=%s' % tc['iso3'],
+                        '--set', 'language-ietf=%s' % tc['ietf'],
+                    ])
+                result = subprocess.run(cmd, capture_output=True, text=True,
+                                        timeout=60)
+                if result.returncode != 0:
+                    return False, {
+                        'error': 'mkvpropedit failed (rc=%d): %s'
+                                 % (result.returncode,
+                                    result.stderr[:500] if result.stderr else ''),
+                    }
+                new_path = file_path  # path unchanged for MKV
+            else:
+                # Remux to MKV via ffmpeg
+                new_path = os.path.splitext(file_path)[0] + '.mkv'
+                if os.path.exists(new_path):
+                    return False, {
+                        'error': 'Destination already exists: %s' % new_path,
+                    }
+                cmd = ['ffmpeg', '-i', file_path, '-c', 'copy', '-map', '0']
+                # Set language metadata for ALL audio tracks (changed + unchanged)
+                for t in tracks:
+                    idx = t.get('track_index', 0)
+                    detected = t.get('language', '')
+                    detected_norm = normalize_language(detected) if detected else ''
+                    iso3 = ISO_639_1_TO_639_2.get(detected_norm, detected_norm)
+                    if iso3:
+                        cmd.extend([
+                            '-metadata:s:a:%d' % idx,
+                            'language=%s' % iso3,
+                        ])
+                cmd.extend(['-y', new_path])
+                result = subprocess.run(cmd, capture_output=True, text=True,
+                                        timeout=600)
+                if result.returncode != 0:
+                    # Clean up partial output
+                    if os.path.exists(new_path):
+                        try:
+                            os.remove(new_path)
+                        except OSError:
+                            pass
+                    return False, {
+                        'error': 'ffmpeg remux failed (rc=%d): %s'
+                                 % (result.returncode,
+                                    result.stderr[:500] if result.stderr else ''),
+                    }
+                # Delete original non-MKV file
+                try:
+                    os.remove(file_path)
+                except OSError as e:
+                    log.error('Failed to delete original after remux: %s', (e,))
+
+        except subprocess.TimeoutExpired:
+            return False, {'error': 'Command timed out'}
+        except Exception as e:
+            return False, {'error': 'Subprocess error: %s' % e}
+
+        # --- Post-modification: update fingerprint ---
+        detail_parts = ['%s: %s → %s' % (
+            'Track %d' % tc['track_index'], tc['old_tag'], tc['iso3'])
+            for tc in track_changes]
+        detail_str = '; '.join(detail_parts)
+        if doc:
+            self._post_modification_update(doc, new_path,
+                                           'set_audio_language', detail_str)
+            # Update file_path in knowledge doc if path changed (remux)
+            if new_path != file_path:
+                doc['file_path'] = new_path
+                self._update_knowledge(doc)
+
+        # Update audio tracks in the item's actual data
+        audio_tracks = item.get('actual', {}).get('audio_tracks', [])
+        for tc in track_changes:
+            idx = tc['track_index']
+            if idx < len(audio_tracks):
+                audio_tracks[idx]['language'] = tc['ietf']
+
+        # Update item path if changed (remux)
+        if new_path != file_path:
+            item['file_path'] = new_path
+            item['file'] = os.path.basename(new_path)
+
+        # Remove audio_mislabeled flag and recompute recommended action
+        item['flags'] = [f for f in item.get('flags', [])
+                         if f['check'] != 'audio_mislabeled']
+        item['flag_count'] = len(item['flags'])
+        item['recommended_action'] = compute_recommended_action(
+            item['flags'], item.get('identification'), item.get('expected'))
+
+        return True, {
+            'new_path': new_path,
+            'tracks_changed': len(track_changes),
+            'track_details': detail_str,
+            'method': 'mkvpropedit' if is_mkv else 'ffmpeg_remux',
+            'remuxed': not is_mkv,
+        }
+
     def _save_results(self):
         """Persist last_report to disk."""
         if not self.last_report:
@@ -5686,9 +5944,12 @@ class Audit(Plugin if _CP_AVAILABLE else object):
     def _apply_whisper_result(self, item, result):
         """Apply whisper verification to an item: update flags and knowledge.
 
-        Examines per-track results.  If any track is in an accepted language,
-        the foreign/unknown flags are cleared.  Otherwise, a foreign_audio
-        flag is added with per-track detail.
+        Examines per-track results:
+        - If any track is in an accepted language AND any track has a
+          wrong/missing tag → audio_mislabeled flag (recommend set_audio_language)
+        - If any track is accepted AND all tags already correct → clear flags
+        - If no track is accepted → foreign_audio flag (recommend delete)
+        - If detection failed → leave existing flags unchanged
 
         Stores the result in the file_knowledge DB doc for future reference.
         """
@@ -5709,9 +5970,11 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         if not tracks:
             return  # no results, leave flags as-is
 
-        # Check if ANY track detected an accepted language
+        # Check if ANY track detected an accepted language, and whether
+        # any track has a wrong/missing tag (needs relabeling)
         accepted = {'en'}  # TODO: read from config
         any_accepted = False
+        any_needs_tag = False
         track_details = []
         for t in tracks:
             lang = t.get('language')
@@ -5725,16 +5988,30 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             track_details.append(
                 'Track %d (%s): %s %.0f%%' % (
                     t.get('track_index', 0), tagged, lang, conf * 100))
+            # Check if this track's container tag matches whisper detection
+            tagged_norm = normalize_language(tagged) if tagged and tagged != '?' else ''
+            if not tagged_norm or tagged_norm in _UNDETERMINED_LANGUAGE or tagged_norm != normalized:
+                any_needs_tag = True
 
-        # Update flags: remove unknown_audio and existing foreign_audio,
-        # then re-add foreign_audio only if no track is accepted
+        # Update flags: remove unknown_audio, foreign_audio, and audio_mislabeled
+        # then add the appropriate replacement flag
         flags = item.get('flags', [])
         new_flags = [f for f in flags
-                     if f['check'] not in ('unknown_audio', 'foreign_audio')]
+                     if f['check'] not in ('unknown_audio', 'foreign_audio',
+                                           'audio_mislabeled')]
 
         if any_accepted:
-            # At least one track is accepted — clear the flag
-            pass
+            if any_needs_tag:
+                # English detected but container tags are wrong/missing —
+                # recommend fixing the tags rather than deleting
+                detail = 'Whisper verified: ' + '; '.join(track_details) \
+                    + ' — language tags need updating'
+                new_flags.append({
+                    'check': 'audio_mislabeled',
+                    'severity': 'LOW',
+                    'detail': detail,
+                })
+            # else: all tags already correct — no audio flag needed
         else:
             detail = 'Whisper: ' + '; '.join(track_details) if track_details \
                 else 'Whisper: no language detected'
@@ -6154,7 +6431,11 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         if item.get('fixed'):
             return {'success': False, 'error': 'Item already fixed'}
 
-        preview = generate_fix_preview(item, action)
+        # set_audio_language needs instance access (knowledge DB)
+        if action == 'set_audio_language':
+            preview = self._preview_set_audio_language(item)
+        else:
+            preview = generate_fix_preview(item, action)
         if 'error' in preview:
             return {'success': False, 'error': preview['error']}
 
@@ -6202,6 +6483,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             return self.verifyView(item_id=item.get('item_id'))
         elif action == 'reassign_movie':
             success, details = execute_fix_reassign_movie(item)
+        elif action == 'set_audio_language':
+            success, details = self._execute_set_audio_language(item)
         else:
             return {'success': False, 'error': 'Unknown action: %s' % action}
 
@@ -6468,7 +6751,10 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             self.fix_in_progress['current_item'] = item.get('folder', '')
 
             if dry_run:
-                preview = generate_fix_preview(item, action)
+                if action == 'set_audio_language':
+                    preview = self._preview_set_audio_language(item)
+                else:
+                    preview = generate_fix_preview(item, action)
                 results.append({
                     'item_id': item.get('item_id', ''),
                     'folder': item.get('folder', ''),
@@ -6500,6 +6786,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                         success, details = False, {'error': 'File not accessible'}
                 elif action == 'reassign_movie':
                     success, details = execute_fix_reassign_movie(item)
+                elif action == 'set_audio_language':
+                    success, details = self._execute_set_audio_language(item)
                 else:
                     success, details = False, {'error': 'Unknown action'}
 

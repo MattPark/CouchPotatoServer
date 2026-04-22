@@ -152,7 +152,8 @@ var AuditSettingTab = new Class({
 			new Element('option', { 'value': 'template', 'text': 'Template' }),
 			new Element('option', { 'value': 'duplicate', 'text': 'Duplicate' }),
 			new Element('option', { 'value': 'foreign_audio', 'text': 'Foreign Audio' }),
-			new Element('option', { 'value': 'unknown_audio', 'text': 'Unknown Audio' })
+			new Element('option', { 'value': 'unknown_audio', 'text': 'Unknown Audio' }),
+			new Element('option', { 'value': 'audio_mislabeled', 'text': 'Audio Mislabeled' })
 		).inject(filters);
 
 		// Severity filter
@@ -178,6 +179,7 @@ var AuditSettingTab = new Class({
 			new Element('option', { 'value': 'delete_wrong', 'text': 'Delete Wrong' }),
 			new Element('option', { 'value': 'delete_duplicate', 'text': 'Delete Duplicate' }),
 			new Element('option', { 'value': 'delete_foreign', 'text': 'Delete Foreign Audio' }),
+			new Element('option', { 'value': 'set_audio_language', 'text': 'Set Audio Language' }),
 			new Element('option', { 'value': 'verify_audio', 'text': 'Verify Audio (Whisper)' }),
 			new Element('option', { 'value': 'reassign_movie', 'text': 'Reassign Movie' }),
 			new Element('option', { 'value': 'needs_full', 'text': 'Needs Identification' }),
@@ -426,7 +428,7 @@ var AuditSettingTab = new Class({
 			new Element('div.audit_bars_title', { 'text': 'Issues by Type' }).inject(bars_section);
 
 			var max_count = 0;
-			var check_types = ['resolution', 'title', 'runtime', 'tv_episode', 'edition', 'template', 'duplicate'];
+			var check_types = ['resolution', 'title', 'runtime', 'tv_episode', 'edition', 'template', 'duplicate', 'foreign_audio', 'unknown_audio', 'audio_mislabeled'];
 			var check_labels = {
 				'resolution': 'Resolution Mismatch',
 				'title': 'Title Mismatch',
@@ -434,7 +436,10 @@ var AuditSettingTab = new Class({
 				'tv_episode': 'TV Episode',
 				'edition': 'Edition Missing',
 				'template': 'Template Mismatch',
-				'duplicate': 'Duplicate File'
+				'duplicate': 'Duplicate File',
+				'foreign_audio': 'Foreign Audio',
+				'unknown_audio': 'Unknown Audio',
+				'audio_mislabeled': 'Audio Mislabeled'
 			};
 			var check_colors = {
 				'resolution': '#ff9800',
@@ -443,7 +448,10 @@ var AuditSettingTab = new Class({
 				'tv_episode': '#f44336',
 				'edition': '#2196f3',
 				'template': '#9c27b0',
-				'duplicate': '#795548'
+				'duplicate': '#795548',
+				'foreign_audio': '#ff5722',
+				'unknown_audio': '#607d8b',
+				'audio_mislabeled': '#e91e63'
 			};
 
 			check_types.each(function(ct){
@@ -478,6 +486,7 @@ var AuditSettingTab = new Class({
 				'delete_wrong': 'Delete TV Episodes',
 				'delete_duplicate': 'Delete Duplicates',
 				'delete_foreign': 'Delete Foreign Audio',
+				'set_audio_language': 'Set Audio Language',
 				'verify_audio': 'Verify Audio (Whisper)',
 				'reassign_movie': 'Reassign Movie',
 				'needs_full': 'Needs Identification',
@@ -490,6 +499,7 @@ var AuditSettingTab = new Class({
 				'delete_wrong': '#f44336',
 				'delete_duplicate': '#e91e63',
 				'delete_foreign': '#ff5722',
+				'set_audio_language': '#4caf50',
 				'verify_audio': '#607d8b',
 				'reassign_movie': '#ff9800',
 				'needs_full': '#9e9e9e',
@@ -961,6 +971,7 @@ var AuditSettingTab = new Class({
 			{ action: 'delete_wrong', label: 'Delete All TV Episodes' },
 			{ action: 'delete_duplicate', label: 'Delete All Duplicates' },
 			{ action: 'delete_foreign', label: 'Delete All Foreign Audio' },
+			{ action: 'set_audio_language', label: 'Set All Audio Language' },
 			{ action: 'verify_audio', label: 'Verify All Unknown Audio (Whisper)' }
 		];
 
@@ -1529,7 +1540,8 @@ var AuditSettingTab = new Class({
 			'template': 'TPL',
 			'duplicate': 'DUP',
 			'foreign_audio': 'LANG',
-			'unknown_audio': '?'
+			'unknown_audio': '?',
+			'audio_mislabeled': 'LANG!'
 		};
 		return icons[check] || check;
 	},
@@ -1542,6 +1554,7 @@ var AuditSettingTab = new Class({
 			'delete_wrong': 'Delete',
 			'delete_duplicate': 'Delete Duplicate',
 			'delete_foreign': 'Delete (Foreign Audio)',
+			'set_audio_language': 'Set Audio Language',
 			'verify_audio': 'Verify Audio',
 			'reassign_movie': 'Reassign Movie',
 			'needs_full': 'Needs Identification',
@@ -1564,6 +1577,7 @@ var AuditSettingTab = new Class({
 		if(has['tv_episode']) actions.push('delete_wrong');
 		if(has['duplicate']) actions.push('delete_duplicate');
 		if(has['foreign_audio']) actions.push('delete_foreign');
+		if(has['audio_mislabeled']) actions.push('set_audio_language');
 		if(has['unknown_audio'] || has['foreign_audio']) actions.push('verify_audio');
 		if(has['title'] && item.identification && item.identification.method !== 'skipped')
 			actions.push('reassign_movie');

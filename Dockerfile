@@ -51,6 +51,7 @@ RUN \
     mediainfo \
     libarchive-tools \
     ffmpeg \
+    mkvtoolnix \
     libgomp && \
   echo "**** install pip packages ****" && \
   pip3 install --no-cache-dir --break-system-packages \

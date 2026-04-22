@@ -42,6 +42,7 @@ from couchpotato.core.plugins.audit import (
     _run_whisper_detection,
     _scan_single_file,
     needs_identification,
+    ISO_639_1_TO_639_2,
 )
 import os
 import re
@@ -2781,7 +2782,7 @@ class TestApplyWhisperResult:
         return p
 
     def test_english_detected_clears_flag(self, tmp_path):
-        """Whisper detects English → unknown_audio flag removed, no new flags."""
+        """Whisper detects English but tag is wrong → audio_mislabeled flag."""
         db = self._make_db(tmp_path)
         p = self._make_plugin()
 
@@ -2802,7 +2803,10 @@ class TestApplyWhisperResult:
         checks = {f['check'] for f in item['flags']}
         assert 'unknown_audio' not in checks
         assert 'foreign_audio' not in checks
-        assert item['flag_count'] == 0
+        # English detected but tag is empty → audio_mislabeled (needs tag fix)
+        assert 'audio_mislabeled' in checks
+        assert item['flag_count'] == 1
+        assert item['recommended_action'] == 'set_audio_language'
 
     def test_foreign_detected_reclassifies(self, tmp_path):
         """Whisper detects French → unknown_audio replaced with foreign_audio."""
@@ -2904,7 +2908,7 @@ class TestApplyWhisperResult:
         assert 'Whisper' in foreign_flags[0]['detail']
 
     def test_whisper_english_clears_foreign_audio(self, tmp_path):
-        """Item with foreign_audio + whisper says English → flag removed."""
+        """Item with foreign_audio + whisper says English → audio_mislabeled (tag wrong)."""
         db = self._make_db(tmp_path)
         p = self._make_plugin()
 
@@ -2929,7 +2933,10 @@ class TestApplyWhisperResult:
 
         checks = {f['check'] for f in item['flags']}
         assert 'foreign_audio' not in checks
-        assert item['flag_count'] == 0
+        # Tagged 'de' but actually English → audio_mislabeled
+        assert 'audio_mislabeled' in checks
+        assert item['flag_count'] == 1
+        assert item['recommended_action'] == 'set_audio_language'
 
 
 # ---------------------------------------------------------------------------
@@ -3458,3 +3465,1242 @@ class TestIdentifyCachedHashes:
                                                 filepath=str(f))
         assert result['method'] == 'opensubtitles_hash'
         assert result['moviehash'] == 'CACHED_OSH'
+
+
+# ---------------------------------------------------------------------------
+# TestSetAudioLanguage — set_audio_language feature tests
+# ---------------------------------------------------------------------------
+
+class TestSetAudioLanguage:
+    """Tests for the set_audio_language feature.
+
+    Covers:
+      A. compute_recommended_action with audio_mislabeled flag
+      B. _apply_whisper_result flag reclassification to audio_mislabeled
+      C. _preview_set_audio_language
+      D. _execute_set_audio_language (MKV + non-MKV paths)
+      E. ISO_639_1_TO_639_2 mapping
+      F. Integration / edge cases
+    """
+
+    @staticmethod
+    def _flags(*checks):
+        return [{'check': c, 'severity': 'MEDIUM', 'detail': 'test'} for c in checks]
+
+    @staticmethod
+    def _make_db(tmp_path):
+        from couchpotato.core.db import CouchDB
+        db_dir = str(tmp_path / 'db')
+        os.makedirs(db_dir, exist_ok=True)
+        db = CouchDB(db_dir)
+        db.create()
+        return db
+
+    @staticmethod
+    def _make_plugin():
+        from couchpotato.core.plugins.audit import Audit
+        import types
+
+        class _MockPlugin:
+            last_report = None
+
+        p = _MockPlugin()
+        for name in ('_apply_whisper_result',
+                     '_get_knowledge', '_get_or_create_knowledge',
+                     '_update_knowledge', '_ensure_original_hashes',
+                     '_post_modification_update', '_cache_identification',
+                     '_preview_set_audio_language',
+                     '_execute_set_audio_language'):
+            method = getattr(Audit, name)
+            setattr(p, name, types.MethodType(method, p))
+        return p
+
+    # -----------------------------------------------------------------------
+    # A. compute_recommended_action with audio_mislabeled
+    # -----------------------------------------------------------------------
+
+    def test_audio_mislabeled_recommends_set_audio_language(self):
+        assert compute_recommended_action(
+            self._flags('audio_mislabeled')) == 'set_audio_language'
+
+    def test_audio_mislabeled_with_title_flag(self):
+        """audio_mislabeled takes priority over title flag."""
+        assert compute_recommended_action(
+            self._flags('audio_mislabeled', 'title')) == 'set_audio_language'
+
+    def test_audio_mislabeled_loses_to_tv_episode(self):
+        assert compute_recommended_action(
+            self._flags('tv_episode', 'audio_mislabeled')) == 'delete_wrong'
+
+    def test_audio_mislabeled_loses_to_duplicate(self):
+        assert compute_recommended_action(
+            self._flags('duplicate', 'audio_mislabeled')) == 'delete_duplicate'
+
+    def test_unknown_audio_still_returns_verify(self):
+        """Existing unknown_audio behavior unchanged."""
+        assert compute_recommended_action(
+            self._flags('unknown_audio')) == 'verify_audio'
+
+    # -----------------------------------------------------------------------
+    # B. _apply_whisper_result — audio_mislabeled flag logic
+    # -----------------------------------------------------------------------
+
+    def test_english_mislabeled_single_track(self, tmp_path):
+        """English detected but tagged 'und' → audio_mislabeled flag."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        item = {
+            'item_id': 'sal_1', 'file_fingerprint': '100:aa',
+            'file_path': '/movies/a.mkv',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW', 'detail': 'x'}],
+            'flag_count': 1, 'recommended_action': 'verify_audio',
+        }
+        result = {
+            'language': 'en', 'confidence': 0.95,
+            'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                         'language': 'en', 'confidence': 0.95}],
+        }
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
+        checks = {f['check'] for f in item['flags']}
+        assert 'audio_mislabeled' in checks
+        assert 'unknown_audio' not in checks
+        assert 'foreign_audio' not in checks
+        assert item['recommended_action'] == 'set_audio_language'
+
+    def test_english_mislabeled_from_foreign_audio(self, tmp_path):
+        """File tagged 'de' but actually English → audio_mislabeled."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        item = {
+            'item_id': 'sal_2', 'file_fingerprint': '200:bb',
+            'file_path': '/movies/b.mkv',
+            'flags': [{'check': 'foreign_audio', 'severity': 'LOW', 'detail': 'x'}],
+            'flag_count': 1, 'recommended_action': 'delete_foreign',
+        }
+        result = {
+            'language': 'en', 'confidence': 0.99,
+            'tracks': [{'track_index': 0, 'tagged_language': 'de',
+                         'language': 'en', 'confidence': 0.99}],
+        }
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
+        checks = {f['check'] for f in item['flags']}
+        assert 'audio_mislabeled' in checks
+        assert 'foreign_audio' not in checks
+        assert item['recommended_action'] == 'set_audio_language'
+
+    def test_english_correctly_tagged_clears_flags(self, tmp_path):
+        """English detected and already tagged 'eng' → no audio flag."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        item = {
+            'item_id': 'sal_3', 'file_fingerprint': '300:cc',
+            'file_path': '/movies/c.mkv',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW', 'detail': 'x'}],
+            'flag_count': 1, 'recommended_action': 'verify_audio',
+        }
+        result = {
+            'language': 'en', 'confidence': 0.98,
+            'tracks': [{'track_index': 0, 'tagged_language': 'eng',
+                         'language': 'en', 'confidence': 0.98}],
+        }
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
+        audio_flags = {f['check'] for f in item['flags']
+                       if f['check'] in ('unknown_audio', 'foreign_audio', 'audio_mislabeled')}
+        assert len(audio_flags) == 0
+
+    def test_foreign_confirmed_single_track(self, tmp_path):
+        """Foreign detected → foreign_audio (existing behavior)."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        item = {
+            'item_id': 'sal_4', 'file_fingerprint': '400:dd',
+            'file_path': '/movies/d.mkv',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW', 'detail': 'x'}],
+            'flag_count': 1, 'recommended_action': 'verify_audio',
+        }
+        result = {
+            'language': 'fr', 'confidence': 0.92,
+            'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                         'language': 'fr', 'confidence': 0.92}],
+        }
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
+        checks = {f['check'] for f in item['flags']}
+        assert 'foreign_audio' in checks
+        assert 'audio_mislabeled' not in checks
+        assert item['recommended_action'] == 'delete_foreign'
+
+    def test_multi_track_all_und_all_english(self, tmp_path):
+        """3 tracks all 'und', all detected English → audio_mislabeled."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        item = {
+            'item_id': 'sal_5', 'file_fingerprint': '500:ee',
+            'file_path': '/movies/e.mkv',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW', 'detail': 'x'}],
+            'flag_count': 1, 'recommended_action': 'verify_audio',
+        }
+        result = {
+            'language': 'en', 'confidence': 0.95,
+            'tracks': [
+                {'track_index': 0, 'tagged_language': 'und', 'language': 'en', 'confidence': 0.95},
+                {'track_index': 1, 'tagged_language': 'und', 'language': 'en', 'confidence': 0.90},
+                {'track_index': 2, 'tagged_language': 'und', 'language': 'en', 'confidence': 0.93},
+            ],
+        }
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
+        checks = {f['check'] for f in item['flags']}
+        assert 'audio_mislabeled' in checks
+        assert item['recommended_action'] == 'set_audio_language'
+
+    def test_multi_track_all_und_mixed_languages(self, tmp_path):
+        """2 tracks 'und': English + French → audio_mislabeled (has English)."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        item = {
+            'item_id': 'sal_6', 'file_fingerprint': '600:ff',
+            'file_path': '/movies/f.mkv',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW', 'detail': 'x'}],
+            'flag_count': 1, 'recommended_action': 'verify_audio',
+        }
+        result = {
+            'language': 'en', 'confidence': 0.95,
+            'tracks': [
+                {'track_index': 0, 'tagged_language': 'und', 'language': 'en', 'confidence': 0.95},
+                {'track_index': 1, 'tagged_language': 'und', 'language': 'fr', 'confidence': 0.88},
+            ],
+        }
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
+        checks = {f['check'] for f in item['flags']}
+        assert 'audio_mislabeled' in checks
+        assert item['recommended_action'] == 'set_audio_language'
+
+    def test_multi_track_one_correct_one_wrong(self, tmp_path):
+        """Track 1 correctly tagged 'eng', track 2 'und' → audio_mislabeled."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        item = {
+            'item_id': 'sal_7', 'file_fingerprint': '700:gg',
+            'file_path': '/movies/g.mkv',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW', 'detail': 'x'}],
+            'flag_count': 1, 'recommended_action': 'verify_audio',
+        }
+        result = {
+            'language': 'en', 'confidence': 0.95,
+            'tracks': [
+                {'track_index': 0, 'tagged_language': 'eng', 'language': 'en', 'confidence': 0.97},
+                {'track_index': 1, 'tagged_language': 'und', 'language': 'fr', 'confidence': 0.90},
+            ],
+        }
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
+        checks = {f['check'] for f in item['flags']}
+        assert 'audio_mislabeled' in checks
+
+    def test_multi_track_all_correctly_tagged(self, tmp_path):
+        """Both tracks tagged correctly → no audio flag."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        item = {
+            'item_id': 'sal_8', 'file_fingerprint': '800:hh',
+            'file_path': '/movies/h.mkv',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW', 'detail': 'x'}],
+            'flag_count': 1, 'recommended_action': 'verify_audio',
+        }
+        result = {
+            'language': 'en', 'confidence': 0.95,
+            'tracks': [
+                {'track_index': 0, 'tagged_language': 'eng', 'language': 'en', 'confidence': 0.97},
+                {'track_index': 1, 'tagged_language': 'fre', 'language': 'fr', 'confidence': 0.92},
+            ],
+        }
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
+        audio_flags = {f['check'] for f in item['flags']
+                       if f['check'] in ('unknown_audio', 'foreign_audio', 'audio_mislabeled')}
+        assert len(audio_flags) == 0
+
+    def test_multi_track_no_english_all_foreign(self, tmp_path):
+        """2 tracks 'und', both foreign → foreign_audio."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        item = {
+            'item_id': 'sal_9', 'file_fingerprint': '900:ii',
+            'file_path': '/movies/i.mkv',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW', 'detail': 'x'}],
+            'flag_count': 1, 'recommended_action': 'verify_audio',
+        }
+        result = {
+            'language': 'fr', 'confidence': 0.93,
+            'tracks': [
+                {'track_index': 0, 'tagged_language': 'und', 'language': 'fr', 'confidence': 0.93},
+                {'track_index': 1, 'tagged_language': 'und', 'language': 'de', 'confidence': 0.88},
+            ],
+        }
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
+        checks = {f['check'] for f in item['flags']}
+        assert 'foreign_audio' in checks
+        assert 'audio_mislabeled' not in checks
+
+    def test_multi_track_english_plus_foreign_both_tagged_wrong(self, tmp_path):
+        """Track tagged 'fre' is actually English → audio_mislabeled."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        item = {
+            'item_id': 'sal_10', 'file_fingerprint': '1000:jj',
+            'file_path': '/movies/j.mkv',
+            'flags': [{'check': 'foreign_audio', 'severity': 'LOW', 'detail': 'x'}],
+            'flag_count': 1, 'recommended_action': 'delete_foreign',
+        }
+        result = {
+            'language': 'en', 'confidence': 0.96,
+            'tracks': [
+                {'track_index': 0, 'tagged_language': 'fre', 'language': 'en', 'confidence': 0.96},
+                {'track_index': 1, 'tagged_language': 'und', 'language': 'ja', 'confidence': 0.85},
+                {'track_index': 2, 'tagged_language': 'und', 'language': 'en', 'confidence': 0.91},
+            ],
+        }
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
+        checks = {f['check'] for f in item['flags']}
+        assert 'audio_mislabeled' in checks
+        assert 'foreign_audio' not in checks
+
+    def test_failed_detection_preserves_flags(self, tmp_path):
+        """Whisper returns None → keep original unknown_audio flag."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        item = {
+            'item_id': 'sal_11', 'file_fingerprint': '1100:kk',
+            'file_path': '/movies/k.mkv',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW', 'detail': 'x'}],
+            'flag_count': 1, 'recommended_action': 'verify_audio',
+        }
+        result = {'language': None, 'confidence': 0.0, 'tracks': []}
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
+        checks = {f['check'] for f in item['flags']}
+        assert 'unknown_audio' in checks
+
+    def test_stores_whisper_in_knowledge_with_mislabeled(self, tmp_path):
+        """Whisper data stored in knowledge doc even when audio_mislabeled."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        item = {
+            'item_id': 'sal_12', 'file_fingerprint': '1200:ll',
+            'file_path': '/movies/l.mkv',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW', 'detail': 'x'}],
+            'flag_count': 1, 'recommended_action': 'verify_audio',
+        }
+        result = {
+            'language': 'en', 'confidence': 0.95,
+            'tracks': [{'track_index': 0, 'tagged_language': '',
+                         'language': 'en', 'confidence': 0.95,
+                         'samples': [{'offset_pct': 50, 'language': 'en', 'confidence': 0.95}]}],
+        }
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            p._apply_whisper_result(item, result)
+            doc = p._get_knowledge('1200:ll')
+        assert doc is not None
+        assert doc['whisper']['language'] == 'en'
+        assert len(doc['whisper']['tracks']) == 1
+        # And the flag should be audio_mislabeled
+        assert any(f['check'] == 'audio_mislabeled' for f in item['flags'])
+
+    # -----------------------------------------------------------------------
+    # C. _preview_set_audio_language
+    # -----------------------------------------------------------------------
+
+    def test_preview_mkv_single_track_change(self, tmp_path):
+        """MKV file, 1 track und→eng: preview shows change."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('100:aa', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                             'language': 'en', 'confidence': 0.95}],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '100:aa',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AC3', 'channels': '5.1', 'language': ''},
+                ]},
+            }
+            preview = p._preview_set_audio_language(item)
+        assert preview['action'] == 'set_audio_language'
+        assert preview['is_mkv'] is True
+        assert preview['remux'] is False
+        assert preview['method'] == 'mkvpropedit'
+        assert len(preview['tracks']) == 1
+        assert preview['tracks'][0]['needs_change'] is True
+        assert preview['tracks'][0]['new_tag'] == 'eng'
+        assert preview['tracks'][0]['current_tag'] == 'und'
+
+    def test_preview_mkv_multi_track_mixed(self, tmp_path):
+        """MKV, 3 tracks: one needs change, one correct, one needs change."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'multi.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('200:bb', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [
+                    {'track_index': 0, 'tagged_language': 'und', 'language': 'en', 'confidence': 0.95},
+                    {'track_index': 1, 'tagged_language': 'fre', 'language': 'fr', 'confidence': 0.90},
+                    {'track_index': 2, 'tagged_language': 'und', 'language': 'en', 'confidence': 0.88},
+                ],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '200:bb',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AC3', 'channels': '5.1', 'language': ''},
+                    {'codec': 'DTS', 'channels': '5.1', 'language': 'fr'},
+                    {'codec': 'AAC', 'channels': '2.0', 'language': ''},
+                ]},
+            }
+            preview = p._preview_set_audio_language(item)
+        assert len(preview['tracks']) == 3
+        assert preview['tracks'][0]['needs_change'] is True
+        assert preview['tracks'][1]['needs_change'] is False  # fre matches fr
+        assert preview['tracks'][2]['needs_change'] is True
+
+    def test_preview_non_mkv_shows_remux(self, tmp_path):
+        """MP4 file → preview indicates remux to .mkv."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mp4'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('300:cc', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                             'language': 'en', 'confidence': 0.95}],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '300:cc',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AAC', 'channels': '2.0', 'language': ''},
+                ]},
+            }
+            preview = p._preview_set_audio_language(item)
+        assert preview['remux'] is True
+        assert preview['is_mkv'] is False
+        assert preview['method'] == 'ffmpeg_remux'
+        assert preview['new_path'].endswith('.mkv')
+        assert not preview['new_path'].endswith('.mp4')
+
+    def test_preview_non_mkv_avi(self, tmp_path):
+        """AVI file → same remux behavior as MP4."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.avi'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('400:dd', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'tagged_language': '',
+                             'language': 'en', 'confidence': 0.95}],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '400:dd',
+                'actual': {'audio_tracks': [
+                    {'codec': 'MP3', 'channels': '2.0', 'language': ''},
+                ]},
+            }
+            preview = p._preview_set_audio_language(item)
+        assert preview['remux'] is True
+        assert preview['new_path'].endswith('.mkv')
+        assert '.avi' in preview['description']
+
+    def test_preview_no_whisper_result_errors(self, tmp_path):
+        """No whisper data in knowledge → error."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            item = {
+                'file_path': str(f), 'file_fingerprint': '500:ee',
+                'actual': {'audio_tracks': []},
+            }
+            preview = p._preview_set_audio_language(item)
+        assert 'error' in preview
+        assert 'whisper' in preview['error'].lower() or 'Verify Audio' in preview['error']
+
+    def test_preview_file_not_found_errors(self):
+        """File doesn't exist → error."""
+        p = self._make_plugin()
+        item = {
+            'file_path': '/nonexistent/movie.mkv', 'file_fingerprint': '600:ff',
+            'actual': {'audio_tracks': []},
+        }
+        preview = p._preview_set_audio_language(item)
+        assert 'error' in preview
+
+    # -----------------------------------------------------------------------
+    # D. _execute_set_audio_language
+    # -----------------------------------------------------------------------
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:new')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_mkv_single_track_mkvpropedit_args(
+            self, mock_crc, mock_osh, mock_fp, mock_run, tmp_path):
+        """MKV, 1 track und→eng: mkvpropedit called with correct args."""
+        mock_run.return_value = mock.Mock(returncode=0, stderr='', stdout='')
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('100:aa', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                             'language': 'en', 'confidence': 0.95}],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '100:aa',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AC3', 'channels': '5.1', 'language': ''},
+                ]},
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'set_audio_language',
+            }
+            success, details = p._execute_set_audio_language(item)
+        assert success is True
+        assert details['method'] == 'mkvpropedit'
+        assert details['tracks_changed'] == 1
+        # Verify mkvpropedit args
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == 'mkvpropedit'
+        assert cmd[1] == str(f)
+        assert '--edit' in cmd
+        assert 'track:a1' in cmd
+        assert 'language=eng' in cmd
+        assert 'language-ietf=en' in cmd
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:new')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_mkv_multi_track_only_wrong_tracks(
+            self, mock_crc, mock_osh, mock_fp, mock_run, tmp_path):
+        """MKV, 3 tracks: only tracks with wrong tags in mkvpropedit cmd."""
+        mock_run.return_value = mock.Mock(returncode=0, stderr='', stdout='')
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('200:bb', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [
+                    {'track_index': 0, 'tagged_language': 'und', 'language': 'en', 'confidence': 0.95},
+                    {'track_index': 1, 'tagged_language': 'fre', 'language': 'fr', 'confidence': 0.90},
+                    {'track_index': 2, 'tagged_language': 'und', 'language': 'ja', 'confidence': 0.85},
+                ],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '200:bb',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AC3', 'channels': '5.1', 'language': ''},
+                    {'codec': 'DTS', 'channels': '5.1', 'language': 'fr'},
+                    {'codec': 'AAC', 'channels': '2.0', 'language': ''},
+                ]},
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'set_audio_language',
+            }
+            success, details = p._execute_set_audio_language(item)
+        assert success is True
+        assert details['tracks_changed'] == 2  # track 0 and 2, not 1
+        cmd = mock_run.call_args[0][0]
+        assert 'track:a1' in cmd  # track_index 0
+        assert 'track:a2' not in cmd  # track_index 1 (correctly tagged)
+        assert 'track:a3' in cmd  # track_index 2
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:new')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_mkv_multi_track_all_need_fix(
+            self, mock_crc, mock_osh, mock_fp, mock_run, tmp_path):
+        """MKV, 2 tracks both 'und' → both in single mkvpropedit cmd."""
+        mock_run.return_value = mock.Mock(returncode=0, stderr='', stdout='')
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('300:cc', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [
+                    {'track_index': 0, 'tagged_language': 'und', 'language': 'en', 'confidence': 0.95},
+                    {'track_index': 1, 'tagged_language': 'und', 'language': 'fr', 'confidence': 0.88},
+                ],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '300:cc',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AC3', 'channels': '5.1', 'language': ''},
+                    {'codec': 'DTS', 'channels': '5.1', 'language': ''},
+                ]},
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'set_audio_language',
+            }
+            success, details = p._execute_set_audio_language(item)
+        assert success is True
+        assert details['tracks_changed'] == 2
+        cmd = mock_run.call_args[0][0]
+        assert 'track:a1' in cmd
+        assert 'track:a2' in cmd
+        # Single subprocess call
+        assert mock_run.call_count == 1
+
+    @mock.patch('couchpotato.core.plugins.audit.os.remove')
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:new')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_non_mkv_ffmpeg_remux_args(
+            self, mock_crc, mock_osh, mock_fp, mock_run, mock_remove, tmp_path):
+        """MP4, 1 track: ffmpeg remux called, original deleted."""
+        mock_run.return_value = mock.Mock(returncode=0, stderr='', stdout='')
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mp4'
+        f.write_bytes(b'\x00' * 100)
+        mkv_path = tmp_path / 'movie.mkv'
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('400:dd', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                             'language': 'en', 'confidence': 0.95}],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '400:dd',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AAC', 'channels': '2.0', 'language': ''},
+                ]},
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'set_audio_language',
+            }
+            success, details = p._execute_set_audio_language(item)
+        assert success is True
+        assert details['method'] == 'ffmpeg_remux'
+        assert details['remuxed'] is True
+        # Check ffmpeg command
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == 'ffmpeg'
+        assert '-c' in cmd and 'copy' in cmd
+        assert '-map' in cmd and '0' in cmd
+        assert '-metadata:s:a:0' in cmd
+        assert 'language=eng' in cmd
+        # Original mp4 deleted
+        mock_remove.assert_called_once_with(str(f))
+        # Item path updated
+        assert item['file_path'] == str(mkv_path)
+        assert item['file'].endswith('.mkv')
+
+    @mock.patch('couchpotato.core.plugins.audit.os.remove')
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:new')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_non_mkv_updates_all_paths(
+            self, mock_crc, mock_osh, mock_fp, mock_run, mock_remove, tmp_path):
+        """Non-MKV remux updates item paths and knowledge doc file_path."""
+        mock_run.return_value = mock.Mock(returncode=0, stderr='', stdout='')
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mp4'
+        f.write_bytes(b'\x00' * 100)
+        mkv_path = tmp_path / 'movie.mkv'
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('500:ee', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                             'language': 'en', 'confidence': 0.95}],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '500:ee',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AAC', 'channels': '2.0', 'language': ''},
+                ]},
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'set_audio_language',
+            }
+            success, details = p._execute_set_audio_language(item)
+            # Check knowledge doc path updated
+            updated_doc = p._get_knowledge('999:new')
+        assert success is True
+        assert item['file_path'] == str(mkv_path)
+        assert item['file'] == 'movie.mkv'
+        assert updated_doc is not None
+        assert updated_doc['file_path'] == str(mkv_path)
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_crc32_guard_called_before_mod(
+            self, mock_crc, mock_osh, mock_run, tmp_path):
+        """_ensure_original_hashes called BEFORE subprocess.run."""
+        call_order = []
+        mock_crc.side_effect = lambda f: (call_order.append('crc32'), 'DEADBEEF')[1]
+        mock_osh.side_effect = lambda f: (call_order.append('osh'), 'abcdef')[1]
+        mock_run.side_effect = lambda *a, **kw: (
+            call_order.append('subprocess'),
+            mock.Mock(returncode=0, stderr='', stdout=''))[1]
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db), \
+             mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                        return_value='999:new'):
+            doc = p._get_or_create_knowledge('600:ff', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                             'language': 'en', 'confidence': 0.95}],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '600:ff',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AC3', 'channels': '5.1', 'language': ''},
+                ]},
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'set_audio_language',
+            }
+            p._execute_set_audio_language(item)
+        # CRC32 and OSH must come before subprocess
+        assert call_order.index('crc32') < call_order.index('subprocess')
+        assert call_order.index('osh') < call_order.index('subprocess')
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:new')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_fingerprint_updated_after_mod(
+            self, mock_crc, mock_osh, mock_fp, mock_run, tmp_path):
+        """After MKV edit: original fingerprint preserved, current updated."""
+        mock_run.return_value = mock.Mock(returncode=0, stderr='', stdout='')
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('700:gg', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                             'language': 'en', 'confidence': 0.95}],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '700:gg',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AC3', 'channels': '5.1', 'language': ''},
+                ]},
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'set_audio_language',
+            }
+            success, details = p._execute_set_audio_language(item)
+            updated = p._get_knowledge('999:new')
+        assert success is True
+        assert updated is not None
+        assert updated['original_fingerprint'] == '700:gg'
+        assert updated['current_fingerprint'] == '999:new'
+        assert updated['modified'] is True
+        assert len(updated['modifications']) == 1
+        assert updated['modifications'][0]['type'] == 'set_audio_language'
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:new')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_audio_tracks_updated_in_item(
+            self, mock_crc, mock_osh, mock_fp, mock_run, tmp_path):
+        """After fix: item audio_tracks have new language tags."""
+        mock_run.return_value = mock.Mock(returncode=0, stderr='', stdout='')
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('800:hh', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [
+                    {'track_index': 0, 'tagged_language': 'und', 'language': 'en', 'confidence': 0.95},
+                    {'track_index': 1, 'tagged_language': 'und', 'language': 'fr', 'confidence': 0.88},
+                ],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '800:hh',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AC3', 'channels': '5.1', 'language': ''},
+                    {'codec': 'DTS', 'channels': '5.1', 'language': ''},
+                ]},
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'set_audio_language',
+            }
+            p._execute_set_audio_language(item)
+        assert item['actual']['audio_tracks'][0]['language'] == 'en'
+        assert item['actual']['audio_tracks'][1]['language'] == 'fr'
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:new')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_flag_removed_action_recomputed(
+            self, mock_crc, mock_osh, mock_fp, mock_run, tmp_path):
+        """After fix: audio_mislabeled flag removed, action recomputed."""
+        mock_run.return_value = mock.Mock(returncode=0, stderr='', stdout='')
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('900:ii', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                             'language': 'en', 'confidence': 0.95}],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '900:ii',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AC3', 'channels': '5.1', 'language': ''},
+                ]},
+                'flags': [
+                    {'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'},
+                    {'check': 'title', 'severity': 'MEDIUM', 'detail': 'title mismatch'},
+                ],
+                'flag_count': 2, 'recommended_action': 'set_audio_language',
+            }
+            success, _ = p._execute_set_audio_language(item)
+        assert success is True
+        checks = {f['check'] for f in item['flags']}
+        assert 'audio_mislabeled' not in checks
+        assert 'title' in checks  # other flags preserved
+        assert item['flag_count'] == 1
+        # recommended_action recomputed — title without identification → needs_full
+        assert item['recommended_action'] != 'set_audio_language'
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_subprocess_failure_no_side_effects(
+            self, mock_crc, mock_osh, mock_run, tmp_path):
+        """mkvpropedit fails → no fingerprint update, no flag removal."""
+        mock_run.return_value = mock.Mock(returncode=1, stderr='error', stdout='')
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('1000:jj', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                             'language': 'en', 'confidence': 0.95}],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '1000:jj',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AC3', 'channels': '5.1', 'language': ''},
+                ]},
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'set_audio_language',
+            }
+            success, details = p._execute_set_audio_language(item)
+        assert success is False
+        assert 'error' in details
+        # Flags unchanged
+        assert any(f['check'] == 'audio_mislabeled' for f in item['flags'])
+        assert item['flag_count'] == 1
+
+    @mock.patch('couchpotato.core.plugins.audit.os.remove')
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_non_mkv_remux_failure_original_preserved(
+            self, mock_crc, mock_osh, mock_run, mock_remove, tmp_path):
+        """ffmpeg fails → original .mp4 NOT deleted."""
+        mock_run.return_value = mock.Mock(returncode=1, stderr='error', stdout='')
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mp4'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('1100:kk', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                             'language': 'en', 'confidence': 0.95}],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '1100:kk',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AAC', 'channels': '2.0', 'language': ''},
+                ]},
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'set_audio_language',
+            }
+            success, details = p._execute_set_audio_language(item)
+        assert success is False
+        # Original NOT deleted
+        mock_remove.assert_not_called()
+        # Path unchanged
+        assert item['file_path'] == str(f)
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:new')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_language_code_mapping(
+            self, mock_crc, mock_osh, mock_fp, mock_run, tmp_path):
+        """Whisper 'ja' → mkvpropedit uses 'jpn' and 'ja'."""
+        mock_run.return_value = mock.Mock(returncode=0, stderr='', stdout='')
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('1200:ll', str(f))
+            doc['whisper'] = {
+                'language': 'ja', 'confidence': 0.92,
+                'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                             'language': 'ja', 'confidence': 0.92}],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '1200:ll',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AAC', 'channels': '2.0', 'language': ''},
+                ]},
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'set_audio_language',
+            }
+            success, details = p._execute_set_audio_language(item)
+        cmd = mock_run.call_args[0][0]
+        assert 'language=jpn' in cmd
+        assert 'language-ietf=ja' in cmd
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:new')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_file_path_with_spaces(
+            self, mock_crc, mock_osh, mock_fp, mock_run, tmp_path):
+        """Path with spaces: subprocess list handles quoting automatically."""
+        mock_run.return_value = mock.Mock(returncode=0, stderr='', stdout='')
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        d = tmp_path / 'A Movie (2020)'
+        d.mkdir()
+        f = d / 'A Movie (2020) 1080p.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('1300:mm', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                             'language': 'en', 'confidence': 0.95}],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '1300:mm',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AC3', 'channels': '5.1', 'language': ''},
+                ]},
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'set_audio_language',
+            }
+            success, _ = p._execute_set_audio_language(item)
+        assert success is True
+        cmd = mock_run.call_args[0][0]
+        # The path with spaces is passed as a single list element
+        assert str(f) in cmd
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:new')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_identification_cleared_after_mod(
+            self, mock_crc, mock_osh, mock_fp, mock_run, tmp_path):
+        """After set_audio_language, cached identification is cleared."""
+        mock_run.return_value = mock.Mock(returncode=0, stderr='', stdout='')
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('1400:nn', str(f))
+            doc['crc32'] = 'EXISTING_CRC'
+            doc['opensubtitles_hash'] = 'EXISTING_OSH'
+            doc['identification'] = {
+                'method': 'srrdb_crc',
+                'identified_title': 'Test Movie',
+                'confidence': 'high',
+            }
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                             'language': 'en', 'confidence': 0.95}],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '1400:nn',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AC3', 'channels': '5.1', 'language': ''},
+                ]},
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'set_audio_language',
+            }
+            success, _ = p._execute_set_audio_language(item)
+            updated = p._get_knowledge('999:new')
+        assert success is True
+        assert updated['identification'] is None
+        # CRC32 preserved (original hashes kept)
+        assert updated['crc32'] == 'EXISTING_CRC'
+
+    # -----------------------------------------------------------------------
+    # E. ISO_639_1_TO_639_2 mapping
+    # -----------------------------------------------------------------------
+
+    def test_iso_mapping_common_languages(self):
+        """Core languages have correct 3-letter codes."""
+        expected = {
+            'en': 'eng', 'fr': 'fre', 'de': 'ger', 'es': 'spa',
+            'ja': 'jpn', 'zh': 'chi', 'ko': 'kor', 'it': 'ita',
+            'pt': 'por', 'ru': 'rus',
+        }
+        for iso1, iso2 in expected.items():
+            assert ISO_639_1_TO_639_2[iso1] == iso2, \
+                '%s should map to %s' % (iso1, iso2)
+
+    def test_iso_mapping_covers_whisper_languages(self):
+        """All common Whisper-detected languages have mapping entries."""
+        whisper_langs = [
+            'en', 'fr', 'de', 'es', 'it', 'pt', 'ru', 'ja', 'ko', 'zh',
+            'nl', 'ar', 'hi', 'sv', 'no', 'da', 'fi', 'pl', 'tr', 'he',
+            'th', 'ro', 'hu', 'cs', 'el', 'fa', 'id', 'uk', 'vi',
+        ]
+        for lang in whisper_langs:
+            assert lang in ISO_639_1_TO_639_2, \
+                'Missing mapping for Whisper language: %s' % lang
+
+    # -----------------------------------------------------------------------
+    # F. Integration / edge cases
+    # -----------------------------------------------------------------------
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:new')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_full_flow_verify_then_set_language(
+            self, mock_crc, mock_osh, mock_fp, mock_run, tmp_path):
+        """End-to-end: unknown_audio → whisper → audio_mislabeled → fix."""
+        mock_run.return_value = mock.Mock(returncode=0, stderr='', stdout='')
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            # Start: unknown_audio flag
+            item = {
+                'item_id': 'flow_1', 'file_fingerprint': '1500:oo',
+                'file_path': str(f),
+                'actual': {'audio_tracks': [
+                    {'codec': 'AC3', 'channels': '5.1', 'language': ''},
+                ]},
+                'flags': [{'check': 'unknown_audio', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'verify_audio',
+            }
+            # Step 1: Apply whisper result (English detected, tag wrong)
+            whisper_result = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'tagged_language': 'und',
+                             'language': 'en', 'confidence': 0.95}],
+            }
+            p._apply_whisper_result(item, whisper_result)
+            assert item['recommended_action'] == 'set_audio_language'
+            assert any(f['check'] == 'audio_mislabeled' for f in item['flags'])
+
+            # Step 2: Preview
+            preview = p._preview_set_audio_language(item)
+            assert preview['action'] == 'set_audio_language'
+            assert preview['tracks'][0]['needs_change'] is True
+
+            # Step 3: Execute
+            success, details = p._execute_set_audio_language(item)
+            assert success is True
+            assert details['tracks_changed'] == 1
+            # Flag removed, action recomputed
+            assert not any(f['check'] == 'audio_mislabeled' for f in item['flags'])
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:new')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_no_tracks_need_change(
+            self, mock_crc, mock_osh, mock_fp, mock_run, tmp_path):
+        """All tracks already correctly tagged → success with no subprocess."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('1600:pp', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'tagged_language': 'eng',
+                             'language': 'en', 'confidence': 0.95}],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '1600:pp',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AC3', 'channels': '5.1', 'language': 'en'},
+                ]},
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'set_audio_language',
+            }
+            success, details = p._execute_set_audio_language(item)
+        assert success is True
+        assert details['tracks_changed'] == 0
+        mock_run.assert_not_called()  # No subprocess needed
+
+    @mock.patch('couchpotato.core.plugins.audit.os.remove')
+    @mock.patch('couchpotato.core.plugins.audit.subprocess.run')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='999:new')
+    @mock.patch('couchpotato.core.plugins.audit.compute_opensubtitles_hash',
+                return_value='abcdef')
+    @mock.patch('couchpotato.core.plugins.audit.compute_crc32',
+                return_value='DEADBEEF')
+    def test_execute_non_mkv_multi_track_ffmpeg_args(
+            self, mock_crc, mock_osh, mock_fp, mock_run, mock_remove, tmp_path):
+        """AVI with 3 tracks → ffmpeg has all -metadata:s:a:N args."""
+        mock_run.return_value = mock.Mock(returncode=0, stderr='', stdout='')
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+        f = tmp_path / 'movie.avi'
+        f.write_bytes(b'\x00' * 100)
+        mkv_path = tmp_path / 'movie.mkv'
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            doc = p._get_or_create_knowledge('1700:qq', str(f))
+            doc['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [
+                    {'track_index': 0, 'tagged_language': 'und', 'language': 'en', 'confidence': 0.95},
+                    {'track_index': 1, 'tagged_language': 'und', 'language': 'fr', 'confidence': 0.88},
+                    {'track_index': 2, 'tagged_language': 'und', 'language': 'en', 'confidence': 0.91},
+                ],
+            }
+            p._update_knowledge(doc)
+            item = {
+                'file_path': str(f), 'file_fingerprint': '1700:qq',
+                'actual': {'audio_tracks': [
+                    {'codec': 'AC3', 'channels': '5.1', 'language': ''},
+                    {'codec': 'DTS', 'channels': '5.1', 'language': ''},
+                    {'codec': 'AAC', 'channels': '2.0', 'language': ''},
+                ]},
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW', 'detail': 'x'}],
+                'flag_count': 1, 'recommended_action': 'set_audio_language',
+            }
+            success, details = p._execute_set_audio_language(item)
+        assert success is True
+        cmd = mock_run.call_args[0][0]
+        # All 3 tracks get metadata in ffmpeg command
+        assert '-metadata:s:a:0' in cmd
+        assert '-metadata:s:a:1' in cmd
+        assert '-metadata:s:a:2' in cmd
+        assert cmd[-1] == str(mkv_path)
+        # Verify language values
+        idx_a0 = cmd.index('-metadata:s:a:0')
+        assert cmd[idx_a0 + 1] == 'language=eng'
+        idx_a1 = cmd.index('-metadata:s:a:1')
+        assert cmd[idx_a1 + 1] == 'language=fre'
+        idx_a2 = cmd.index('-metadata:s:a:2')
+        assert cmd[idx_a2 + 1] == 'language=eng'
