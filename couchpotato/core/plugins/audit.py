@@ -4127,7 +4127,7 @@ def _preview_reassign_movie(item):
         return {'error': 'No identification data — run a full scan first'}
 
     method = ident.get('method', '')
-    if method not in ('container_title', 'srrdb_crc', 'manual'):
+    if method not in ('container_title', 'srrdb_crc', 'opensubtitles_hash', 'manual'):
         return {'error': 'Identification method "%s" cannot determine correct movie' % method}
 
     id_title = ident.get('identified_title', '')
