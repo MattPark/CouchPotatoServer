@@ -4968,24 +4968,49 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             self._update_knowledge(doc)
 
     def _is_ignored(self, fingerprint):
-        """Check whether a file fingerprint is marked as ignored."""
+        """Check whether a file fingerprint is marked as ignored.
+
+        Use for single-item checks only (ignoreView/unignoreView).
+        For bulk filtering, use _build_ignored_set() instead.
+        """
         doc = self._get_knowledge(fingerprint)
         return doc is not None and doc.get('ignored') is not None
 
+    def _build_ignored_set(self):
+        """Return a set of fingerprints that are marked as ignored.
+
+        Single DB lock acquisition via all_docs() — use this for bulk
+        filtering instead of calling _is_ignored() per item.
+        """
+        db = get_db()
+        return {
+            d.get('current_fingerprint')
+            for d in db.all_docs('file_knowledge')
+            if d.get('ignored') is not None
+        }
+
     def _get_knowledge_stats(self):
-        """Return summary stats about file_knowledge docs in the DB."""
+        """Return summary stats about file_knowledge docs in the DB.
+
+        Single-pass over all docs via all_docs() (one lock acquisition).
+        """
         try:
             db = get_db()
-            all_docs = db._docs_for_type('file_knowledge')
-            total = len(all_docs)
-            n_ignored = sum(1 for d in all_docs.values()
-                           if d.get('ignored') is not None)
-            n_whisper = sum(1 for d in all_docs.values()
-                           if d.get('whisper') is not None)
-            n_identified = sum(1 for d in all_docs.values()
-                               if d.get('identification') is not None)
-            n_modified = sum(1 for d in all_docs.values()
-                             if d.get('modified'))
+            docs = db.all_docs('file_knowledge')
+            total = len(docs)
+            n_ignored = 0
+            n_whisper = 0
+            n_identified = 0
+            n_modified = 0
+            for d in docs:
+                if d.get('ignored') is not None:
+                    n_ignored += 1
+                if d.get('whisper') is not None:
+                    n_whisper += 1
+                if d.get('identification') is not None:
+                    n_identified += 1
+                if d.get('modified'):
+                    n_modified += 1
             return {
                 'total': total,
                 'ignored': n_ignored,
@@ -5611,9 +5636,10 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         items = self.last_report.get('flagged', [])
 
-        # Filter out ignored items (by fingerprint in file knowledge DB)
+        # Filter out ignored items (bulk set lookup — single DB lock)
+        ignored = self._build_ignored_set()
         items = [i for i in items
-                 if not self._is_ignored(i.get('file_fingerprint'))]
+                 if i.get('file_fingerprint') not in ignored]
 
         # Filter by fixed status
         if filter_fixed == 'true':
@@ -5794,11 +5820,12 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         all_flagged = self.last_report.get('flagged', [])
 
-        # Separate ignored items
+        # Separate ignored items (bulk set lookup — single DB lock)
+        ignored = self._build_ignored_set()
         total_ignored = 0
         flagged = []
         for item in all_flagged:
-            if self._is_ignored(item.get('file_fingerprint')):
+            if item.get('file_fingerprint') in ignored:
                 total_ignored += 1
             else:
                 flagged.append(item)
@@ -6115,11 +6142,12 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             return {'success': False, 'error': 'No scan results available'}
 
         # Find all unfixed items with unknown_audio flags
+        ignored = self._build_ignored_set()
         items = [
             i for i in self.last_report.get('flagged', [])
             if not i.get('fixed')
             and any(f['check'] == 'unknown_audio' for f in i.get('flags', []))
-            and not self._is_ignored(i.get('file_fingerprint'))
+            and i.get('file_fingerprint') not in ignored
         ]
 
         if not items:

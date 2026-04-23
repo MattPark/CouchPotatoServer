@@ -430,6 +430,17 @@ class CouchDB:
 
     # ---- all -------------------------------------------------------------
 
+    def all_docs(self, type_str):
+        """Return all documents of the given type as a list.
+
+        Returns references to cached doc dicts — efficient for bulk reads
+        (single lock acquisition, no per-doc copying).  Do NOT modify
+        returned docs; use update() for changes.
+        """
+        with self._lock:
+            bucket = self._type_docs.get(type_str)
+            return list(bucket.values()) if bucket else []
+
     def all(self, index_name, limit=-1, offset=0, with_doc=False, with_storage=True):
         with self._lock:
             if index_name == 'id':
