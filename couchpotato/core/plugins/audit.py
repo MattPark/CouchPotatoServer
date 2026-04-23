@@ -6048,6 +6048,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             doc = self._get_knowledge(fingerprint)
             cached = doc.get('whisper') if doc else None
             if cached and cached.get('language'):
+                # Re-apply whisper result to update flags with current logic
+                # (e.g. audio_mislabeled detection added after initial verify)
+                self._apply_whisper_result(item, cached)
                 return {
                     'success': True,
                     'item_id': item_id,

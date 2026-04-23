@@ -1423,6 +1423,13 @@ var AuditSettingTab = new Class({
 					if(btn.set) btn.set('text', msg);
 					else btn.textContent = msg;
 
+					// If action changed to set_audio_language, full refresh
+					// so the card gets new action buttons
+					if(json.recommended_action === 'set_audio_language'){
+						self.loadStats();
+						return;
+					}
+
 					// Update flag detail on the card in-place
 					if(card){
 						var flag_rows = card.getElements('.audit_flag_row');
