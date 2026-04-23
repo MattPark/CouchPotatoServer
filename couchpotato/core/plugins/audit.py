@@ -4912,6 +4912,22 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             log.error('Failed to update file_knowledge doc: %s not found',
                       (doc.get('_id'),))
 
+    def _delete_knowledge(self, fingerprint):
+        """Delete a file_knowledge doc by current_fingerprint.
+
+        Called when a file is deleted from disk so the knowledge doc
+        doesn't become an orphan.  The scan-time stale cleanup remains
+        as a safety net for files removed outside CouchPotato.
+        """
+        if not fingerprint:
+            return
+        try:
+            db = get_db()
+            result = db.get('file_knowledge', fingerprint, with_doc=True)
+            db.delete(result['doc'])
+        except RecordNotFound:
+            pass
+
     def _cache_identification(self, fingerprint, identification):
         """Write identification result (and extracted hashes) to knowledge doc.
 
@@ -6509,6 +6525,10 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         if action in ('delete_wrong', 'delete_duplicate', 'delete_foreign', 'reassign_movie'):
             self._recalculate_folder_duplicates(item)
 
+        # Clean up file_knowledge doc when the file is deleted
+        if action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
+            self._delete_knowledge(item.get('file_fingerprint'))
+
         return {
             'success': True,
             'action': action,
@@ -6799,6 +6819,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                     # Recalculate duplicate flags for remaining siblings
                     if action in ('delete_wrong', 'delete_duplicate', 'delete_foreign', 'reassign_movie'):
                         self._recalculate_folder_duplicates(item)
+                    # Clean up file_knowledge doc when the file is deleted
+                    if action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
+                        self._delete_knowledge(item.get('file_fingerprint'))
                     completed += 1
                 else:
                     failed += 1
