@@ -43,7 +43,9 @@ from couchpotato.core.plugins.audit import (
     _scan_single_file,
     needs_identification,
     ISO_639_1_TO_639_2,
+    load_cp_database,
 )
+import json
 import os
 import re
 from unittest import mock
@@ -2940,8 +2942,206 @@ class TestApplyWhisperResult:
 
 
 # ---------------------------------------------------------------------------
-# Fingerprint collection during scan
+# Foreign film detection via original_language
 # ---------------------------------------------------------------------------
+
+class TestForeignFilmDetection:
+    """Tests for original_language propagation and foreign film logic."""
+
+    @staticmethod
+    def _make_db(tmp_path):
+        from couchpotato.core.db import CouchDB
+        db_dir = str(tmp_path / 'db')
+        os.makedirs(db_dir, exist_ok=True)
+        db = CouchDB(db_dir)
+        db.create()
+        return db
+
+    @staticmethod
+    def _make_plugin():
+        from couchpotato.core.plugins.audit import Audit
+        import types
+
+        class _MockPlugin:
+            last_report = None
+
+        p = _MockPlugin()
+        for name in ('_apply_whisper_result',
+                      '_get_knowledge', '_get_or_create_knowledge',
+                      '_update_knowledge'):
+            method = getattr(Audit, name)
+            setattr(p, name, types.MethodType(method, p))
+        return p
+
+    def test_load_cp_database_includes_original_language(self, tmp_path):
+        """load_cp_database extracts original_language from media info."""
+        db_file = tmp_path / 'db.json'
+        db_file.write_text(json.dumps({'_default': {
+            '1': {
+                '_t': 'media', 'type': 'movie',
+                'title': 'Foreign Movie',
+                'identifiers': {'imdb': 'tt1234567'},
+                'info': {'year': 2020, 'runtime': 120,
+                         'original_language': 'ko'},
+                '_id': 'abc123',
+            }
+        }}))
+        media_by_imdb, _, _, _ = load_cp_database(str(db_file))
+        assert media_by_imdb['tt1234567']['original_language'] == 'ko'
+
+    def test_load_cp_database_missing_original_language(self, tmp_path):
+        """load_cp_database defaults to empty string when original_language absent."""
+        db_file = tmp_path / 'db.json'
+        db_file.write_text(json.dumps({'_default': {
+            '1': {
+                '_t': 'media', 'type': 'movie',
+                'title': 'Old Movie',
+                'identifiers': {'imdb': 'tt0000001'},
+                'info': {'year': 2010, 'runtime': 90},
+                '_id': 'def456',
+            }
+        }}))
+        media_by_imdb, _, _, _ = load_cp_database(str(db_file))
+        assert media_by_imdb['tt0000001']['original_language'] == ''
+
+    @mock.patch('couchpotato.core.plugins.audit.extract_file_meta')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='12345:abcdef0123456789')
+    def test_scan_single_file_propagates_original_language(
+            self, mock_fp, mock_meta, tmp_path):
+        """_scan_single_file includes original_language from db_entry."""
+        f = tmp_path / 'Movie (2020) 1080p.mkv'
+        f.write_bytes(b'\x00' * 100)
+        mock_meta.return_value = {
+            'resolution_width': 720, 'resolution_height': 480,
+            'duration_min': 120.0, 'video_codec': 'H.264',
+            'container_title': None,
+            'audio_tracks': [{'codec': 'AAC', 'channels': '2.0',
+                              'language': 'en'}],
+        }
+        db_entry = {'title': 'Movie', 'runtime': 120,
+                    'original_language': 'fr'}
+        result = _scan_single_file(
+            str(f), folder_title='Movie', folder_year=2020,
+            imdb_id='tt0000001', db_entry=db_entry,
+            expected_runtime=120, renamer_template=None,
+            renamer_replace_doubles=True, renamer_separator='',
+        )
+        assert result is not None
+        assert result['original_language'] == 'fr'
+
+    @mock.patch('couchpotato.core.plugins.audit.extract_file_meta')
+    @mock.patch('couchpotato.core.plugins.audit.compute_file_fingerprint',
+                return_value='12345:abcdef0123456789')
+    def test_scan_single_file_no_db_entry_empty_language(
+            self, mock_fp, mock_meta, tmp_path):
+        """_scan_single_file returns empty original_language when no db_entry."""
+        f = tmp_path / 'Movie (2020) 1080p.mkv'
+        f.write_bytes(b'\x00' * 100)
+        mock_meta.return_value = {
+            'resolution_width': 720, 'resolution_height': 480,
+            'duration_min': 120.0, 'video_codec': 'H.264',
+            'container_title': None,
+            'audio_tracks': [{'codec': 'AAC', 'channels': '2.0',
+                              'language': 'en'}],
+        }
+        result = _scan_single_file(
+            str(f), folder_title='Movie', folder_year=2020,
+            imdb_id='tt0000001', db_entry=None,
+            expected_runtime=120, renamer_template=None,
+            renamer_replace_doubles=True, renamer_separator='',
+        )
+        assert result is not None
+        assert result['original_language'] == ''
+
+    def test_whisper_foreign_film_enriches_detail(self, tmp_path):
+        """Whisper foreign result on a foreign film includes original_language in detail."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+
+        item = {
+            'item_id': 'test_foreign',
+            'file_fingerprint': '100:aabb',
+            'file_path': '/tmp/test.mkv',
+            'original_language': 'ko',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW',
+                        'detail': 'test'}],
+            'flag_count': 1,
+            'recommended_action': 'verify_audio',
+        }
+        result = {'language': 'ko', 'confidence': 0.95,
+                  'tracks': [{'track_index': 0, 'tagged_language': 'ko',
+                              'language': 'ko', 'confidence': 0.95}]}
+
+        with mock.patch('couchpotato.core.plugins.audit.get_db',
+                        return_value=db):
+            p._apply_whisper_result(item, result)
+
+        checks = {f['check'] for f in item['flags']}
+        assert 'foreign_audio' in checks
+        assert item['recommended_action'] == 'delete_foreign'
+        # Detail should mention original language
+        detail = item['flags'][0]['detail']
+        assert 'original language: ko' in detail
+
+    def test_whisper_foreign_on_english_film_no_original_lang_detail(
+            self, tmp_path):
+        """Whisper foreign result on film without original_language uses generic detail."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+
+        item = {
+            'item_id': 'test_nolang',
+            'file_fingerprint': '200:ccdd',
+            'file_path': '/tmp/test2.mkv',
+            'original_language': '',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW',
+                        'detail': 'test'}],
+            'flag_count': 1,
+            'recommended_action': 'verify_audio',
+        }
+        result = {'language': 'fr', 'confidence': 0.90,
+                  'tracks': [{'track_index': 0, 'tagged_language': 'fr',
+                              'language': 'fr', 'confidence': 0.90}]}
+
+        with mock.patch('couchpotato.core.plugins.audit.get_db',
+                        return_value=db):
+            p._apply_whisper_result(item, result)
+
+        checks = {f['check'] for f in item['flags']}
+        assert 'foreign_audio' in checks
+        detail = item['flags'][0]['detail']
+        assert 'original language' not in detail
+        assert 'Whisper:' in detail
+
+    def test_whisper_foreign_on_english_film_flags_correctly(self, tmp_path):
+        """Whisper detects French on an English-original film — still foreign_audio."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+
+        item = {
+            'item_id': 'test_en_film_fr_audio',
+            'file_fingerprint': '300:eeff',
+            'file_path': '/tmp/test3.mkv',
+            'original_language': 'en',
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW',
+                        'detail': 'test'}],
+            'flag_count': 1,
+            'recommended_action': 'verify_audio',
+        }
+        result = {'language': 'fr', 'confidence': 0.88,
+                  'tracks': [{'track_index': 0, 'tagged_language': 'fr',
+                              'language': 'fr', 'confidence': 0.88}]}
+
+        with mock.patch('couchpotato.core.plugins.audit.get_db',
+                        return_value=db):
+            p._apply_whisper_result(item, result)
+
+        checks = {f['check'] for f in item['flags']}
+        assert 'foreign_audio' in checks
+        # English-original film with French audio — not marked as foreign film
+        detail = item['flags'][0]['detail']
+        assert 'original language' not in detail
 
 class TestSeenFingerprints:
     """Tests that _scan_single_file collects fingerprints for all files."""

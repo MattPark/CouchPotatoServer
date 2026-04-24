@@ -299,6 +299,7 @@ def load_cp_database(db_path):
                     'title': doc.get('title', ''),
                     'year': info.get('year', 0),
                     'runtime': info.get('runtime', 0),
+                    'original_language': info.get('original_language', ''),
                     '_id': doc.get('_id', ''),
                 }
 
@@ -2976,6 +2977,7 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
         'file': filename,
         'file_path': filepath,
         'imdb_id': effective_imdb_id,
+        'original_language': db_entry.get('original_language', '') if db_entry else '',
         'file_size_bytes': os.path.getsize(filepath),
         'actual': {
             'resolution': f"{meta['resolution_width']}x{meta['resolution_height']}",
@@ -6056,8 +6058,15 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 })
             # else: all tags already correct — no audio flag needed
         else:
-            detail = 'Whisper: ' + '; '.join(track_details) if track_details \
-                else 'Whisper: no language detected'
+            orig_lang = item.get('original_language', '')
+            is_foreign_film = orig_lang and orig_lang != 'en'
+            if is_foreign_film:
+                detail = 'Foreign film (original language: %s). Whisper: %s' % (
+                    orig_lang, '; '.join(track_details) if track_details
+                    else 'no language detected')
+            else:
+                detail = 'Whisper: ' + '; '.join(track_details) if track_details \
+                    else 'Whisper: no language detected'
             new_flags.append({
                 'check': 'foreign_audio',
                 'severity': 'LOW',

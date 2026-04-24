@@ -367,6 +367,7 @@ class TheMovieDb(MovieProvider):
             'tmdb_id': movie.get('id'),
             'titles': [toUnicode(movie_default.get('title') or movie.get('title'))],
             'original_title': movie.get('original_title'),
+            'original_language': movie.get('original_language'),
             'images': images,
             'imdb': movie.get('imdb_id'),
             'runtime': movie.get('runtime'),

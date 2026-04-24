@@ -633,6 +633,14 @@ var AuditSettingTab = new Class({
 		// Folder name
 		new Element('span.audit_item_folder', { 'text': item.folder || '' }).inject(header);
 
+		// Foreign film badge
+		if(item.original_language && item.original_language !== 'en'){
+			new Element('span.audit_foreign_badge', {
+				'text': item.original_language.toUpperCase(),
+				'title': 'Foreign film (original language: ' + item.original_language + ')'
+			}).inject(header);
+		}
+
 		// Severity badge
 		var sev_order = {'LOW': 0, 'MEDIUM': 1, 'HIGH': 2};
 		var max_severity = 'LOW';

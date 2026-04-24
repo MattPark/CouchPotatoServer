@@ -1507,6 +1507,24 @@
 		flex-shrink: 0;
 	}
 
+	.audit_foreign_badge {
+		display: inline-block;
+		padding: 1px 6px;
+		border-radius: 3px;
+		font-size: .7em;
+		font-weight: bold;
+		background: rgba(156,39,176,.2);
+		color: #9c27b0;
+		flex-shrink: 0;
+	}
+
+	@include theme-dark {
+		.audit_foreign_badge {
+			background: rgba(206,147,216,.15);
+			color: #ce93d8;
+		}
+	}
+
 	// Item detail (expanded)
 	.audit_item_detail {
 		padding: $padding/2 $padding;
