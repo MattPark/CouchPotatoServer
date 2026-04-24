@@ -4940,7 +4940,7 @@ class TestForeignNoEnglishFilter:
     def _filter(items, filter_check='foreign_no_english'):
         """Run _filter_and_sort on items with the given filter."""
         from couchpotato.core.plugins.audit import Audit
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         plugin = object.__new__(Audit)
         plugin.last_report = {'flagged': items}
