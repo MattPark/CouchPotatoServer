@@ -4904,3 +4904,109 @@ class TestSetAudioLanguage:
         assert cmd[idx_a1 + 1] == 'language=fre'
         idx_a2 = cmd.index('-metadata:s:a:2')
         assert cmd[idx_a2 + 1] == 'language=eng'
+
+
+# ---------------------------------------------------------------------------
+# Foreign (No English Audio) compound filter
+# ---------------------------------------------------------------------------
+
+class TestForeignNoEnglishFilter:
+    """Tests for the foreign_no_english compound filter in _filter_and_sort."""
+
+    @staticmethod
+    def _make_item(original_language='en', audio_languages=None, **kw):
+        """Build a minimal flagged item for filter testing."""
+        if audio_languages is None:
+            audio_languages = ['en']
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': lang}
+                   for lang in audio_languages]
+        item = {
+            'item_id': 'test123',
+            'file_fingerprint': '100:abc',
+            'folder': 'Test Movie (2024)',
+            'file': 'test.mkv',
+            'file_path': '/movies/test.mkv',
+            'original_language': original_language,
+            'actual': {'audio_tracks': tracks},
+            'expected': {'title': 'Test Movie', 'year': 2024},
+            'flags': [{'check': 'foreign_audio', 'severity': 'HIGH', 'detail': 'test'}],
+            'flag_count': 1,
+            'recommended_action': 'delete_foreign',
+        }
+        item.update(kw)
+        return item
+
+    @staticmethod
+    def _filter(items, filter_check='foreign_no_english'):
+        """Run _filter_and_sort on items with the given filter."""
+        from couchpotato.core.plugins.audit import Audit
+        from unittest.mock import MagicMock, patch
+
+        plugin = object.__new__(Audit)
+        plugin.last_report = {'flagged': items}
+        with patch.object(plugin, '_build_ignored_set', return_value=set()):
+            return plugin._filter_and_sort(filter_check=filter_check, filter_fixed='all')
+
+    def test_foreign_language_no_english_audio_included(self):
+        items = [self._make_item(original_language='ko', audio_languages=['ko'])]
+        result = self._filter(items)
+        assert len(result) == 1
+
+    def test_english_language_excluded(self):
+        items = [self._make_item(original_language='en', audio_languages=['en'])]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    def test_foreign_language_with_english_audio_excluded(self):
+        """Foreign film but has an English audio track — user can watch it."""
+        items = [self._make_item(original_language='ko', audio_languages=['ko', 'en'])]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    def test_foreign_language_with_eng_code_excluded(self):
+        items = [self._make_item(original_language='ja', audio_languages=['ja', 'eng'])]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    def test_no_original_language_excluded(self):
+        """If original_language is missing, can't confirm it's foreign."""
+        items = [self._make_item(original_language='', audio_languages=['ko'])]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    def test_none_original_language_excluded(self):
+        items = [self._make_item(original_language=None, audio_languages=['ko'])]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    def test_mixed_items_filtered_correctly(self):
+        items = [
+            self._make_item(original_language='ko', audio_languages=['ko'],
+                            item_id='a', file_fingerprint='1:a'),
+            self._make_item(original_language='en', audio_languages=['en'],
+                            item_id='b', file_fingerprint='2:b'),
+            self._make_item(original_language='ja', audio_languages=['ja'],
+                            item_id='c', file_fingerprint='3:c'),
+            self._make_item(original_language='fr', audio_languages=['fr', 'en'],
+                            item_id='d', file_fingerprint='4:d'),
+        ]
+        result = self._filter(items)
+        ids = [i['item_id'] for i in result]
+        assert ids == ['a', 'c']
+
+    def test_no_audio_tracks_included(self):
+        """Foreign film with no audio track info — include it (suspicious)."""
+        item = self._make_item(original_language='zh', audio_languages=[])
+        result = self._filter([item])
+        assert len(result) == 1
+
+    def test_empty_language_audio_track_included(self):
+        """Foreign film with unlabeled audio — no English confirmed."""
+        item = self._make_item(original_language='hi', audio_languages=[''])
+        result = self._filter([item])
+        assert len(result) == 1
+
+    def test_case_insensitive_english_check(self):
+        items = [self._make_item(original_language='ko', audio_languages=['EN'])]
+        result = self._filter(items)
+        assert len(result) == 0

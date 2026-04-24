@@ -5651,7 +5651,19 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         # 'all' returns everything
 
         # Filter by check type (comma-separated)
-        if filter_check:
+        if filter_check == 'foreign_no_english':
+            # Special compound filter: foreign original language + no English audio track
+            def _is_foreign_no_english(item):
+                lang = (item.get('original_language') or '').lower()
+                if not lang or lang == 'en':
+                    return False
+                tracks = (item.get('actual') or {}).get('audio_tracks') or []
+                return not any(
+                    (t.get('language') or '').lower() in ('en', 'eng', 'english')
+                    for t in tracks
+                )
+            items = [i for i in items if _is_foreign_no_english(i)]
+        elif filter_check:
             check_set = {c.strip() for c in filter_check.split(',')}
             items = [
                 i for i in items
@@ -6783,7 +6795,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'movie_info': movie_info,
         }
 
-    def _run_batch_fix(self, action, items, dry_run=False):
+    def _run_batch_fix(self, action, items, dry_run=False, reset_status=None):
         """Run a batch fix operation (called in background thread).
 
         Updates self.fix_in_progress with running stats.
@@ -6856,6 +6868,13 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                     # Recalculate duplicate flags for remaining siblings
                     if action in ('delete_wrong', 'delete_duplicate', 'delete_foreign', 'reassign_movie'):
                         self._recalculate_folder_duplicates(item)
+                    # Apply reset_status (e.g. remove from DB) if specified
+                    if action in ('delete_wrong', 'delete_duplicate', 'delete_foreign', 'reassign_movie') and reset_status and reset_status != 'nochange':
+                        try:
+                            self._apply_reset_status(item, reset_status)
+                        except Exception as e:
+                            log.error('Batch reset_status failed for %s: %s',
+                                      (item.get('folder', ''), e))
                     # Clean up file_knowledge doc when the file is deleted
                     if action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
                         self._delete_knowledge(item.get('file_fingerprint'))
@@ -6894,7 +6913,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
     def fixBatchView(self, action=None, filter_check=None,
                      filter_severity=None, confirm='0', dry_run='1',
-                     **kwargs):
+                     reset_status=None, **kwargs):
         """API handler: execute a fix action on multiple items."""
         if not action or action not in VALID_FIX_ACTIONS:
             return {
@@ -6957,6 +6976,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 action=action,
                 items=items,
                 dry_run=False,
+                reset_status=reset_status,
             )
             return {
                 'success': True,

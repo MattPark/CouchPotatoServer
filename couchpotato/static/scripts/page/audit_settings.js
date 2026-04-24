@@ -153,7 +153,8 @@ var AuditSettingTab = new Class({
 			new Element('option', { 'value': 'duplicate', 'text': 'Duplicate' }),
 			new Element('option', { 'value': 'foreign_audio', 'text': 'Foreign Audio' }),
 			new Element('option', { 'value': 'unknown_audio', 'text': 'Unknown Audio' }),
-			new Element('option', { 'value': 'audio_mislabeled', 'text': 'Audio Mislabeled' })
+			new Element('option', { 'value': 'audio_mislabeled', 'text': 'Audio Mislabeled' }),
+			new Element('option', { 'value': 'foreign_no_english', 'text': 'Foreign (No English Audio)' })
 		).inject(filters);
 
 		// Severity filter
@@ -1000,6 +1001,7 @@ var AuditSettingTab = new Class({
 
 	startBatchFix: function(action){
 		var self = this;
+		var is_delete = action.indexOf('delete') === 0;
 
 		// First do a dry run to get counts
 		var data = {
@@ -1025,29 +1027,112 @@ var AuditSettingTab = new Class({
 					return;
 				}
 
-				if(!confirm('This will apply "' + self.actionLabel(action) + '" to ' + count + ' items. Continue?')){
-					return;
-				}
-
-				// Execute batch
-				var exec_data = {
-					'action': action,
-					'confirm': 1,
-					'dry_run': 0
-				};
-				if(self.current_filter_check) exec_data.filter_check = self.current_filter_check;
-				if(self.current_filter_severity) exec_data.filter_severity = self.current_filter_severity;
-
-				Api.request('audit.fix.batch', {
-					'data': exec_data,
-					'onComplete': function(json2){
-						if(json2 && json2.success !== false){
-							self.startFixProgressPolling();
-						} else {
-							alert('Batch execution failed: ' + (json2 ? json2.error || 'Unknown error' : 'No response'));
-						}
+				if(is_delete){
+					self.showBatchDeleteModal(action, count);
+				} else {
+					if(!confirm('This will apply "' + self.actionLabel(action) + '" to ' + count + ' items. Continue?')){
+						return;
 					}
-				});
+					self.executeBatchFix(action);
+				}
+			}
+		});
+	},
+
+	showBatchDeleteModal: function(action, count){
+		var self = this;
+
+		self.preview_modal.empty();
+		self.preview_modal.setStyle('display', '');
+
+		var modal = new Element('div.audit_modal').inject(self.preview_modal);
+
+		// Header
+		new Element('div.audit_modal_header').adopt(
+			new Element('h3', { 'text': 'Batch Delete: ' + self.actionLabel(action) }),
+			new Element('a.audit_modal_close.icon-cancel', {
+				'events': { 'click': self.closePreviewModal.bind(self) }
+			})
+		).inject(modal);
+
+		var body = new Element('div.audit_modal_body').inject(modal);
+
+		new Element('div.audit_preview_section').adopt(
+			new Element('p', { 'text': 'This will delete ' + count + ' file' + (count !== 1 ? 's' : '') + '.' })
+		).inject(body);
+
+		// Reset status dropdown
+		var status_section = new Element('div.audit_preview_section').inject(body);
+		var status_row = new Element('div.audit_status_row').inject(status_section);
+		new Element('span.audit_status_label', { 'text': 'After deleting, for each movie:' }).inject(status_row);
+		var status_select = new Element('select.audit_status_select', {
+			'events': { 'click': function(e){ e.stop(); } }
+		}).inject(status_row);
+
+		// Default to 'remove' when filtering foreign_no_english, otherwise 'wanted'
+		var default_status = (self.current_filter_check === 'foreign_no_english') ? 'remove' : 'wanted';
+		var status_options = [
+			{ value: 'remove', text: 'Remove from database' },
+			{ value: 'wanted', text: 'Set to Wanted' },
+			{ value: 'done', text: 'Set to Done' },
+			{ value: 'nochange', text: 'No change' }
+		];
+		status_options.each(function(opt){
+			var attrs = { 'value': opt.value, 'text': opt.text };
+			if(opt.value === default_status) attrs['selected'] = 'selected';
+			new Element('option', attrs).inject(status_select);
+		});
+
+		// Footer
+		var footer = new Element('div.audit_modal_footer').inject(modal);
+
+		new Element('a.audit_action_btn.secondary', {
+			'text': 'Cancel',
+			'events': { 'click': self.closePreviewModal.bind(self) }
+		}).inject(footer);
+
+		var confirm_btn = new Element('a.audit_action_btn.primary', {
+			'text': 'Confirm & Execute',
+			'events': { 'click': function(e){
+				e.stop();
+				var reset_status = status_select.get('value');
+				self.closePreviewModal();
+				self.executeBatchFix(action, reset_status);
+			}}
+		}).inject(footer);
+
+		// Enter key shortcut
+		self._modal_keydown = function(e){
+			if(e.key === 'enter'){
+				e.stop();
+				var reset_status = status_select.get('value');
+				self.closePreviewModal();
+				self.executeBatchFix(action, reset_status);
+			}
+		};
+		document.addEvent('keydown', self._modal_keydown);
+	},
+
+	executeBatchFix: function(action, reset_status){
+		var self = this;
+
+		var exec_data = {
+			'action': action,
+			'confirm': 1,
+			'dry_run': 0
+		};
+		if(self.current_filter_check) exec_data.filter_check = self.current_filter_check;
+		if(self.current_filter_severity) exec_data.filter_severity = self.current_filter_severity;
+		if(reset_status) exec_data.reset_status = reset_status;
+
+		Api.request('audit.fix.batch', {
+			'data': exec_data,
+			'onComplete': function(json2){
+				if(json2 && json2.success !== false){
+					self.startFixProgressPolling();
+				} else {
+					alert('Batch execution failed: ' + (json2 ? json2.error || 'Unknown error' : 'No response'));
+				}
 			}
 		});
 	},
