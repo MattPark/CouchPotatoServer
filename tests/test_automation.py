@@ -4,9 +4,7 @@ Tests the allowed_languages feature in both:
 - isMinimalMovie() in base.py (chart providers)
 - addMovies() in automation.py (IMDB Watchlist / catch-all)
 """
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import patch
 
 
 # ---------------------------------------------------------------------------
