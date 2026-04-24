@@ -1,5 +1,6 @@
 from couchpotato.api import addApiView
 from couchpotato.core.event import addEvent, fireEvent
+from couchpotato.core.helpers.variable import splitString
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
 from couchpotato.environment import Env
@@ -38,6 +39,8 @@ class Automation(Plugin):
         movies = fireEvent('automation.get_movies', merge = True)
         movie_ids = []
 
+        ignored_languages = [lang.strip() for lang in splitString(Env.setting('allowed_languages', 'automation').lower()) if lang.strip()]
+
         for imdb_id in movies:
 
             if self.shuttingDown():
@@ -46,6 +49,17 @@ class Automation(Plugin):
             prop_name = 'automation.added.%s' % imdb_id
             added = Env.prop(prop_name, default = False)
             if not added:
+
+                # Check language filter before adding
+                if ignored_languages:
+                    info = fireEvent('movie.info', identifier = imdb_id, extended = False, adding = False, merge = True)
+                    if info:
+                        orig_lang = (info.get('original_language') or '').lower().strip()
+                        if orig_lang and orig_lang not in ignored_languages:
+                            log.info('Blocking %s from automation: original language "%s" is not in allowed list', (imdb_id, orig_lang))
+                            Env.prop(prop_name, True)
+                            continue
+
                 added_movie = fireEvent('movie.add', params = {'identifier': imdb_id}, force_readd = False, search_after = False, update_after = True, single = True)
                 if added_movie:
                     movie_ids.append(added_movie['_id'])
@@ -109,6 +123,14 @@ config = [{
                     'default': '',
                     'placeholder': 'Example: Horror, Comedy & Drama & Romance',
                     'description': 'Ignore movies that contain at least one set of genres. Sets work the same as above.'
+                },
+                {
+                    'name': 'allowed_languages',
+                    'label': 'Allowed Languages',
+                    'default': '',
+                    'placeholder': 'Example: en, es, fr',
+                    'description': ('Only add movies whose original language matches.',
+                                    'Use ISO 639-1 codes (2-letter). Separate with commas. Leave empty to allow all.')
                 },
             ],
         },

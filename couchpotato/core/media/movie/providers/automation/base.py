@@ -101,6 +101,13 @@ class Automation(AutomationBase):
                 log.info2('%s has blacklisted genre(s): %s', (movie['original_title'], ign))
                 return False
 
+        allowed_languages = [lang.strip() for lang in splitString(self.getMinimal('allowed_languages').lower()) if lang.strip()]
+        if allowed_languages:
+            original_language = (movie.get('original_language') or '').lower().strip()
+            if original_language and original_language not in allowed_languages:
+                log.info2('Language %s not in allowed list for %s', (original_language, movie['original_title']))
+                return False
+
         return True
 
     def getMinimal(self, min_type):
