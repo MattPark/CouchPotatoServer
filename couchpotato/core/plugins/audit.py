@@ -300,6 +300,8 @@ def load_cp_database(db_path):
                     'year': info.get('year', 0),
                     'runtime': info.get('runtime', 0),
                     'original_language': info.get('original_language', ''),
+                    'spoken_languages': info.get('spoken_languages', []),
+                    'production_countries': info.get('production_countries', []),
                     '_id': doc.get('_id', ''),
                 }
 
@@ -2978,6 +2980,8 @@ def _scan_single_file(filepath, folder_title, folder_year, imdb_id, db_entry,
         'file_path': filepath,
         'imdb_id': effective_imdb_id,
         'original_language': db_entry.get('original_language', '') if db_entry else '',
+        'spoken_languages': db_entry.get('spoken_languages', []) if db_entry else [],
+        'production_countries': db_entry.get('production_countries', []) if db_entry else [],
         'file_size_bytes': os.path.getsize(filepath),
         'actual': {
             'resolution': f"{meta['resolution_width']}x{meta['resolution_height']}",
@@ -5652,10 +5656,31 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         # Filter by check type (comma-separated)
         if filter_check == 'foreign_no_english':
-            # Special compound filter: foreign original language + no English audio track
+            # Special compound filter: foreign original language + no English audio track.
+            # Three override layers exclude likely-English films:
+            #   1. Whisper verified English audio (audio_mislabeled flag)
+            #   2. TMDB lists English in spoken_languages
+            #   3. TMDB lists an English-speaking country in production_countries
+            _ENGLISH_COUNTRIES = {'US', 'GB', 'AU', 'NZ', 'CA', 'IE'}
             def _is_foreign_no_english(item):
                 lang = (item.get('original_language') or '').lower()
                 if not lang or lang == 'en':
+                    return False
+                # Whisper override: if Whisper detected English, audio_mislabeled
+                # flag is set (English audio exists but tags need updating)
+                if any(f.get('check') == 'audio_mislabeled'
+                       for f in item.get('flags', [])):
+                    return False
+                # TMDB spoken_languages override: if English is listed as a
+                # spoken language, the film likely has English audio
+                spoken = item.get('spoken_languages') or []
+                if any(sl.lower() in ('en', 'eng', 'english')
+                       for sl in spoken):
+                    return False
+                # Production countries override: if produced in an
+                # English-speaking country, likely has English audio
+                countries = item.get('production_countries') or []
+                if any(c.upper() in _ENGLISH_COUNTRIES for c in countries):
                     return False
                 tracks = (item.get('actual') or {}).get('audio_tracks') or []
                 return not any(

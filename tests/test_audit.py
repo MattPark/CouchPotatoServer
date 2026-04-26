@@ -4914,12 +4914,16 @@ class TestForeignNoEnglishFilter:
     """Tests for the foreign_no_english compound filter in _filter_and_sort."""
 
     @staticmethod
-    def _make_item(original_language='en', audio_languages=None, **kw):
+    def _make_item(original_language='en', audio_languages=None,
+                   flags=None, spoken_languages=None,
+                   production_countries=None, **kw):
         """Build a minimal flagged item for filter testing."""
         if audio_languages is None:
             audio_languages = ['en']
         tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': lang}
                    for lang in audio_languages]
+        if flags is None:
+            flags = [{'check': 'foreign_audio', 'severity': 'HIGH', 'detail': 'test'}]
         item = {
             'item_id': 'test123',
             'file_fingerprint': '100:abc',
@@ -4927,10 +4931,12 @@ class TestForeignNoEnglishFilter:
             'file': 'test.mkv',
             'file_path': '/movies/test.mkv',
             'original_language': original_language,
+            'spoken_languages': spoken_languages or [],
+            'production_countries': production_countries or [],
             'actual': {'audio_tracks': tracks},
             'expected': {'title': 'Test Movie', 'year': 2024},
-            'flags': [{'check': 'foreign_audio', 'severity': 'HIGH', 'detail': 'test'}],
-            'flag_count': 1,
+            'flags': flags,
+            'flag_count': len(flags),
             'recommended_action': 'delete_foreign',
         }
         item.update(kw)
@@ -5010,3 +5016,220 @@ class TestForeignNoEnglishFilter:
         items = [self._make_item(original_language='ko', audio_languages=['EN'])]
         result = self._filter(items)
         assert len(result) == 0
+
+    # --- Whisper override tests ---
+
+    def test_whisper_english_override_excludes(self):
+        """Item with audio_mislabeled flag = Whisper detected English — exclude."""
+        flags = [{'check': 'audio_mislabeled', 'severity': 'LOW',
+                  'detail': 'Whisper verified: Track 0 (): en 90%'}]
+        items = [self._make_item(original_language='it', audio_languages=[''],
+                                 flags=flags)]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    def test_whisper_foreign_confirmed_still_included(self):
+        """Item with foreign_audio flag (Whisper confirmed foreign) — include."""
+        flags = [{'check': 'foreign_audio', 'severity': 'HIGH',
+                  'detail': 'Whisper verified: Track 0 (): ja 95%'}]
+        items = [self._make_item(original_language='ja', audio_languages=[''],
+                                 flags=flags)]
+        result = self._filter(items)
+        assert len(result) == 1
+
+    def test_whisper_override_with_multiple_flags(self):
+        """audio_mislabeled among other flags — still excludes."""
+        flags = [
+            {'check': 'resolution', 'severity': 'LOW', 'detail': 'SD copy'},
+            {'check': 'audio_mislabeled', 'severity': 'LOW',
+             'detail': 'Whisper verified: Track 0 (): en 85%'},
+        ]
+        items = [self._make_item(original_language='it', audio_languages=[''],
+                                 flags=flags)]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    # --- spoken_languages override tests ---
+
+    def test_spoken_languages_english_excludes(self):
+        """TMDB lists English in spoken_languages — exclude."""
+        items = [self._make_item(original_language='it', audio_languages=[''],
+                                 spoken_languages=['it', 'en'])]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    def test_spoken_languages_no_english_still_included(self):
+        """TMDB spoken_languages has no English — still included."""
+        items = [self._make_item(original_language='it', audio_languages=[''],
+                                 spoken_languages=['it', 'es'])]
+        result = self._filter(items)
+        assert len(result) == 1
+
+    def test_spoken_languages_eng_code_excludes(self):
+        """spoken_languages with 'eng' code — exclude."""
+        items = [self._make_item(original_language='ja', audio_languages=['ja'],
+                                 spoken_languages=['ja', 'eng'])]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    def test_spoken_languages_empty_still_uses_audio(self):
+        """No spoken_languages — falls through to audio track check."""
+        items = [self._make_item(original_language='ko', audio_languages=['ko'],
+                                 spoken_languages=[])]
+        result = self._filter(items)
+        assert len(result) == 1
+
+    def test_spoken_languages_none_still_uses_audio(self):
+        """spoken_languages is None — falls through to audio track check."""
+        items = [self._make_item(original_language='ko', audio_languages=['ko'],
+                                 spoken_languages=None)]
+        result = self._filter(items)
+        assert len(result) == 1
+
+    # --- Combined scenario tests ---
+
+    def test_coproduction_whisper_override(self):
+        """Co-production: foreign orig_lang, no English tags, but Whisper found English."""
+        flags = [{'check': 'audio_mislabeled', 'severity': 'LOW',
+                  'detail': 'Whisper verified: Track 0 (): en 90%'}]
+        # Simulates GBTU: orig=it, no English audio tags, TMDB spoken=[it]
+        items = [self._make_item(original_language='it', audio_languages=[''],
+                                 spoken_languages=['it'], flags=flags)]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    def test_coproduction_spoken_languages_override(self):
+        """Co-production: foreign orig_lang, no English tags, but TMDB lists English spoken."""
+        # Simulates "Once Upon a Time in America": orig=it, spoken=[en]
+        items = [self._make_item(original_language='it', audio_languages=[''],
+                                 spoken_languages=['en'])]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    def test_mixed_items_with_overrides(self):
+        """Mix of items: some with overrides, some without."""
+        items = [
+            # Genuine foreign film — included
+            self._make_item(original_language='ko', audio_languages=['ko'],
+                            item_id='a', file_fingerprint='1:a'),
+            # Whisper override — excluded
+            self._make_item(original_language='it', audio_languages=[''],
+                            item_id='b', file_fingerprint='2:b',
+                            flags=[{'check': 'audio_mislabeled', 'severity': 'LOW',
+                                    'detail': 'Whisper: en 90%'}]),
+            # spoken_languages override — excluded
+            self._make_item(original_language='fr', audio_languages=[''],
+                            item_id='c', file_fingerprint='3:c',
+                            spoken_languages=['fr', 'en']),
+            # Genuine foreign, no overrides — included
+            self._make_item(original_language='ja', audio_languages=['ja'],
+                            item_id='d', file_fingerprint='4:d'),
+        ]
+        result = self._filter(items)
+        ids = [i['item_id'] for i in result]
+        assert ids == ['a', 'd']
+
+    # --- Production countries override tests ---
+
+    def test_production_country_us_excludes(self):
+        """US in production_countries — exclude."""
+        items = [self._make_item(original_language='it', audio_languages=[''],
+                                 production_countries=['IT', 'US'])]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    def test_production_country_gb_excludes(self):
+        """GB in production_countries — exclude."""
+        items = [self._make_item(original_language='fr', audio_languages=['fr'],
+                                 production_countries=['FR', 'GB'])]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    def test_production_country_au_excludes(self):
+        """AU in production_countries — exclude."""
+        items = [self._make_item(original_language='zh', audio_languages=['zh'],
+                                 production_countries=['CN', 'AU'])]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    def test_production_country_nz_ca_ie_excludes(self):
+        """NZ, CA, IE each exclude."""
+        for country in ('NZ', 'CA', 'IE'):
+            items = [self._make_item(original_language='de', audio_languages=['de'],
+                                     production_countries=[country])]
+            result = self._filter(items)
+            assert len(result) == 0, f'{country} should exclude'
+
+    def test_production_country_non_english_still_included(self):
+        """Only non-English countries — still included."""
+        items = [self._make_item(original_language='it', audio_languages=['it'],
+                                 production_countries=['IT', 'ES', 'DE'])]
+        result = self._filter(items)
+        assert len(result) == 1
+
+    def test_production_country_empty_falls_through(self):
+        """Empty production_countries — falls through to audio check."""
+        items = [self._make_item(original_language='ko', audio_languages=['ko'],
+                                 production_countries=[])]
+        result = self._filter(items)
+        assert len(result) == 1
+
+    def test_production_country_none_falls_through(self):
+        """None production_countries — falls through to audio check."""
+        items = [self._make_item(original_language='ko', audio_languages=['ko'],
+                                 production_countries=None)]
+        result = self._filter(items)
+        assert len(result) == 1
+
+    def test_production_country_case_insensitive(self):
+        """Lowercase country codes still match."""
+        items = [self._make_item(original_language='it', audio_languages=[''],
+                                 production_countries=['it', 'us'])]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    def test_gbtu_scenario(self):
+        """Co-production: orig=it, spoken=[it], countries=[US,IT,ES,DE] — excluded."""
+        items = [self._make_item(original_language='it', audio_languages=[''],
+                                 spoken_languages=['it'],
+                                 production_countries=['US', 'IT', 'ES', 'DE'])]
+        result = self._filter(items)
+        assert len(result) == 0
+
+    def test_triple_negative_included(self):
+        """All three layers negative — genuinely foreign, included."""
+        items = [self._make_item(original_language='ko', audio_languages=['ko'],
+                                 spoken_languages=['ko'],
+                                 production_countries=['KR'])]
+        result = self._filter(items)
+        assert len(result) == 1
+
+    def test_mixed_items_all_three_layers(self):
+        """Mix of items excluded by different override layers."""
+        items = [
+            # Genuine foreign — included
+            self._make_item(original_language='ko', audio_languages=['ko'],
+                            spoken_languages=['ko'], production_countries=['KR'],
+                            item_id='a', file_fingerprint='1:a'),
+            # Whisper override — excluded
+            self._make_item(original_language='it', audio_languages=[''],
+                            item_id='b', file_fingerprint='2:b',
+                            flags=[{'check': 'audio_mislabeled', 'severity': 'LOW',
+                                    'detail': 'Whisper: en 90%'}]),
+            # spoken_languages override — excluded
+            self._make_item(original_language='fr', audio_languages=[''],
+                            item_id='c', file_fingerprint='3:c',
+                            spoken_languages=['fr', 'en']),
+            # production_countries override — excluded
+            self._make_item(original_language='it', audio_languages=[''],
+                            item_id='d', file_fingerprint='4:d',
+                            spoken_languages=['it'],
+                            production_countries=['US', 'IT', 'ES', 'DE']),
+            # Genuine foreign, no overrides — included
+            self._make_item(original_language='ja', audio_languages=['ja'],
+                            spoken_languages=['ja'], production_countries=['JP'],
+                            item_id='e', file_fingerprint='5:e'),
+        ]
+        result = self._filter(items)
+        ids = [i['item_id'] for i in result]
+        assert ids == ['a', 'e']

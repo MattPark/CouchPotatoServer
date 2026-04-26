@@ -368,6 +368,8 @@ class TheMovieDb(MovieProvider):
             'titles': [toUnicode(movie_default.get('title') or movie.get('title'))],
             'original_title': movie.get('original_title'),
             'original_language': movie.get('original_language'),
+            'spoken_languages': [sl.get('iso_639_1') for sl in movie.get('spoken_languages', []) if sl.get('iso_639_1')],
+            'production_countries': [pc.get('iso_3166_1') for pc in movie.get('production_countries', []) if pc.get('iso_3166_1')],
             'images': images,
             'imdb': movie.get('imdb_id'),
             'runtime': movie.get('runtime'),
