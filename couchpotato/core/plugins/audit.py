@@ -2314,6 +2314,121 @@ def srrdb_lookup_crc(crc_hex):
     }
 
 
+def validate_srrdb_imdb(identified_title, identified_year, srrdb_imdb_id):
+    """Cross-validate an IMDB ID from srrDB against the identified title.
+
+    srrDB sometimes maps releases to the wrong IMDB ID.  This verifies the
+    mapping by looking up the IMDB ID on TMDB and comparing its title with the
+    guessit-parsed title from the release name.
+
+    If the titles don't match, searches TMDB by title+year for the correct
+    IMDB ID.
+
+    Returns a dict ``{'imdb_id': str, 'corrected': bool, 'detail': str|None}``
+    or *None* if validation couldn't be performed (caller should keep the
+    original srrDB IMDB ID unchanged).
+    """
+    if not srrdb_imdb_id or not identified_title:
+        return None
+
+    if not requests:
+        return None
+
+    # Step 1: Look up the srrDB IMDB ID to get its actual title
+    lookup = lookup_imdb_id(srrdb_imdb_id)
+    if not lookup:
+        return None  # Can't validate — keep as-is
+
+    lookup_title = lookup.get('title', '')
+
+    # Step 2: Compare titles
+    need_correction = False
+    if titles_match(identified_title, lookup_title):
+        # Titles match — check year for same-title remakes
+        lookup_year = lookup.get('year')
+        if (identified_year and lookup_year
+                and abs(int(identified_year) - int(lookup_year)) > 1):
+            _log_info('srrDB IMDB %s title matches ("%s") but year differs: '
+                      'identified %s vs TMDB %s' %
+                      (srrdb_imdb_id, identified_title,
+                       identified_year, lookup_year))
+            need_correction = True
+        else:
+            # Title match, year compatible (or can't compare) — valid
+            return {'imdb_id': srrdb_imdb_id, 'corrected': False,
+                    'detail': None}
+    else:
+        _log_info('srrDB IMDB %s title mismatch: identified "%s" vs '
+                  'TMDB "%s"' %
+                  (srrdb_imdb_id, identified_title, lookup_title))
+        need_correction = True
+
+    if not need_correction:
+        return {'imdb_id': srrdb_imdb_id, 'corrected': False, 'detail': None}
+
+    # Step 3: Search TMDB for the correct movie by identified title + year
+    import base64
+    import random
+
+    try:
+        api_key = base64.b64decode(
+            random.choice(_TMDB_API_KEYS)
+        ).decode('utf-8')
+
+        params = {'api_key': api_key, 'query': identified_title}
+        if identified_year:
+            params['year'] = identified_year
+
+        resp = requests.get(
+            'https://api.themoviedb.org/3/search/movie',
+            params=params,
+            timeout=15,
+        )
+        if not resp.ok:
+            _log_warn('TMDB search failed (HTTP %s) for "%s"' %
+                      (resp.status_code, identified_title))
+            return None
+
+        search_results = resp.json().get('results', [])
+        if not search_results:
+            _log_warn('TMDB search found no results for "%s" (%s)' %
+                      (identified_title, identified_year))
+            return None
+
+        # Take the first (most relevant) result and get its IMDB ID
+        tmdb_id = search_results[0].get('id')
+        if not tmdb_id:
+            return None
+
+        resp2 = requests.get(
+            'https://api.themoviedb.org/3/movie/%s' % tmdb_id,
+            params={'api_key': api_key},
+            timeout=15,
+        )
+        if not resp2.ok:
+            return None
+
+        movie_data = resp2.json()
+        corrected_imdb = movie_data.get('imdb_id')
+        if not corrected_imdb:
+            return None
+
+        corrected_title = movie_data.get('title', '')
+        detail = ('srrDB mapped to %s (%s), corrected to %s (%s) via TMDB'
+                  % (srrdb_imdb_id, lookup_title,
+                     corrected_imdb, corrected_title))
+        _log_info(detail)
+
+        return {
+            'imdb_id': corrected_imdb,
+            'corrected': True,
+            'detail': detail,
+        }
+    except Exception as e:
+        _log_warn('TMDB cross-validation failed: %s' % (e,))
+        return None
+
+
 def compute_opensubtitles_hash(filepath):
     """Compute the OpenSubtitles movie hash for a file.
 
@@ -2511,7 +2626,22 @@ def identify_flagged_file(filepath, flags, container_title_parsed,
                         if results:
                             imdb = results[0].get('imdbId')
                             if imdb:
-                                identification['identified_imdb'] = f'tt{imdb}'
+                                srrdb_imdb = f'tt{imdb}'
+                                # Cross-validate srrDB IMDB via TMDB
+                                validated = validate_srrdb_imdb(
+                                    meta['title'],
+                                    meta.get('year'),
+                                    srrdb_imdb,
+                                )
+                                if validated:
+                                    identification['identified_imdb'] = \
+                                        validated['imdb_id']
+                                    if validated.get('corrected'):
+                                        identification['imdb_correction'] = \
+                                            validated.get('detail', '')
+                                else:
+                                    identification['identified_imdb'] = \
+                                        srrdb_imdb
                 except Exception:
                     pass
 
@@ -2597,15 +2727,28 @@ def identify_flagged_file(filepath, flags, container_title_parsed,
     if hit:
         # Parse the release name with guessit
         parsed = guessit_parse(hit['release'])
+        imdb_id = hit.get('imdb_id')
+
+        # Cross-validate srrDB's IMDB ID against the parsed title via TMDB
+        validated = validate_srrdb_imdb(
+            parsed.get('title', hit['release']),
+            parsed.get('year'),
+            imdb_id,
+        )
+        if validated:
+            imdb_id = validated['imdb_id']
+
         identification = {
             'method': 'srrdb_crc',
             'identified_title': parsed.get('title', hit['release']),
             'identified_year': parsed.get('year'),
-            'identified_imdb': hit.get('imdb_id'),
+            'identified_imdb': imdb_id,
             'confidence': 'high',
             'source': hit['release'],
             'crc32': crc_hex,
         }
+        if validated and validated.get('corrected'):
+            identification['imdb_correction'] = validated.get('detail', '')
     else:
         identification = {
             'method': 'crc_not_found',
@@ -3201,6 +3344,7 @@ def _scan_multi_cd(cd_files, folder_title, folder_year, imdb_id, db_entry,
             'file': os.path.basename(fp),
             'file_path': fp,
             'file_size_bytes': os.path.getsize(fp),
+            'file_fingerprint': compute_file_fingerprint(fp),
             'has_flags': r is not None,
         }
         for cd_num, fp, r in per_file_results
@@ -4079,7 +4223,7 @@ def _preview_rename_resolution(item):
     except ValueError as e:
         return {'error': str(e)}
 
-    return {
+    result = {
         'item_id': item['item_id'],
         'action': 'rename_resolution',
         'changes': {
@@ -4097,6 +4241,38 @@ def _preview_rename_resolution(item):
         'warnings': [],
     }
 
+    # Multi-CD: include rename info for all cd files
+    if item.get('multi_cd') and item.get('cd_files'):
+        # Determine the quality/edition overrides from the cd1 build
+        old_file = item['file']
+        existing_edition = get_edition(old_file)
+        edition = existing_edition if existing_edition else (item.get('detected_edition') or '')
+        cd_renames = []
+        for cd_info in item['cd_files']:
+            cd_num = cd_info['cd_number']
+            cd_item = dict(item)
+            cd_item['file'] = cd_info['file']
+            cd_item['file_path'] = cd_info['file_path']
+            cd_item['guessit_tokens'] = parse_guessit_tokens(cd_info['file'])
+            try:
+                cd_new_file, cd_new_path = _apply_renamer_template(
+                    cd_item, quality_override=actual_label,
+                    edition_override=edition, cd_number=cd_num
+                )
+            except ValueError:
+                continue
+            cd_renames.append({
+                'cd_number': cd_num,
+                'old_path': cd_info['file_path'],
+                'new_path': cd_new_path,
+            })
+        if cd_renames:
+            result['changes']['filesystem']['cd_renames'] = cd_renames
+            result['changes']['filesystem']['old_path'] = cd_renames[0]['old_path']
+            result['changes']['filesystem']['new_path'] = cd_renames[0]['new_path']
+
+    return result
+
 
 def _preview_rename_edition(item):
     """Generate preview for rename_edition action."""
@@ -4105,7 +4281,9 @@ def _preview_rename_edition(item):
     except ValueError as e:
         return {'error': str(e)}
 
-    return {
+    edition = item.get('detected_edition', '')
+
+    result = {
         'item_id': item['item_id'],
         'action': 'rename_edition',
         'changes': {
@@ -4118,13 +4296,40 @@ def _preview_rename_edition(item):
         'warnings': [],
     }
 
+    # Multi-CD: include rename info for all cd files
+    if item.get('multi_cd') and item.get('cd_files'):
+        cd_renames = []
+        for cd_info in item['cd_files']:
+            cd_num = cd_info['cd_number']
+            cd_item = dict(item)
+            cd_item['file'] = cd_info['file']
+            cd_item['file_path'] = cd_info['file_path']
+            cd_item['guessit_tokens'] = parse_guessit_tokens(cd_info['file'])
+            try:
+                cd_new_file, cd_new_path = _apply_renamer_template(
+                    cd_item, edition_override=edition, cd_number=cd_num
+                )
+            except ValueError:
+                continue
+            cd_renames.append({
+                'cd_number': cd_num,
+                'old_path': cd_info['file_path'],
+                'new_path': cd_new_path,
+            })
+        if cd_renames:
+            result['changes']['filesystem']['cd_renames'] = cd_renames
+            result['changes']['filesystem']['old_path'] = cd_renames[0]['old_path']
+            result['changes']['filesystem']['new_path'] = cd_renames[0]['new_path']
+
+    return result
+
 
 def _preview_delete_wrong(item):
     """Generate preview for delete_wrong action."""
     old_path = item['file_path']
     folder_path = os.path.dirname(old_path)
 
-    return {
+    result = {
         'item_id': item['item_id'],
         'action': 'delete_wrong',
         'changes': {
@@ -4142,6 +4347,20 @@ def _preview_delete_wrong(item):
         },
         'warnings': [],
     }
+
+    # Multi-CD: include delete info for all cd files
+    if item.get('multi_cd') and item.get('cd_files'):
+        cd_deletes = []
+        for cd_info in item['cd_files']:
+            cd_deletes.append({
+                'cd_number': cd_info['cd_number'],
+                'delete_path': cd_info['file_path'],
+            })
+        if cd_deletes:
+            result['changes']['filesystem']['cd_deletes'] = cd_deletes
+            result['changes']['filesystem']['delete_path'] = cd_deletes[0]['delete_path']
+
+    return result
 
 
 def _preview_reassign_movie(item):
@@ -4369,6 +4588,7 @@ def generate_fix_preview(item, action):
 def execute_fix_rename_resolution(item):
     """Execute a resolution rename fix.
 
+    For multi-CD items, renames all cd files.
     Returns (success, details_dict).
     """
     try:
@@ -4378,11 +4598,61 @@ def execute_fix_rename_resolution(item):
 
     old_path = item['file_path']
 
-    # Safety: check file exists
+    # Multi-CD: rename all cd files
+    if item.get('multi_cd') and item.get('cd_files'):
+        old_file = item['file']
+        existing_edition = get_edition(old_file)
+        edition = existing_edition if existing_edition else (item.get('detected_edition') or '')
+        cd_renames = []
+        for cd_info in item['cd_files']:
+            cd_num = cd_info['cd_number']
+            cd_filepath = cd_info['file_path']
+            cd_item = dict(item)
+            cd_item['file'] = cd_info['file']
+            cd_item['file_path'] = cd_filepath
+            cd_item['guessit_tokens'] = parse_guessit_tokens(cd_info['file'])
+            try:
+                cd_new_file, cd_new_path = _apply_renamer_template(
+                    cd_item, quality_override=actual_label,
+                    edition_override=edition, cd_number=cd_num
+                )
+            except ValueError as e:
+                return False, {'error': 'CD%d template failed: %s' % (cd_num, e)}
+            cd_renames.append((cd_filepath, cd_new_path))
+
+        # Validate all cd files exist and destinations don't
+        for cd_old, cd_new in cd_renames:
+            if not os.path.isfile(cd_old):
+                return False, {'error': 'CD file not found: %s' % cd_old}
+            if os.path.exists(cd_new) and cd_new != cd_old:
+                return False, {'error': 'CD destination already exists: %s' % cd_new}
+
+        # Execute all renames
+        completed = []
+        for cd_old, cd_new in cd_renames:
+            if cd_old == cd_new:
+                continue
+            try:
+                os.rename(cd_old, cd_new)
+                completed.append((cd_old, cd_new))
+            except OSError as e:
+                return False, {
+                    'error': 'Rename failed for %s: %s' % (os.path.basename(cd_old), e),
+                    'partial': completed,
+                }
+
+        return True, {
+            'old_path': cd_renames[0][0],
+            'new_path': cd_renames[0][1],
+            'old_resolution': item['expected'].get('resolution', ''),
+            'new_resolution': actual_label,
+            'cd_renames': [{'old_path': o, 'new_path': n} for o, n in cd_renames],
+        }
+
+    # Single file (original behavior)
     if not os.path.isfile(old_path):
         return False, {'error': 'File not found: %s' % old_path}
 
-    # Safety: check destination doesn't exist
     if os.path.exists(new_path):
         return False, {'error': 'Destination already exists: %s' % new_path}
 
@@ -4402,6 +4672,7 @@ def execute_fix_rename_resolution(item):
 def execute_fix_rename_edition(item):
     """Execute an edition rename fix.
 
+    For multi-CD items, renames all cd files.
     Returns (success, details_dict).
     """
     try:
@@ -4410,7 +4681,55 @@ def execute_fix_rename_edition(item):
         return False, {'error': str(e)}
 
     old_path = item['file_path']
+    edition = item.get('detected_edition', '')
 
+    # Multi-CD: rename all cd files
+    if item.get('multi_cd') and item.get('cd_files'):
+        cd_renames = []
+        for cd_info in item['cd_files']:
+            cd_num = cd_info['cd_number']
+            cd_filepath = cd_info['file_path']
+            cd_item = dict(item)
+            cd_item['file'] = cd_info['file']
+            cd_item['file_path'] = cd_filepath
+            cd_item['guessit_tokens'] = parse_guessit_tokens(cd_info['file'])
+            try:
+                cd_new_file, cd_new_path = _apply_renamer_template(
+                    cd_item, edition_override=edition, cd_number=cd_num
+                )
+            except ValueError as e:
+                return False, {'error': 'CD%d template failed: %s' % (cd_num, e)}
+            cd_renames.append((cd_filepath, cd_new_path))
+
+        # Validate all cd files exist and destinations don't
+        for cd_old, cd_new in cd_renames:
+            if not os.path.isfile(cd_old):
+                return False, {'error': 'CD file not found: %s' % cd_old}
+            if os.path.exists(cd_new) and cd_new != cd_old:
+                return False, {'error': 'CD destination already exists: %s' % cd_new}
+
+        # Execute all renames
+        completed = []
+        for cd_old, cd_new in cd_renames:
+            if cd_old == cd_new:
+                continue
+            try:
+                os.rename(cd_old, cd_new)
+                completed.append((cd_old, cd_new))
+            except OSError as e:
+                return False, {
+                    'error': 'Rename failed for %s: %s' % (os.path.basename(cd_old), e),
+                    'partial': completed,
+                }
+
+        return True, {
+            'old_path': cd_renames[0][0],
+            'new_path': cd_renames[0][1],
+            'edition': edition,
+            'cd_renames': [{'old_path': o, 'new_path': n} for o, n in cd_renames],
+        }
+
+    # Single file (original behavior)
     if not os.path.isfile(old_path):
         return False, {'error': 'File not found: %s' % old_path}
 
@@ -4425,7 +4744,7 @@ def execute_fix_rename_edition(item):
     return True, {
         'old_path': old_path,
         'new_path': new_path,
-        'edition': item.get('detected_edition', ''),
+        'edition': edition,
     }
 
 
@@ -4597,8 +4916,49 @@ def execute_fix_rename_template(item):
 def execute_fix_delete_wrong(item):
     """Execute a delete-wrong-file fix.
 
+    For multi-CD items, deletes all cd files.
     Returns (success, details_dict).
     """
+    # Multi-CD: delete all cd files
+    if item.get('multi_cd') and item.get('cd_files'):
+        cd_paths = [cd['file_path'] for cd in item['cd_files']]
+
+        # Validate all files exist before deleting any
+        for cp in cd_paths:
+            if not os.path.isfile(cp):
+                return False, {'error': 'CD file not found: %s' % cp}
+
+        deleted = []
+        for cp in cd_paths:
+            try:
+                os.remove(cp)
+                deleted.append(cp)
+            except OSError as e:
+                return False, {
+                    'error': 'Delete failed for %s: %s' % (os.path.basename(cp), e),
+                    'deleted_paths': deleted,
+                }
+
+        # Clean up folder (use parent of first cd file)
+        folder_path = os.path.dirname(cd_paths[0])
+        folder_cleaned = False
+        try:
+            remaining = os.listdir(folder_path)
+            video_remaining = [f for f in remaining
+                              if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS]
+            if not video_remaining:
+                shutil.rmtree(folder_path, ignore_errors=True)
+                folder_cleaned = True
+        except OSError:
+            pass
+
+        return True, {
+            'deleted_path': cd_paths[0],
+            'deleted_paths': deleted,
+            'folder_cleaned': folder_cleaned,
+        }
+
+    # Single file (original behavior)
     old_path = item['file_path']
 
     if not os.path.isfile(old_path):
@@ -5145,6 +5505,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         track's detected language with its container tag.  Returns a preview
         dict describing per-track changes.
 
+        For multi-CD items, builds per-CD track change lists using each CD
+        file's own fingerprint and whisper data.
+
         Requires whisper verification to have been run first.
         """
         file_path = item.get('file_path', '')
@@ -5195,7 +5558,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 'needs_change': needs_change,
             })
 
-        return {
+        result = {
             'action': 'set_audio_language',
             'current_path': file_path,
             'new_path': new_path,
@@ -5209,6 +5572,54 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                             % ext),
         }
 
+        # Multi-CD: build per-CD track changes
+        if item.get('multi_cd') and item.get('cd_files'):
+            cd_tracks = []
+            for cd_info in item['cd_files']:
+                cd_fp = cd_info.get('file_fingerprint')
+                cd_path = cd_info['file_path']
+                cd_doc = self._get_knowledge(cd_fp) if cd_fp else None
+                cd_whisper = cd_doc.get('whisper') if cd_doc else None
+                cd_is_mkv = cd_path.lower().endswith('.mkv')
+                cd_ext = os.path.splitext(cd_path)[1].lower()
+                cd_new_path = cd_path if cd_is_mkv else os.path.splitext(cd_path)[0] + '.mkv'
+                cd_entry = {
+                    'cd_number': cd_info['cd_number'],
+                    'file_path': cd_path,
+                    'new_path': cd_new_path,
+                    'is_mkv': cd_is_mkv,
+                    'method': 'mkvpropedit' if cd_is_mkv else 'ffmpeg_remux',
+                    'tracks': [],
+                    'has_whisper': bool(cd_whisper and cd_whisper.get('tracks')),
+                }
+                if cd_whisper and cd_whisper.get('tracks'):
+                    for t in cd_whisper['tracks']:
+                        idx = t.get('track_index', 0)
+                        detected = t.get('language', '')
+                        conf = t.get('confidence', 0)
+                        tagged = t.get('tagged_language', '')
+                        detected_norm = normalize_language(detected) if detected else ''
+                        tagged_norm = normalize_language(tagged) if tagged else ''
+                        needs_change = (
+                            not tagged_norm
+                            or tagged_norm in _UNDETERMINED_LANGUAGE
+                            or tagged_norm != detected_norm
+                        )
+                        iso3 = ISO_639_1_TO_639_2.get(detected_norm, detected_norm)
+                        cd_entry['tracks'].append({
+                            'track_index': idx,
+                            'current_tag': tagged or 'und',
+                            'new_tag': iso3,
+                            'new_tag_ietf': detected_norm,
+                            'detected_language': detected,
+                            'confidence': conf,
+                            'needs_change': needs_change,
+                        })
+                cd_tracks.append(cd_entry)
+            result['cd_tracks'] = cd_tracks
+
+        return result
+
     def _execute_set_audio_language(self, item):
         """Execute the set_audio_language fix: update container language tags.
 
@@ -5216,14 +5627,109 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         For non-MKV files: uses ffmpeg to remux into MKV with correct tags,
         deletes the original file, and updates all path references.
 
+        For multi-CD items, processes each CD file independently.
+
         Returns (success, details_dict).
         """
+        # Multi-CD: process each CD file
+        if item.get('multi_cd') and item.get('cd_files'):
+            cd_results = []
+            total_changed = 0
+            any_failed = False
+            for cd_info in item['cd_files']:
+                cd_fp = cd_info.get('file_fingerprint')
+                cd_path = cd_info['file_path']
+                cd_num = cd_info['cd_number']
+                ok, details = self._execute_set_audio_language_single(
+                    cd_path, cd_fp)
+                cd_results.append({
+                    'cd_number': cd_num,
+                    'success': ok,
+                    'details': details,
+                })
+                if ok:
+                    total_changed += details.get('tracks_changed', 0)
+                    # Update cd_info path if remuxed
+                    if details.get('new_path') and details['new_path'] != cd_path:
+                        cd_info['file_path'] = details['new_path']
+                        cd_info['file'] = os.path.basename(details['new_path'])
+                else:
+                    any_failed = True
+                    log.error('Set audio language failed for CD%d (%s): %s',
+                              (cd_num, os.path.basename(cd_path),
+                               details.get('error', '')))
+
+            # Update item's cd1 path if it changed
+            if cd_results and cd_results[0].get('details', {}).get('new_path'):
+                new_cd1_path = cd_results[0]['details']['new_path']
+                if new_cd1_path != item.get('file_path'):
+                    item['file_path'] = new_cd1_path
+                    item['file'] = os.path.basename(new_cd1_path)
+
+            # Remove audio_mislabeled flag and recompute recommended action
+            item['flags'] = [f for f in item.get('flags', [])
+                             if f['check'] != 'audio_mislabeled']
+            item['flag_count'] = len(item['flags'])
+            item['recommended_action'] = compute_recommended_action(
+                item['flags'], item.get('identification'), item.get('expected'))
+
+            if any_failed and total_changed == 0:
+                return False, {
+                    'error': 'All CD files failed',
+                    'cd_results': cd_results,
+                }
+
+            return True, {
+                'tracks_changed': total_changed,
+                'cd_results': cd_results,
+                'partial_failure': any_failed,
+            }
+
+        # Single file path
         file_path = item.get('file_path', '')
+        fp = item.get('file_fingerprint')
+        ok, details = self._execute_set_audio_language_single(file_path, fp)
+
+        if not ok:
+            return False, details
+
+        new_path = details.get('new_path', file_path)
+
+        # Update audio tracks in the item's actual data
+        audio_tracks = item.get('actual', {}).get('audio_tracks', [])
+        for tc in details.get('track_changes_raw', []):
+            idx = tc['track_index']
+            if idx < len(audio_tracks):
+                audio_tracks[idx]['language'] = tc['ietf']
+
+        # Update item path if changed (remux)
+        if new_path != file_path:
+            item['file_path'] = new_path
+            item['file'] = os.path.basename(new_path)
+
+        # Remove audio_mislabeled flag and recompute recommended action
+        item['flags'] = [f for f in item.get('flags', [])
+                         if f['check'] != 'audio_mislabeled']
+        item['flag_count'] = len(item['flags'])
+        item['recommended_action'] = compute_recommended_action(
+            item['flags'], item.get('identification'), item.get('expected'))
+
+        # Remove internal field before returning
+        details.pop('track_changes_raw', None)
+        return True, details
+
+    def _execute_set_audio_language_single(self, file_path, fingerprint):
+        """Execute set_audio_language on a single file.
+
+        Internal helper used by _execute_set_audio_language for both single
+        and multi-CD paths.
+
+        Returns (success, details_dict).
+        """
         if not file_path or not os.path.isfile(file_path):
             return False, {'error': 'File not found: %s' % file_path}
 
-        fp = item.get('file_fingerprint')
-        doc = self._get_knowledge(fp) if fp else None
+        doc = self._get_knowledge(fingerprint) if fingerprint else None
         whisper = doc.get('whisper') if doc else None
         if not whisper or not whisper.get('tracks'):
             return False, {'error': 'No whisper results — run Verify Audio first'}
@@ -5252,7 +5758,6 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 })
 
         if not track_changes:
-            # All tags already correct — nothing to do
             return True, {
                 'message': 'All audio tracks already correctly tagged',
                 'tracks_changed': 0,
@@ -5342,31 +5847,13 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 doc['file_path'] = new_path
                 self._update_knowledge(doc)
 
-        # Update audio tracks in the item's actual data
-        audio_tracks = item.get('actual', {}).get('audio_tracks', [])
-        for tc in track_changes:
-            idx = tc['track_index']
-            if idx < len(audio_tracks):
-                audio_tracks[idx]['language'] = tc['ietf']
-
-        # Update item path if changed (remux)
-        if new_path != file_path:
-            item['file_path'] = new_path
-            item['file'] = os.path.basename(new_path)
-
-        # Remove audio_mislabeled flag and recompute recommended action
-        item['flags'] = [f for f in item.get('flags', [])
-                         if f['check'] != 'audio_mislabeled']
-        item['flag_count'] = len(item['flags'])
-        item['recommended_action'] = compute_recommended_action(
-            item['flags'], item.get('identification'), item.get('expected'))
-
         return True, {
             'new_path': new_path,
             'tracks_changed': len(track_changes),
             'track_details': detail_str,
             'method': 'mkvpropedit' if is_mkv else 'ffmpeg_remux',
             'remuxed': not is_mkv,
+            'track_changes_raw': track_changes,
         }
 
     def _save_results(self):
@@ -6107,7 +6594,11 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         )
 
     def verifyView(self, item_id=None, **kwargs):
-        """API handler: run whisper verification on a single item."""
+        """API handler: run whisper verification on a single item.
+
+        For multi-CD items, verifies each CD file independently and merges
+        all track results before applying flags.
+        """
         if not item_id:
             return {'success': False, 'error': 'item_id is required'}
 
@@ -6118,6 +6609,10 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         file_path = item.get('file_path', '')
         if not file_path or not os.path.isfile(file_path):
             return {'success': False, 'error': 'File not accessible: %s' % file_path}
+
+        # Multi-CD: verify each CD file, merge results
+        if item.get('multi_cd') and item.get('cd_files'):
+            return self._verify_multi_cd(item)
 
         # Check if already verified via file_knowledge DB
         fingerprint = item.get('file_fingerprint')
@@ -6160,6 +6655,105 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 'confidence': result['confidence'],
                 'tracks': result.get('tracks', []),
             },
+            'recommended_action': item.get('recommended_action'),
+        }
+
+    def _verify_multi_cd(self, item):
+        """Verify audio for all CD files in a multi-CD item.
+
+        Verifies each CD independently (with caching), stores per-CD whisper
+        results in their own knowledge docs, then merges all track results
+        into a single combined result for flag computation.
+
+        Returns the API response dict.
+        """
+        item_id = item.get('item_id', '')
+        all_tracks = []
+        best_language = ''
+        best_confidence = 0.0
+        any_cached = False
+        all_cached = True
+        cd_whisper_results = []
+
+        for cd_info in item.get('cd_files', []):
+            cd_fp = cd_info.get('file_fingerprint')
+            cd_path = cd_info['file_path']
+            cd_num = cd_info['cd_number']
+
+            if not cd_path or not os.path.isfile(cd_path):
+                log.error('CD%d file not accessible: %s', (cd_num, cd_path))
+                continue
+
+            # Check cache
+            cached = None
+            if cd_fp:
+                cd_doc = self._get_knowledge(cd_fp)
+                cached = cd_doc.get('whisper') if cd_doc else None
+
+            if cached and cached.get('language'):
+                any_cached = True
+                cd_result = cached
+            else:
+                all_cached = False
+                # Run whisper on this CD file
+                cd_result = whisper_verify_audio(cd_path)
+                if 'error' in cd_result:
+                    log.error('Whisper failed for CD%d (%s): %s',
+                              (cd_num, os.path.basename(cd_path),
+                               cd_result['error']))
+                    continue
+                # Store in this CD's knowledge doc
+                if cd_fp:
+                    cd_doc = self._get_or_create_knowledge(cd_fp, cd_path)
+                    if cd_doc:
+                        cd_doc['whisper'] = {
+                            'language': cd_result.get('language'),
+                            'confidence': cd_result.get('confidence', 0.0),
+                            'verified_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                            'tracks': cd_result.get('tracks', []),
+                        }
+                        self._update_knowledge(cd_doc)
+
+            cd_whisper_results.append({
+                'cd_number': cd_num,
+                'language': cd_result.get('language', ''),
+                'confidence': cd_result.get('confidence', 0.0),
+                'tracks': cd_result.get('tracks', []),
+            })
+
+            # Merge tracks (offset track indices to avoid confusion)
+            for t in cd_result.get('tracks', []):
+                all_tracks.append(t)
+
+            # Track best language/confidence across all CDs
+            cd_conf = cd_result.get('confidence', 0.0)
+            if cd_conf > best_confidence:
+                best_confidence = cd_conf
+                best_language = cd_result.get('language', '')
+
+        if not all_tracks:
+            return {
+                'success': False,
+                'error': 'No whisper results from any CD file',
+                'item_id': item_id,
+            }
+
+        # Build merged result for _apply_whisper_result
+        merged = {
+            'language': best_language,
+            'confidence': best_confidence,
+            'tracks': all_tracks,
+        }
+
+        self._apply_whisper_result(item, merged)
+        self._save_results()
+
+        return {
+            'success': True,
+            'item_id': item_id,
+            'cached': all_cached,
+            'whisper': merged,
+            'cd_results': cd_whisper_results,
             'recommended_action': item.get('recommended_action'),
         }
 
@@ -6481,6 +7075,12 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         # Clean up file_knowledge doc when the file is deleted
         if action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
             self._delete_knowledge(item.get('file_fingerprint'))
+            # Multi-CD: also clean up knowledge for all cd files
+            if item.get('multi_cd') and item.get('cd_files'):
+                for cd_info in item['cd_files']:
+                    cd_fp = cd_info.get('file_fingerprint')
+                    if cd_fp and cd_fp != item.get('file_fingerprint'):
+                        self._delete_knowledge(cd_fp)
 
         return {
             'success': True,
@@ -6751,6 +7351,19 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                     file_path = item.get('file_path', '')
                     if not file_path or not os.path.isfile(file_path):
                         success, details = False, {'error': 'File not accessible'}
+                    elif item.get('multi_cd') and item.get('cd_files'):
+                        # Multi-CD: verify each CD file via _verify_multi_cd
+                        vr = self._verify_multi_cd(item)
+                        success = vr.get('success', False)
+                        if success:
+                            details = {
+                                'language': vr.get('whisper', {}).get('language', ''),
+                                'confidence': vr.get('whisper', {}).get('confidence', 0),
+                                'cached': vr.get('cached', False),
+                                'cd_count': len(vr.get('cd_results', [])),
+                            }
+                        else:
+                            details = {'error': vr.get('error', 'Verification failed')}
                     else:
                         # Check whisper cache in file_knowledge
                         fingerprint = item.get('file_fingerprint')
@@ -6798,6 +7411,12 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                     # Clean up file_knowledge doc when the file is deleted
                     if action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
                         self._delete_knowledge(item.get('file_fingerprint'))
+                        # Multi-CD: also clean up knowledge for all cd files
+                        if item.get('multi_cd') and item.get('cd_files'):
+                            for cd_info in item['cd_files']:
+                                cd_fp = cd_info.get('file_fingerprint')
+                                if cd_fp and cd_fp != item.get('file_fingerprint'):
+                                    self._delete_knowledge(cd_fp)
                     completed += 1
                 else:
                     failed += 1

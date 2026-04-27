@@ -44,10 +44,22 @@ from couchpotato.core.plugins.audit import (
     needs_identification,
     ISO_639_1_TO_639_2,
     load_cp_database,
+    validate_srrdb_imdb,
+    identify_flagged_file,
+    _preview_delete_wrong,
+    _preview_rename_resolution,
+    _preview_rename_edition,
+    execute_fix_delete_wrong,
+    execute_fix_rename_resolution,
+    execute_fix_rename_edition,
+    generate_fix_preview,
+    parse_guessit_tokens,
+    compute_file_fingerprint,
 )
 import json
 import os
 import re
+import subprocess
 from unittest import mock
 
 
@@ -3710,7 +3722,8 @@ class TestSetAudioLanguage:
                      '_update_knowledge', '_ensure_original_hashes',
                      '_post_modification_update', '_cache_identification',
                      '_preview_set_audio_language',
-                     '_execute_set_audio_language'):
+                     '_execute_set_audio_language',
+                     '_execute_set_audio_language_single'):
             method = getattr(Audit, name)
             setattr(p, name, types.MethodType(method, p))
         return p
@@ -5419,3 +5432,1098 @@ class TestBatchVerifyUnified:
 
         # Item has HIGH severity, filter asks for LOW — no match
         assert result.get('success') is False or result.get('total', 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# validate_srrdb_imdb — TMDB cross-validation of srrDB IMDB IDs
+# ---------------------------------------------------------------------------
+
+class TestValidateSrrdbImdb:
+    """Tests for validate_srrdb_imdb() TMDB cross-validation."""
+
+    MODULE = 'couchpotato.core.plugins.audit'
+
+    @staticmethod
+    def _mock_response(data, status_code=200):
+        class MockResp:
+            def __init__(self):
+                self.status_code = status_code
+                self.ok = status_code == 200
+            def json(self):
+                return data
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise Exception(f'HTTP {self.status_code}')
+        return MockResp()
+
+    # -- Edge cases / early returns --
+
+    def test_returns_none_when_no_imdb(self):
+        """Returns None when srrdb_imdb_id is missing."""
+        assert validate_srrdb_imdb('Some Movie', 2020, None) is None
+        assert validate_srrdb_imdb('Some Movie', 2020, '') is None
+
+    def test_returns_none_when_no_title(self):
+        """Returns None when identified_title is missing."""
+        assert validate_srrdb_imdb('', 2020, 'tt1234567') is None
+        assert validate_srrdb_imdb(None, 2020, 'tt1234567') is None
+
+    def test_returns_none_when_no_requests(self, monkeypatch):
+        """Returns None when requests module is unavailable."""
+        monkeypatch.setattr(self.MODULE + '.requests', None)
+        assert validate_srrdb_imdb('Movie', 2020, 'tt1234567') is None
+
+    # -- Title match (valid srrDB IMDB) --
+
+    def test_valid_imdb_unchanged(self, monkeypatch):
+        """When titles match, returns the original IMDB ID with corrected=False."""
+        monkeypatch.setattr(
+            self.MODULE + '.lookup_imdb_id',
+            lambda imdb_id, **kw: {'title': 'Cinema Paradiso', 'year': 1988,
+                                   'imdb_id': 'tt0095765'},
+        )
+        result = validate_srrdb_imdb('Cinema Paradiso', 1988, 'tt0095765')
+        assert result is not None
+        assert result['imdb_id'] == 'tt0095765'
+        assert result['corrected'] is False
+
+    def test_valid_imdb_title_match_fuzzy(self, monkeypatch):
+        """Fuzzy title matching still validates (e.g. article reordering)."""
+        monkeypatch.setattr(
+            self.MODULE + '.lookup_imdb_id',
+            lambda imdb_id, **kw: {'title': "Avengers: Infinity War",
+                                   'year': 2018, 'imdb_id': 'tt4154756'},
+        )
+        # Container title doesn't have "The" prefix or colon
+        result = validate_srrdb_imdb('The Avengers Infinity War', 2018,
+                                     'tt4154756')
+        assert result is not None
+        assert result['imdb_id'] == 'tt4154756'
+        assert result['corrected'] is False
+
+    def test_valid_imdb_year_within_tolerance(self, monkeypatch):
+        """Year ±1 is still considered valid."""
+        monkeypatch.setattr(
+            self.MODULE + '.lookup_imdb_id',
+            lambda imdb_id, **kw: {'title': 'Crumb Catcher', 'year': 2024,
+                                   'imdb_id': 'tt7178516'},
+        )
+        # Guessit parsed year as 2023 from release name, TMDB says 2024
+        result = validate_srrdb_imdb('Crumb Catcher', 2023, 'tt7178516')
+        assert result is not None
+        assert result['imdb_id'] == 'tt7178516'
+        assert result['corrected'] is False
+
+    def test_valid_imdb_no_year_available(self, monkeypatch):
+        """No year to compare — trusts the title match."""
+        monkeypatch.setattr(
+            self.MODULE + '.lookup_imdb_id',
+            lambda imdb_id, **kw: {'title': 'Eraserhead', 'year': 1977,
+                                   'imdb_id': 'tt0074486'},
+        )
+        result = validate_srrdb_imdb('Eraserhead', None, 'tt0074486')
+        assert result is not None
+        assert result['imdb_id'] == 'tt0074486'
+        assert result['corrected'] is False
+
+    # -- Title mismatch (wrong srrDB IMDB) --
+
+    def test_corrects_wrong_imdb(self, monkeypatch):
+        """Snatch N Grab / The Buddha case: srrDB has wrong IMDB, corrected via TMDB."""
+        # lookup_imdb_id returns "The Buddha" for srrDB's tt1478841
+        monkeypatch.setattr(
+            self.MODULE + '.lookup_imdb_id',
+            lambda imdb_id, **kw: {'title': 'The Buddha', 'year': 2010,
+                                   'imdb_id': 'tt1478841'},
+        )
+
+        call_log = []
+
+        def mock_get(url, **kwargs):
+            call_log.append(url)
+            if 'search/movie' in url:
+                return TestValidateSrrdbImdb._mock_response({
+                    'results': [{'id': 274882, 'title': 'Snatch N Grab',
+                                 'release_date': '2010-01-01'}]
+                })
+            elif '/movie/274882' in url:
+                return TestValidateSrrdbImdb._mock_response({
+                    'title': 'Snatch N Grab',
+                    'imdb_id': 'tt1726758',
+                })
+            return TestValidateSrrdbImdb._mock_response({}, 404)
+
+        import requests as req_module
+        monkeypatch.setattr(req_module, 'get', mock_get)
+
+        result = validate_srrdb_imdb('Snatch N Grab', 2010, 'tt1478841')
+        assert result is not None
+        assert result['imdb_id'] == 'tt1726758'
+        assert result['corrected'] is True
+        assert 'tt1478841' in result['detail']
+        assert 'tt1726758' in result['detail']
+
+    def test_year_mismatch_triggers_correction(self, monkeypatch):
+        """Same title but year >1 apart triggers TMDB search (Faust 1926 vs 2011)."""
+        # srrDB says tt0016847 (Faust 1926), but guessit parsed year 2011
+        monkeypatch.setattr(
+            self.MODULE + '.lookup_imdb_id',
+            lambda imdb_id, **kw: {'title': 'Faust', 'year': 1926,
+                                   'imdb_id': 'tt0016847'},
+        )
+
+        def mock_get(url, **kwargs):
+            if 'search/movie' in url:
+                return TestValidateSrrdbImdb._mock_response({
+                    'results': [{'id': 83193, 'title': 'Faust',
+                                 'release_date': '2011-09-08'}]
+                })
+            elif '/movie/83193' in url:
+                return TestValidateSrrdbImdb._mock_response({
+                    'title': 'Faust',
+                    'imdb_id': 'tt1437357',
+                })
+            return TestValidateSrrdbImdb._mock_response({}, 404)
+
+        import requests as req_module
+        monkeypatch.setattr(req_module, 'get', mock_get)
+
+        result = validate_srrdb_imdb('Faust', 2011, 'tt0016847')
+        assert result is not None
+        assert result['imdb_id'] == 'tt1437357'
+        assert result['corrected'] is True
+
+    # -- TMDB failure fallbacks --
+
+    def test_lookup_failure_returns_none(self, monkeypatch):
+        """When lookup_imdb_id returns None, can't validate — returns None."""
+        monkeypatch.setattr(
+            self.MODULE + '.lookup_imdb_id',
+            lambda imdb_id, **kw: None,
+        )
+        result = validate_srrdb_imdb('Some Movie', 2020, 'tt9999999')
+        assert result is None
+
+    def test_tmdb_search_http_error_returns_none(self, monkeypatch):
+        """TMDB search HTTP error returns None (caller keeps original)."""
+        monkeypatch.setattr(
+            self.MODULE + '.lookup_imdb_id',
+            lambda imdb_id, **kw: {'title': 'Wrong Movie', 'year': 2020,
+                                   'imdb_id': 'tt9999999'},
+        )
+
+        import requests as req_module
+        monkeypatch.setattr(req_module, 'get',
+                            lambda *a, **kw: self._mock_response({}, 500))
+
+        result = validate_srrdb_imdb('Correct Movie', 2020, 'tt9999999')
+        assert result is None
+
+    def test_tmdb_search_no_results_returns_none(self, monkeypatch):
+        """TMDB search returns empty results — returns None."""
+        monkeypatch.setattr(
+            self.MODULE + '.lookup_imdb_id',
+            lambda imdb_id, **kw: {'title': 'Wrong Movie', 'year': 2020,
+                                   'imdb_id': 'tt9999999'},
+        )
+
+        import requests as req_module
+        monkeypatch.setattr(req_module, 'get',
+                            lambda *a, **kw: self._mock_response({'results': []}))
+
+        result = validate_srrdb_imdb('Obscure Film', 2020, 'tt9999999')
+        assert result is None
+
+    def test_tmdb_movie_details_failure_returns_none(self, monkeypatch):
+        """TMDB search succeeds but movie details fails — returns None."""
+        monkeypatch.setattr(
+            self.MODULE + '.lookup_imdb_id',
+            lambda imdb_id, **kw: {'title': 'Wrong Movie', 'year': 2020,
+                                   'imdb_id': 'tt9999999'},
+        )
+
+        call_count = {'n': 0}
+
+        def mock_get(url, **kwargs):
+            call_count['n'] += 1
+            if 'search/movie' in url:
+                return self._mock_response({
+                    'results': [{'id': 12345, 'title': 'Right Movie'}]
+                })
+            # Movie details call fails
+            return self._mock_response({}, 500)
+
+        import requests as req_module
+        monkeypatch.setattr(req_module, 'get', mock_get)
+
+        result = validate_srrdb_imdb('Right Movie', 2020, 'tt9999999')
+        assert result is None
+
+    def test_exception_during_tmdb_returns_none(self, monkeypatch):
+        """Network exception during TMDB calls returns None gracefully."""
+        monkeypatch.setattr(
+            self.MODULE + '.lookup_imdb_id',
+            lambda imdb_id, **kw: {'title': 'Wrong Movie', 'year': 2020,
+                                   'imdb_id': 'tt9999999'},
+        )
+
+        import requests as req_module
+        def explode(*a, **kw):
+            raise ConnectionError('network down')
+        monkeypatch.setattr(req_module, 'get', explode)
+
+        result = validate_srrdb_imdb('Right Movie', 2020, 'tt9999999')
+        assert result is None
+
+
+class TestValidateSrrdbImdbIntegration:
+    """Integration tests: validate_srrdb_imdb called from identify_flagged_file."""
+
+    MODULE = 'couchpotato.core.plugins.audit'
+
+    @staticmethod
+    def _mock_response(data, status_code=200):
+        class MockResp:
+            def __init__(self):
+                self.status_code = status_code
+                self.ok = status_code == 200
+            def json(self):
+                return data
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise Exception(f'HTTP {self.status_code}')
+        return MockResp()
+
+    def test_strategy_c_corrects_imdb(self, monkeypatch, tmp_path):
+        """Strategy C (srrdb_crc) uses validate_srrdb_imdb to correct wrong IMDB."""
+        # Create a dummy file
+        video = tmp_path / 'movie.mkv'
+        video.write_bytes(b'\x00' * 1024)
+
+        flags = [{'check': 'runtime', 'severity': 'HIGH',
+                  'detail': 'Expected 120, actual 89'}]
+
+        # Mock srrdb_lookup_crc to return the wrong IMDB
+        monkeypatch.setattr(
+            self.MODULE + '.srrdb_lookup_crc',
+            lambda crc: {'release': 'Snatch.N.Grab.2010.1080p.BluRay.x264-SADPANDA',
+                         'imdb_id': 'tt1478841', 'size': 5924366555},
+        )
+
+        # Mock validate_srrdb_imdb to return the corrected IMDB
+        monkeypatch.setattr(
+            self.MODULE + '.validate_srrdb_imdb',
+            lambda title, year, imdb, **kw: {
+                'imdb_id': 'tt1726758', 'corrected': True,
+                'detail': 'srrDB mapped to tt1478841 (The Buddha), '
+                          'corrected to tt1726758 (Snatch N Grab) via TMDB',
+            },
+        )
+
+        # Mock OpenSubtitles to not interfere (no API key)
+        monkeypatch.setattr(self.MODULE + '._CP_AVAILABLE', False)
+
+        result = identify_flagged_file(
+            str(video), flags, None,
+            cached_crc32='6A28BFDF',
+        )
+        assert result['method'] == 'srrdb_crc'
+        assert result['identified_title'] == 'Snatch N Grab'
+        assert result['identified_imdb'] == 'tt1726758'
+        assert result.get('imdb_correction') is not None
+        assert 'tt1478841' in result['imdb_correction']
+
+    def test_strategy_c_keeps_valid_imdb(self, monkeypatch, tmp_path):
+        """Strategy C keeps srrDB IMDB when validation confirms it's correct."""
+        video = tmp_path / 'movie.mkv'
+        video.write_bytes(b'\x00' * 1024)
+
+        flags = [{'check': 'template', 'severity': 'MEDIUM', 'detail': '...'}]
+
+        monkeypatch.setattr(
+            self.MODULE + '.srrdb_lookup_crc',
+            lambda crc: {'release': 'Cinema.Paradiso.1988.MULTi.1080p.BluRay.x264-ROUGH',
+                         'imdb_id': 'tt0095765', 'size': 13129011042},
+        )
+
+        monkeypatch.setattr(
+            self.MODULE + '.validate_srrdb_imdb',
+            lambda title, year, imdb, **kw: {
+                'imdb_id': 'tt0095765', 'corrected': False, 'detail': None,
+            },
+        )
+
+        monkeypatch.setattr(self.MODULE + '._CP_AVAILABLE', False)
+
+        result = identify_flagged_file(
+            str(video), flags, None,
+            cached_crc32='475349BA',
+        )
+        assert result['method'] == 'srrdb_crc'
+        assert result['identified_imdb'] == 'tt0095765'
+        assert 'imdb_correction' not in result
+
+    def test_strategy_a_corrects_imdb(self, monkeypatch, tmp_path):
+        """Strategy A (container_title) uses validate_srrdb_imdb to correct wrong IMDB."""
+        video = tmp_path / 'Buddha, The (2010)' / 'The Buddha.mkv'
+        video.parent.mkdir(parents=True)
+        video.write_bytes(b'\x00' * 1024)
+
+        flags = [{'check': 'title', 'severity': 'HIGH',
+                  'detail': 'Title mismatch'}]
+
+        container_parsed = {
+            'title': 'Snatch N Grab',
+            'year': 2010,
+            'raw': 'Snatch.N.Grab.2010.1080p.BluRay.x264-SADPANDA',
+        }
+
+        # Mock srrDB search returning wrong IMDB
+        srrdb_response = TestValidateSrrdbImdbIntegration._mock_response({
+            'results': [{'release': 'Snatch.N.Grab.2010.1080p.BluRay.x264-SADPANDA',
+                         'imdbId': '1478841'}]
+        })
+        import requests as req_module
+        monkeypatch.setattr(req_module, 'get',
+                            lambda *a, **kw: srrdb_response)
+
+        # Mock validate_srrdb_imdb to return corrected IMDB
+        monkeypatch.setattr(
+            self.MODULE + '.validate_srrdb_imdb',
+            lambda title, year, imdb, **kw: {
+                'imdb_id': 'tt1726758', 'corrected': True,
+                'detail': 'corrected via TMDB',
+            },
+        )
+
+        result = identify_flagged_file(
+            str(video), flags, container_parsed,
+        )
+        assert result['method'] == 'container_title'
+        assert result['identified_imdb'] == 'tt1726758'
+        assert result.get('imdb_correction') is not None
+
+    def test_strategy_c_validation_failure_keeps_original(self, monkeypatch,
+                                                          tmp_path):
+        """When validation returns None, Strategy C keeps the srrDB IMDB."""
+        video = tmp_path / 'movie.mkv'
+        video.write_bytes(b'\x00' * 1024)
+
+        flags = [{'check': 'runtime', 'severity': 'HIGH', 'detail': '...'}]
+
+        monkeypatch.setattr(
+            self.MODULE + '.srrdb_lookup_crc',
+            lambda crc: {'release': 'Some.Movie.2020.1080p.BluRay.x264-GRP',
+                         'imdb_id': 'tt1111111', 'size': 5000000000},
+        )
+
+        # validate returns None (TMDB lookup failed)
+        monkeypatch.setattr(
+            self.MODULE + '.validate_srrdb_imdb',
+            lambda title, year, imdb, **kw: None,
+        )
+
+        monkeypatch.setattr(self.MODULE + '._CP_AVAILABLE', False)
+
+        result = identify_flagged_file(
+            str(video), flags, None,
+            cached_crc32='DEADBEEF',
+        )
+        assert result['method'] == 'srrdb_crc'
+        assert result['identified_imdb'] == 'tt1111111'
+        assert 'imdb_correction' not in result
+
+
+# ===========================================================================
+# Multi-CD action handling tests
+# ===========================================================================
+
+class TestMultiCDDelete:
+    """Tests for multi-CD delete_wrong/delete_duplicate/delete_foreign."""
+
+    @staticmethod
+    def _make_multi_cd_item(tmp_path, num_cds=4):
+        """Create a multi-CD item with real temp files."""
+        folder = tmp_path / 'Movie (2020)'
+        folder.mkdir()
+        cd_files = []
+        for i in range(1, num_cds + 1):
+            f = folder / ('Movie.2020.cd%d.mkv' % i)
+            f.write_bytes(b'\x00' * (1024 * i))  # different sizes for fingerprints
+            cd_files.append({
+                'cd_number': i,
+                'file': f.name,
+                'file_path': str(f),
+                'file_size_bytes': f.stat().st_size,
+                'file_fingerprint': '%d:fp_cd%d' % (f.stat().st_size, i),
+                'has_flags': True,
+            })
+        return {
+            'item_id': 'test123',
+            'file': cd_files[0]['file'],
+            'file_path': cd_files[0]['file_path'],
+            'file_fingerprint': cd_files[0]['file_fingerprint'],
+            'folder': 'Movie (2020)',
+            'multi_cd': True,
+            'cd_count': num_cds,
+            'cd_files': cd_files,
+            'flags': [{'check': 'title', 'severity': 'HIGH', 'detail': 'test'}],
+            'expected': {'title': 'Movie', 'resolution': '1080p'},
+            'actual': {'resolution': '1920x1080'},
+        }
+
+    def test_preview_delete_includes_cd_deletes(self, tmp_path):
+        """Preview for multi-CD delete includes cd_deletes list."""
+        item = self._make_multi_cd_item(tmp_path)
+        preview = _preview_delete_wrong(item)
+        assert 'cd_deletes' in preview['changes']['filesystem']
+        cd_deletes = preview['changes']['filesystem']['cd_deletes']
+        assert len(cd_deletes) == 4
+        assert cd_deletes[0]['cd_number'] == 1
+        assert cd_deletes[3]['cd_number'] == 4
+        # delete_path should be cd1's path
+        assert preview['changes']['filesystem']['delete_path'] == item['cd_files'][0]['file_path']
+
+    def test_preview_delete_single_cd_no_cd_deletes(self, tmp_path):
+        """Single-file item should not have cd_deletes."""
+        folder = tmp_path / 'Movie (2020)'
+        folder.mkdir()
+        f = folder / 'Movie.2020.mkv'
+        f.write_bytes(b'\x00' * 1024)
+        item = {
+            'item_id': 'single1',
+            'file': f.name,
+            'file_path': str(f),
+            'expected': {'title': 'Movie'},
+        }
+        preview = _preview_delete_wrong(item)
+        assert 'cd_deletes' not in preview['changes']['filesystem']
+
+    def test_execute_delete_all_cds(self, tmp_path):
+        """Execute delete removes all CD files."""
+        item = self._make_multi_cd_item(tmp_path)
+        # Verify files exist
+        for cd in item['cd_files']:
+            assert os.path.isfile(cd['file_path'])
+
+        success, details = execute_fix_delete_wrong(item)
+        assert success
+        assert 'deleted_paths' in details
+        assert len(details['deleted_paths']) == 4
+
+        # Verify files deleted
+        for cd in item['cd_files']:
+            assert not os.path.isfile(cd['file_path'])
+
+    def test_execute_delete_cleans_empty_folder(self, tmp_path):
+        """Folder is cleaned up when no video files remain."""
+        item = self._make_multi_cd_item(tmp_path, num_cds=2)
+        success, details = execute_fix_delete_wrong(item)
+        assert success
+        assert details['folder_cleaned'] is True
+        assert not os.path.isdir(tmp_path / 'Movie (2020)')
+
+    def test_execute_delete_preserves_folder_with_other_videos(self, tmp_path):
+        """Folder kept if other video files remain."""
+        item = self._make_multi_cd_item(tmp_path, num_cds=2)
+        # Add another video file
+        other = tmp_path / 'Movie (2020)' / 'bonus.mkv'
+        other.write_bytes(b'\x00' * 100)
+        success, details = execute_fix_delete_wrong(item)
+        assert success
+        assert details['folder_cleaned'] is False
+        assert os.path.isdir(tmp_path / 'Movie (2020)')
+
+    def test_execute_delete_fails_if_cd_missing(self, tmp_path):
+        """Fails fast if any CD file is missing."""
+        item = self._make_multi_cd_item(tmp_path)
+        os.remove(item['cd_files'][2]['file_path'])  # remove cd3
+        success, details = execute_fix_delete_wrong(item)
+        assert not success
+        assert 'CD file not found' in details['error']
+        # cd1 and cd2 should NOT have been deleted (fail-fast before any delete)
+        assert os.path.isfile(item['cd_files'][0]['file_path'])
+        assert os.path.isfile(item['cd_files'][1]['file_path'])
+
+    def test_generate_fix_preview_routes_to_delete(self, tmp_path):
+        """generate_fix_preview correctly routes delete actions for multi-CD."""
+        item = self._make_multi_cd_item(tmp_path)
+        for action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
+            preview = generate_fix_preview(item, action)
+            assert 'cd_deletes' in preview['changes']['filesystem']
+
+
+class TestMultiCDRenameResolution:
+    """Tests for multi-CD rename_resolution."""
+
+    @staticmethod
+    def _make_multi_cd_item(tmp_path, num_cds=2):
+        folder = tmp_path / 'Movie (2020)'
+        folder.mkdir(exist_ok=True)
+        cd_files = []
+        for i in range(1, num_cds + 1):
+            f = folder / ('Movie.2020.720p.cd%d.mkv' % i)
+            f.write_bytes(b'\x00' * (1024 * i))
+            cd_files.append({
+                'cd_number': i,
+                'file': f.name,
+                'file_path': str(f),
+                'file_size_bytes': f.stat().st_size,
+                'file_fingerprint': '%d:fp_cd%d' % (f.stat().st_size, i),
+                'has_flags': True,
+            })
+        return {
+            'item_id': 'restest1',
+            'file': cd_files[0]['file'],
+            'file_path': cd_files[0]['file_path'],
+            'file_fingerprint': cd_files[0]['file_fingerprint'],
+            'folder': 'Movie (2020)',
+            'multi_cd': True,
+            'cd_count': num_cds,
+            'cd_files': cd_files,
+            'flags': [{'check': 'resolution', 'severity': 'MEDIUM',
+                       'detail': 'Expected 720p but actual is 1080p'}],
+            'expected': {
+                'title': 'Movie', 'resolution': '720p',
+                'db_title': 'Movie, The',
+            },
+            'actual': {'resolution': '1920x1080'},
+        }
+
+    @mock.patch('couchpotato.core.plugins.audit._CP_AVAILABLE', True)
+    @mock.patch('couchpotato.core.plugins.audit.Env')
+    def test_preview_resolution_includes_cd_renames(self, mock_env, tmp_path):
+        """Preview for multi-CD resolution includes cd_renames."""
+        mock_env.setting.side_effect = lambda key, **kw: {
+            'file_name': '<thename> (<year>) - <quality><cd>.<ext>',
+            'replace_doubles': False,
+            'separator': '',
+        }.get(key, kw.get('default', ''))
+
+        item = self._make_multi_cd_item(tmp_path)
+        item['expected']['year'] = 2020
+        item['imdb_id'] = 'tt1234567'
+        item['guessit_tokens'] = parse_guessit_tokens(item['file'])
+
+        preview = _preview_rename_resolution(item)
+        assert 'cd_renames' in preview['changes']['filesystem']
+        cd_renames = preview['changes']['filesystem']['cd_renames']
+        assert len(cd_renames) == 2
+        assert cd_renames[0]['cd_number'] == 1
+        assert cd_renames[1]['cd_number'] == 2
+        # Paths should differ from originals
+        assert cd_renames[0]['old_path'] != cd_renames[0]['new_path']
+
+    @mock.patch('couchpotato.core.plugins.audit._CP_AVAILABLE', True)
+    @mock.patch('couchpotato.core.plugins.audit.Env')
+    def test_execute_resolution_renames_all_cds(self, mock_env, tmp_path):
+        """Execute resolution rename renames all CD files."""
+        mock_env.setting.side_effect = lambda key, **kw: {
+            'file_name': '<thename> (<year>) - <quality><cd>.<ext>',
+            'replace_doubles': False,
+            'separator': '',
+        }.get(key, kw.get('default', ''))
+
+        item = self._make_multi_cd_item(tmp_path)
+        item['expected']['year'] = 2020
+        item['imdb_id'] = 'tt1234567'
+        item['guessit_tokens'] = parse_guessit_tokens(item['file'])
+
+        success, details = execute_fix_rename_resolution(item)
+        assert success
+        assert 'cd_renames' in details
+        assert len(details['cd_renames']) == 2
+        # Old files should be gone
+        for cd in item['cd_files']:
+            assert not os.path.isfile(cd['file_path'])
+        # New files should exist
+        for cd_rename in details['cd_renames']:
+            assert os.path.isfile(cd_rename['new_path'])
+
+    @mock.patch('couchpotato.core.plugins.audit._CP_AVAILABLE', True)
+    @mock.patch('couchpotato.core.plugins.audit.Env')
+    def test_execute_resolution_fails_if_cd_missing(self, mock_env, tmp_path):
+        """Fails if any CD source file is missing."""
+        mock_env.setting.side_effect = lambda key, **kw: {
+            'file_name': '<thename> (<year>) - <quality><cd>.<ext>',
+            'replace_doubles': False,
+            'separator': '',
+        }.get(key, kw.get('default', ''))
+
+        item = self._make_multi_cd_item(tmp_path)
+        item['expected']['year'] = 2020
+        item['imdb_id'] = 'tt1234567'
+        item['guessit_tokens'] = parse_guessit_tokens(item['file'])
+        os.remove(item['cd_files'][1]['file_path'])  # remove cd2
+
+        success, details = execute_fix_rename_resolution(item)
+        assert not success
+        assert 'CD file not found' in details['error']
+
+
+class TestMultiCDRenameEdition:
+    """Tests for multi-CD rename_edition."""
+
+    @staticmethod
+    def _make_multi_cd_item(tmp_path, num_cds=2):
+        folder = tmp_path / 'Movie (2020)'
+        folder.mkdir(exist_ok=True)
+        cd_files = []
+        for i in range(1, num_cds + 1):
+            f = folder / ('Movie.2020.1080p.cd%d.mkv' % i)
+            f.write_bytes(b'\x00' * (1024 * i))
+            cd_files.append({
+                'cd_number': i,
+                'file': f.name,
+                'file_path': str(f),
+                'file_size_bytes': f.stat().st_size,
+                'file_fingerprint': '%d:fp_cd%d' % (f.stat().st_size, i),
+                'has_flags': True,
+            })
+        return {
+            'item_id': 'edtest1',
+            'file': cd_files[0]['file'],
+            'file_path': cd_files[0]['file_path'],
+            'file_fingerprint': cd_files[0]['file_fingerprint'],
+            'folder': 'Movie (2020)',
+            'multi_cd': True,
+            'cd_count': num_cds,
+            'cd_files': cd_files,
+            'detected_edition': 'Criterion',
+            'flags': [{'check': 'edition', 'severity': 'LOW',
+                       'detail': 'Edition detected but not in filename'}],
+            'expected': {
+                'title': 'Movie', 'resolution': '1080p',
+                'db_title': 'Movie, The',
+            },
+            'actual': {'resolution': '1920x1080'},
+        }
+
+    @mock.patch('couchpotato.core.plugins.audit._CP_AVAILABLE', True)
+    @mock.patch('couchpotato.core.plugins.audit.Env')
+    def test_preview_edition_includes_cd_renames(self, mock_env, tmp_path):
+        """Preview for multi-CD edition includes cd_renames."""
+        mock_env.setting.side_effect = lambda key, **kw: {
+            'file_name': '<thename> (<year>) - <quality> <edition><cd>.<ext>',
+            'replace_doubles': False,
+            'separator': '',
+        }.get(key, kw.get('default', ''))
+
+        item = self._make_multi_cd_item(tmp_path)
+        item['expected']['year'] = 2020
+        item['imdb_id'] = 'tt1234567'
+        item['guessit_tokens'] = parse_guessit_tokens(item['file'])
+
+        preview = _preview_rename_edition(item)
+        assert 'error' not in preview
+        assert 'cd_renames' in preview['changes']['filesystem']
+        cd_renames = preview['changes']['filesystem']['cd_renames']
+        assert len(cd_renames) == 2
+
+    @mock.patch('couchpotato.core.plugins.audit._CP_AVAILABLE', True)
+    @mock.patch('couchpotato.core.plugins.audit.Env')
+    def test_execute_edition_renames_all_cds(self, mock_env, tmp_path):
+        """Execute edition rename renames all CD files."""
+        mock_env.setting.side_effect = lambda key, **kw: {
+            'file_name': '<thename> (<year>) - <quality> <edition><cd>.<ext>',
+            'replace_doubles': False,
+            'separator': '',
+        }.get(key, kw.get('default', ''))
+
+        item = self._make_multi_cd_item(tmp_path)
+        item['expected']['year'] = 2020
+        item['imdb_id'] = 'tt1234567'
+        item['guessit_tokens'] = parse_guessit_tokens(item['file'])
+
+        success, details = execute_fix_rename_edition(item)
+        assert success
+        assert 'cd_renames' in details
+        assert len(details['cd_renames']) == 2
+        assert details['edition'] == 'Criterion'
+        # Old files should be gone
+        for cd in item['cd_files']:
+            assert not os.path.isfile(cd['file_path'])
+        # New files should exist
+        for cd_rename in details['cd_renames']:
+            assert os.path.isfile(cd_rename['new_path'])
+
+    @mock.patch('couchpotato.core.plugins.audit._CP_AVAILABLE', True)
+    @mock.patch('couchpotato.core.plugins.audit.Env')
+    def test_execute_edition_fails_if_cd_missing(self, mock_env, tmp_path):
+        """Fails if any CD source file is missing."""
+        mock_env.setting.side_effect = lambda key, **kw: {
+            'file_name': '<thename> (<year>) - <quality> <edition><cd>.<ext>',
+            'replace_doubles': False,
+            'separator': '',
+        }.get(key, kw.get('default', ''))
+
+        item = self._make_multi_cd_item(tmp_path)
+        item['expected']['year'] = 2020
+        item['imdb_id'] = 'tt1234567'
+        item['guessit_tokens'] = parse_guessit_tokens(item['file'])
+        os.remove(item['cd_files'][1]['file_path'])
+
+        success, details = execute_fix_rename_edition(item)
+        assert not success
+        assert 'CD file not found' in details['error']
+
+
+class TestMultiCDSetAudioLanguage:
+    """Tests for multi-CD set_audio_language preview and execute."""
+
+    @staticmethod
+    def _make_db(tmp_path):
+        from couchpotato.core.db import CouchDB
+        db_dir = str(tmp_path / 'db')
+        os.makedirs(db_dir, exist_ok=True)
+        db = CouchDB(db_dir)
+        db.create()
+        return db
+
+    @staticmethod
+    def _make_plugin():
+        from couchpotato.core.plugins.audit import Audit
+        import types
+
+        class _MockPlugin:
+            last_report = None
+
+        p = _MockPlugin()
+        for name in ('_apply_whisper_result',
+                     '_get_knowledge', '_get_or_create_knowledge',
+                     '_update_knowledge', '_ensure_original_hashes',
+                     '_post_modification_update', '_cache_identification',
+                     '_preview_set_audio_language',
+                     '_execute_set_audio_language',
+                     '_execute_set_audio_language_single'):
+            method = getattr(Audit, name)
+            setattr(p, name, types.MethodType(method, p))
+        return p
+
+    def test_preview_multi_cd_includes_cd_tracks(self, tmp_path):
+        """Preview includes per-CD track info."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+
+        folder = tmp_path / 'Movie (2020)'
+        folder.mkdir()
+        cd1 = folder / 'Movie.cd1.mkv'
+        cd2 = folder / 'Movie.cd2.mkv'
+        cd1.write_bytes(b'\x00' * 1024)
+        cd2.write_bytes(b'\x00' * 2048)
+
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            # Create knowledge with whisper for both CDs
+            fp1 = '1024:fp_cd1'
+            fp2 = '2048:fp_cd2'
+            doc1 = p._get_or_create_knowledge(fp1, str(cd1))
+            doc1['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'language': 'en',
+                            'confidence': 0.95, 'tagged_language': 'de'}],
+            }
+            p._update_knowledge(doc1)
+            doc2 = p._get_or_create_knowledge(fp2, str(cd2))
+            doc2['whisper'] = {
+                'language': 'fr', 'confidence': 0.88,
+                'tracks': [{'track_index': 0, 'language': 'fr',
+                            'confidence': 0.88, 'tagged_language': ''}],
+            }
+            p._update_knowledge(doc2)
+
+            item = {
+                'file_path': str(cd1),
+                'file_fingerprint': fp1,
+                'multi_cd': True,
+                'cd_files': [
+                    {'cd_number': 1, 'file': cd1.name, 'file_path': str(cd1),
+                     'file_fingerprint': fp1},
+                    {'cd_number': 2, 'file': cd2.name, 'file_path': str(cd2),
+                     'file_fingerprint': fp2},
+                ],
+                'actual': {'audio_tracks': [{'codec': 'AAC', 'channels': '2.0'}]},
+            }
+
+            preview = p._preview_set_audio_language(item)
+            assert 'cd_tracks' in preview
+            assert len(preview['cd_tracks']) == 2
+            assert preview['cd_tracks'][0]['cd_number'] == 1
+            assert preview['cd_tracks'][0]['has_whisper'] is True
+            assert preview['cd_tracks'][1]['cd_number'] == 2
+            assert len(preview['cd_tracks'][1]['tracks']) == 1
+
+    def test_preview_multi_cd_missing_whisper_for_one_cd(self, tmp_path):
+        """Preview marks CD without whisper as has_whisper=False."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+
+        folder = tmp_path / 'Movie (2020)'
+        folder.mkdir()
+        cd1 = folder / 'Movie.cd1.mkv'
+        cd2 = folder / 'Movie.cd2.mkv'
+        cd1.write_bytes(b'\x00' * 1024)
+        cd2.write_bytes(b'\x00' * 2048)
+
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            fp1 = '1024:fp_cd1'
+            fp2 = '2048:fp_cd2'
+            doc1 = p._get_or_create_knowledge(fp1, str(cd1))
+            doc1['whisper'] = {
+                'language': 'en', 'confidence': 0.95,
+                'tracks': [{'track_index': 0, 'language': 'en',
+                            'confidence': 0.95, 'tagged_language': 'de'}],
+            }
+            p._update_knowledge(doc1)
+            # cd2 has no whisper data
+
+            item = {
+                'file_path': str(cd1),
+                'file_fingerprint': fp1,
+                'multi_cd': True,
+                'cd_files': [
+                    {'cd_number': 1, 'file': cd1.name, 'file_path': str(cd1),
+                     'file_fingerprint': fp1},
+                    {'cd_number': 2, 'file': cd2.name, 'file_path': str(cd2),
+                     'file_fingerprint': fp2},
+                ],
+                'actual': {'audio_tracks': [{'codec': 'AAC', 'channels': '2.0'}]},
+            }
+
+            preview = p._preview_set_audio_language(item)
+            assert preview['cd_tracks'][1]['has_whisper'] is False
+            assert preview['cd_tracks'][1]['tracks'] == []
+
+    @mock.patch('couchpotato.core.plugins.audit.subprocess')
+    def test_execute_multi_cd_processes_all_files(self, mock_sub, tmp_path):
+        """Execute processes each CD file independently."""
+        mock_sub.run.return_value = mock.Mock(returncode=0, stderr='')
+        mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+
+        folder = tmp_path / 'Movie (2020)'
+        folder.mkdir()
+        cd1 = folder / 'Movie.cd1.mkv'
+        cd2 = folder / 'Movie.cd2.mkv'
+        cd1.write_bytes(b'\x00' * 1024)
+        cd2.write_bytes(b'\x00' * 2048)
+
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            fp1 = '1024:fp_cd1'
+            fp2 = '2048:fp_cd2'
+            for fp, path in [(fp1, str(cd1)), (fp2, str(cd2))]:
+                doc = p._get_or_create_knowledge(fp, path)
+                doc['whisper'] = {
+                    'language': 'en', 'confidence': 0.95,
+                    'tracks': [{'track_index': 0, 'language': 'en',
+                                'confidence': 0.95, 'tagged_language': 'de'}],
+                }
+                p._update_knowledge(doc)
+
+            item = {
+                'file_path': str(cd1),
+                'file': cd1.name,
+                'file_fingerprint': fp1,
+                'multi_cd': True,
+                'cd_files': [
+                    {'cd_number': 1, 'file': cd1.name, 'file_path': str(cd1),
+                     'file_fingerprint': fp1},
+                    {'cd_number': 2, 'file': cd2.name, 'file_path': str(cd2),
+                     'file_fingerprint': fp2},
+                ],
+                'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW',
+                           'detail': 'test'}],
+                'expected': {},
+                'actual': {'audio_tracks': []},
+            }
+
+            success, details = p._execute_set_audio_language(item)
+            assert success
+            assert details['tracks_changed'] == 2  # one track per CD
+            assert len(details['cd_results']) == 2
+            assert details['cd_results'][0]['success'] is True
+            assert details['cd_results'][1]['success'] is True
+
+            # audio_mislabeled flag should be removed
+            assert all(f['check'] != 'audio_mislabeled' for f in item['flags'])
+
+
+class TestMultiCDVerifyAudio:
+    """Tests for multi-CD verify_audio."""
+
+    @staticmethod
+    def _make_db(tmp_path):
+        from couchpotato.core.db import CouchDB
+        db_dir = str(tmp_path / 'db')
+        os.makedirs(db_dir, exist_ok=True)
+        db = CouchDB(db_dir)
+        db.create()
+        return db
+
+    @staticmethod
+    def _make_plugin():
+        from couchpotato.core.plugins.audit import Audit
+        import types
+
+        class _MockPlugin:
+            last_report = {'flagged': []}
+
+        p = _MockPlugin()
+        for name in ('_apply_whisper_result',
+                     '_get_knowledge', '_get_or_create_knowledge',
+                     '_update_knowledge', '_find_item',
+                     'verifyView', '_verify_multi_cd',
+                     '_save_results'):
+            method = getattr(Audit, name)
+            setattr(p, name, types.MethodType(method, p))
+        # _save_results needs a path — mock it to no-op
+        p._save_results = lambda: None
+        return p
+
+    def test_verify_multi_cd_merges_tracks(self, tmp_path):
+        """Merged whisper results include tracks from all CDs."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+
+        folder = tmp_path / 'Movie (2020)'
+        folder.mkdir()
+        cd1 = folder / 'Movie.cd1.mkv'
+        cd2 = folder / 'Movie.cd2.mkv'
+        cd1.write_bytes(b'\x00' * 1024)
+        cd2.write_bytes(b'\x00' * 2048)
+
+        item = {
+            'item_id': 'verify1',
+            'file_path': str(cd1),
+            'file_fingerprint': '1024:fp_cd1',
+            'multi_cd': True,
+            'cd_files': [
+                {'cd_number': 1, 'file': cd1.name, 'file_path': str(cd1),
+                 'file_fingerprint': '1024:fp_cd1'},
+                {'cd_number': 2, 'file': cd2.name, 'file_path': str(cd2),
+                 'file_fingerprint': '2048:fp_cd2'},
+            ],
+            'flags': [{'check': 'unknown_audio', 'severity': 'MEDIUM', 'detail': 'test'}],
+            'expected': {},
+            'actual': {},
+        }
+        p.last_report = {'flagged': [item]}
+
+        # Mock whisper to return per-file results
+        def mock_whisper(file_path, **kw):
+            if 'cd1' in file_path:
+                return {
+                    'language': 'en', 'confidence': 0.95,
+                    'tracks': [{'track_index': 0, 'language': 'en',
+                                'confidence': 0.95, 'tagged_language': ''}],
+                }
+            else:
+                return {
+                    'language': 'fr', 'confidence': 0.80,
+                    'tracks': [{'track_index': 0, 'language': 'fr',
+                                'confidence': 0.80, 'tagged_language': ''}],
+                }
+
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db), \
+             mock.patch('couchpotato.core.plugins.audit.whisper_verify_audio',
+                        side_effect=mock_whisper):
+            result = p._verify_multi_cd(item)
+
+        assert result['success'] is True
+        assert result['whisper']['language'] == 'en'  # best confidence
+        assert result['whisper']['confidence'] == 0.95
+        assert len(result['whisper']['tracks']) == 2  # merged from both CDs
+        assert len(result['cd_results']) == 2
+
+    def test_verify_multi_cd_uses_cache(self, tmp_path):
+        """Cached whisper results are used without re-running whisper."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+
+        folder = tmp_path / 'Movie (2020)'
+        folder.mkdir()
+        cd1 = folder / 'Movie.cd1.mkv'
+        cd2 = folder / 'Movie.cd2.mkv'
+        cd1.write_bytes(b'\x00' * 1024)
+        cd2.write_bytes(b'\x00' * 2048)
+
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db):
+            # Pre-populate whisper cache
+            for fp, path, lang in [('1024:fp_cd1', str(cd1), 'en'),
+                                    ('2048:fp_cd2', str(cd2), 'en')]:
+                doc = p._get_or_create_knowledge(fp, path)
+                doc['whisper'] = {
+                    'language': lang, 'confidence': 0.95,
+                    'tracks': [{'track_index': 0, 'language': lang,
+                                'confidence': 0.95, 'tagged_language': ''}],
+                }
+                p._update_knowledge(doc)
+
+            item = {
+                'item_id': 'verify2',
+                'file_path': str(cd1),
+                'file_fingerprint': '1024:fp_cd1',
+                'multi_cd': True,
+                'cd_files': [
+                    {'cd_number': 1, 'file': cd1.name, 'file_path': str(cd1),
+                     'file_fingerprint': '1024:fp_cd1'},
+                    {'cd_number': 2, 'file': cd2.name, 'file_path': str(cd2),
+                     'file_fingerprint': '2048:fp_cd2'},
+                ],
+                'flags': [{'check': 'unknown_audio', 'severity': 'MEDIUM',
+                           'detail': 'test'}],
+                'expected': {},
+                'actual': {},
+            }
+            p.last_report = {'flagged': [item]}
+
+            with mock.patch('couchpotato.core.plugins.audit.whisper_verify_audio') \
+                    as mock_whisper:
+                result = p._verify_multi_cd(item)
+
+            assert result['success'] is True
+            assert result['cached'] is True
+            # whisper should NOT have been called since cache was hit
+            mock_whisper.assert_not_called()
+
+    def test_verify_dispatches_to_multi_cd(self, tmp_path):
+        """verifyView routes multi-CD items to _verify_multi_cd."""
+        db = self._make_db(tmp_path)
+        p = self._make_plugin()
+
+        folder = tmp_path / 'Movie (2020)'
+        folder.mkdir()
+        cd1 = folder / 'Movie.cd1.mkv'
+        cd1.write_bytes(b'\x00' * 1024)
+
+        item = {
+            'item_id': 'verify3',
+            'file_path': str(cd1),
+            'file_fingerprint': '1024:fp_cd1',
+            'multi_cd': True,
+            'cd_files': [
+                {'cd_number': 1, 'file': cd1.name, 'file_path': str(cd1),
+                 'file_fingerprint': '1024:fp_cd1'},
+            ],
+            'flags': [{'check': 'unknown_audio', 'severity': 'MEDIUM',
+                       'detail': 'test'}],
+            'expected': {},
+            'actual': {},
+        }
+        p.last_report = {'flagged': [item]}
+
+        def mock_whisper(file_path, **kw):
+            return {
+                'language': 'en', 'confidence': 0.92,
+                'tracks': [{'track_index': 0, 'language': 'en',
+                            'confidence': 0.92, 'tagged_language': ''}],
+            }
+
+        with mock.patch('couchpotato.core.plugins.audit.get_db', return_value=db), \
+             mock.patch('couchpotato.core.plugins.audit.whisper_verify_audio',
+                        side_effect=mock_whisper):
+            result = p.verifyView(item_id='verify3')
+
+        assert result['success'] is True
+        assert 'cd_results' in result  # multi-CD path was used
