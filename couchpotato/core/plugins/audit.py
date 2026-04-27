@@ -5796,7 +5796,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                     return False, {
                         'error': 'Destination already exists: %s' % new_path,
                     }
-                cmd = ['ffmpeg', '-i', file_path, '-c', 'copy', '-map', '0']
+                cmd = ['ffmpeg', '-fflags', '+genpts',
+                       '-i', file_path, '-c', 'copy', '-map', '0']
                 # Set language metadata for ALL audio tracks (changed + unchanged)
                 for t in tracks:
                     idx = t.get('track_index', 0)
