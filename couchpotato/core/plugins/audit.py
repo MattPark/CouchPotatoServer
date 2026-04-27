@@ -6098,14 +6098,39 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 cancel_flag=self._cancel,
                 knowledge_callback=self._get_or_create_knowledge,
             )
-            self.last_report = report
-            self.last_report['completed_at'] = time.time()
-            self.last_report['scan_timestamp'] = time.strftime(
-                '%Y-%m-%dT%H:%M:%S'
-            )
+            # Single-folder scan: merge results into existing report instead
+            # of replacing it.  Replace/add items for the scanned folder and
+            # keep everything else from the previous report.
+            if scan_path and self.last_report:
+                old_flagged = self.last_report.get('flagged', [])
+                new_flagged = report.get('flagged', [])
+                scanned_folder = scan_path
+
+                # Remove old items for this folder
+                merged = [i for i in old_flagged
+                          if i.get('folder') != scanned_folder]
+                # Add new items from the scan
+                merged.extend(new_flagged)
+
+                self.last_report['flagged'] = merged
+                self.last_report['total_flagged'] = len(merged)
+                self.last_report['scan_timestamp'] = time.strftime(
+                    '%Y-%m-%dT%H:%M:%S'
+                )
+                log.info('Merged single-folder scan for %s: %s items (total %s)',
+                         (scan_path, len(new_flagged), len(merged)))
+            else:
+                self.last_report = report
+                self.last_report['completed_at'] = time.time()
+                self.last_report['scan_timestamp'] = time.strftime(
+                    '%Y-%m-%dT%H:%M:%S'
+                )
             # Extract fingerprints and release mapping before saving
             # (dict is not JSON-serializable and mapping not needed on disk)
-            seen_fps = self.last_report.pop('seen_fingerprints', {})
+            seen_fps = report.pop('seen_fingerprints', {})
+            report.pop('release_by_filepath', None)
+            # Also clean from last_report in case it's the same object
+            self.last_report.pop('seen_fingerprints', None)
             self.last_report.pop('release_by_filepath', None)
             # Persist to disk
             self._save_results()

@@ -6871,3 +6871,154 @@ class TestQualityLabelForTemplate:
         result = check_template(item, template)
         # Should not flag — filename already matches
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Single-folder scan should merge into existing report, not replace it
+# ---------------------------------------------------------------------------
+
+class TestSingleFolderScanMerge:
+    """scan_path scans should merge results into existing last_report."""
+
+    @staticmethod
+    def _make_plugin():
+        from couchpotato.core.plugins.audit import Audit
+        plugin = object.__new__(Audit)
+        plugin._knowledge_cache = {}
+        plugin.fix_in_progress = False
+        plugin._cancel = [False]
+        plugin.in_progress = False
+        return plugin
+
+    def test_scan_path_merges_into_existing_report(self):
+        """A scan_path scan should keep existing items and add/replace
+        items for the scanned folder only."""
+        from unittest.mock import patch, MagicMock
+
+        plugin = self._make_plugin()
+
+        # Existing report with items from two folders
+        existing_item_a = {
+            'item_id': 'a1', 'folder': 'Movie A (2020)',
+            'file': 'a.mkv', 'flags': [{'check': 'resolution', 'severity': 'HIGH'}],
+            'recommended_action': 'rename_resolution', 'fixed': None,
+        }
+        existing_item_b = {
+            'item_id': 'b1', 'folder': 'Movie B (2021)',
+            'file': 'b.mkv', 'flags': [{'check': 'template', 'severity': 'MEDIUM'}],
+            'recommended_action': 'rename_template', 'fixed': None,
+        }
+        plugin.last_report = {
+            'flagged': [existing_item_a, existing_item_b],
+            'total_flagged': 2,
+            'total_scanned': 100,
+            'scan_timestamp': '2026-01-01T00:00:00',
+        }
+
+        # Scan returns updated result for Movie A only
+        new_item_a = {
+            'item_id': 'a2', 'folder': 'Movie A (2020)',
+            'file': 'a.mkv', 'flags': [{'check': 'unknown_audio', 'severity': 'LOW'}],
+            'recommended_action': 'verify_audio',
+        }
+        scan_result = {
+            'total_scanned': 1,
+            'total_flagged': 1,
+            'total_errors': 0,
+            'cancelled': False,
+            'flagged': [new_item_a],
+            'seen_fingerprints': {},
+            'release_by_filepath': {},
+        }
+
+        with patch('couchpotato.core.plugins.audit.scan_library',
+                   return_value=scan_result), \
+             patch.object(plugin, '_get_movies_dir', return_value='/movies'), \
+             patch.object(plugin, '_get_db_path', return_value='/db.json'), \
+             patch.object(plugin, '_save_results'), \
+             patch.object(plugin, '_get_or_create_knowledge', return_value=None), \
+             patch('os.path.isfile', return_value=True):
+            plugin._run_scan(scan_path='Movie A (2020)')
+
+        flagged = plugin.last_report['flagged']
+        # Should have 2 items: updated Movie A + unchanged Movie B
+        assert len(flagged) == 2
+        folders = {i['folder'] for i in flagged}
+        assert folders == {'Movie A (2020)', 'Movie B (2021)'}
+        # Movie A should be the new version
+        a_items = [i for i in flagged if i['folder'] == 'Movie A (2020)']
+        assert a_items[0]['item_id'] == 'a2'
+        assert a_items[0]['recommended_action'] == 'verify_audio'
+        # Movie B should be unchanged
+        b_items = [i for i in flagged if i['folder'] == 'Movie B (2021)']
+        assert b_items[0]['item_id'] == 'b1'
+
+    def test_scan_path_removes_folder_when_clean(self):
+        """If a folder scan returns no flagged items, old items for that
+        folder should be removed from the report."""
+        from unittest.mock import patch
+
+        plugin = self._make_plugin()
+
+        existing_item = {
+            'item_id': 'c1', 'folder': 'Fixed Movie (2019)',
+            'file': 'c.mkv', 'flags': [{'check': 'template', 'severity': 'LOW'}],
+            'recommended_action': 'rename_template', 'fixed': None,
+        }
+        plugin.last_report = {
+            'flagged': [existing_item],
+            'total_flagged': 1,
+            'total_scanned': 100,
+            'scan_timestamp': '2026-01-01T00:00:00',
+        }
+
+        # Scan returns clean (no flags)
+        scan_result = {
+            'total_scanned': 1, 'total_flagged': 0, 'total_errors': 0,
+            'cancelled': False, 'flagged': [],
+            'seen_fingerprints': {}, 'release_by_filepath': {},
+        }
+
+        with patch('couchpotato.core.plugins.audit.scan_library',
+                   return_value=scan_result), \
+             patch.object(plugin, '_get_movies_dir', return_value='/movies'), \
+             patch.object(plugin, '_get_db_path', return_value='/db.json'), \
+             patch.object(plugin, '_save_results'), \
+             patch.object(plugin, '_get_or_create_knowledge', return_value=None), \
+             patch('os.path.isfile', return_value=True):
+            plugin._run_scan(scan_path='Fixed Movie (2019)')
+
+        assert len(plugin.last_report['flagged']) == 0
+        assert plugin.last_report['total_flagged'] == 0
+
+    def test_full_scan_replaces_report(self):
+        """A full scan (no scan_path) should replace the entire report."""
+        from unittest.mock import patch
+
+        plugin = self._make_plugin()
+
+        plugin.last_report = {
+            'flagged': [{'item_id': 'old', 'folder': 'Old (2020)'}],
+            'total_flagged': 1,
+        }
+
+        scan_result = {
+            'total_scanned': 50, 'total_flagged': 1, 'total_errors': 0,
+            'cancelled': False,
+            'flagged': [{'item_id': 'new', 'folder': 'New (2021)',
+                         'flags': [], 'file_fingerprint': '100:abc'}],
+            'seen_fingerprints': {}, 'release_by_filepath': {},
+        }
+
+        with patch('couchpotato.core.plugins.audit.scan_library',
+                   return_value=scan_result), \
+             patch.object(plugin, '_get_movies_dir', return_value='/movies'), \
+             patch.object(plugin, '_get_db_path', return_value='/db.json'), \
+             patch.object(plugin, '_save_results'), \
+             patch.object(plugin, '_get_or_create_knowledge', return_value=None), \
+             patch('os.path.isfile', return_value=True):
+            plugin._run_scan()
+
+        # Old items should be gone
+        assert len(plugin.last_report['flagged']) == 1
+        assert plugin.last_report['flagged'][0]['item_id'] == 'new'
