@@ -6689,7 +6689,6 @@ class TestVerifyAudioNotFixedWhenActionChanges:
         was applied but item still needs set_audio_language."""
         from couchpotato.core.plugins.audit import Audit
         from unittest.mock import patch
-        import json
 
         plugin = object.__new__(Audit)
         plugin._knowledge_cache = {}
