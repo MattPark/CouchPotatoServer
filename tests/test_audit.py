@@ -5233,3 +5233,193 @@ class TestForeignNoEnglishFilter:
         result = self._filter(items)
         ids = [i['item_id'] for i in result]
         assert ids == ['a', 'e']
+
+
+class TestBatchVerifyUnified:
+    """Tests that verify_audio batch action goes through the unified batch pipeline
+    and respects filters, uses whisper cache, etc."""
+
+    @staticmethod
+    def _make_plugin(flagged_items):
+        """Create a minimal Audit plugin with mocked dependencies."""
+        from couchpotato.core.plugins.audit import Audit
+        from unittest.mock import patch, MagicMock
+
+        plugin = object.__new__(Audit)
+        plugin.last_report = {'flagged': flagged_items}
+        plugin.fix_in_progress = False
+        plugin._knowledge_cache = {}
+        return plugin
+
+    @staticmethod
+    def _make_item(item_id='test1', fingerprint='100:abc', check='unknown_audio',
+                   audio_languages=None):
+        """Build a flagged item for batch testing."""
+        if audio_languages is None:
+            audio_languages = ['']
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': lang}
+                   for lang in audio_languages]
+        return {
+            'item_id': item_id,
+            'file_fingerprint': fingerprint,
+            'folder': 'Test Movie (2024)',
+            'file': 'test.mkv',
+            'file_path': '/movies/test.mkv',
+            'original_language': 'en',
+            'actual': {'audio_tracks': tracks},
+            'expected': {'title': 'Test Movie', 'year': 2024},
+            'flags': [{'check': check, 'severity': 'LOW', 'detail': 'test'}],
+            'flag_count': 1,
+            'recommended_action': 'verify_audio',
+        }
+
+    def test_verify_audio_in_valid_fix_actions(self):
+        """verify_audio is a valid batch fix action."""
+        from couchpotato.core.plugins.audit import VALID_FIX_ACTIONS
+        assert 'verify_audio' in VALID_FIX_ACTIONS
+
+    def test_fixBatchView_accepts_verify_audio(self):
+        """fixBatchView accepts action=verify_audio with filters."""
+        from couchpotato.core.plugins.audit import Audit
+        from unittest.mock import patch
+
+        items = [
+            self._make_item(item_id='a', fingerprint='1:a', check='unknown_audio'),
+            self._make_item(item_id='b', fingerprint='2:b', check='resolution'),
+        ]
+        plugin = self._make_plugin(items)
+
+        with patch.object(plugin, '_build_ignored_set', return_value=set()):
+            # Dry run with filter_check — should only match the unknown_audio item
+            result = plugin.fixBatchView(
+                action='verify_audio',
+                filter_check='unknown_audio',
+                confirm='1',
+                dry_run='1',
+            )
+
+        assert result['success'] is True
+        assert result['dry_run'] is True
+        assert result['total'] == 1
+        assert result['previews'][0]['item_id'] == 'a'
+
+    def test_fixBatchView_verify_audio_no_filter_gets_all(self):
+        """Without filter_check, verify_audio dry run returns all items with
+        verify_audio as recommended action."""
+        from couchpotato.core.plugins.audit import Audit
+        from unittest.mock import patch
+
+        items = [
+            self._make_item(item_id='a', fingerprint='1:a', check='unknown_audio'),
+            self._make_item(item_id='b', fingerprint='2:b', check='unknown_audio'),
+        ]
+        plugin = self._make_plugin(items)
+
+        with patch.object(plugin, '_build_ignored_set', return_value=set()):
+            result = plugin.fixBatchView(
+                action='verify_audio',
+                confirm='1',
+                dry_run='1',
+            )
+
+        assert result['success'] is True
+        assert result['total'] == 2
+
+    def test_run_batch_fix_verify_audio_uses_cache(self):
+        """_run_batch_fix with verify_audio checks whisper cache before running."""
+        from couchpotato.core.plugins.audit import Audit
+        from unittest.mock import patch, MagicMock
+
+        item = self._make_item()
+        plugin = self._make_plugin([item])
+
+        cached_whisper = {
+            'language': 'en',
+            'confidence': 0.95,
+            'verified_at': '2024-01-01T00:00:00',
+            'tracks': [{'track_index': 0, 'language': 'en',
+                         'confidence': 0.95, 'tagged_language': ''}],
+        }
+
+        mock_doc = {'whisper': cached_whisper, 'current_fingerprint': '100:abc'}
+
+        with patch.object(plugin, '_get_knowledge', return_value=mock_doc), \
+             patch.object(plugin, '_apply_whisper_result') as mock_apply, \
+             patch.object(plugin, '_mark_fixed') as mock_mark, \
+             patch.object(plugin, '_save_results'), \
+             patch.object(plugin, '_truncate_actions'), \
+             patch('os.path.isfile', return_value=True), \
+             patch('couchpotato.core.plugins.audit.whisper_verify_audio') as mock_whisper:
+
+            results = plugin._run_batch_fix(
+                action='verify_audio',
+                items=[item],
+                dry_run=False,
+            )
+
+        # Whisper should NOT have been called (cache hit)
+        mock_whisper.assert_not_called()
+        # But apply_whisper_result should have been called with cached data
+        mock_apply.assert_called_once_with(item, cached_whisper)
+        mock_mark.assert_called_once()
+
+    def test_run_batch_fix_verify_audio_runs_whisper_on_cache_miss(self):
+        """_run_batch_fix runs whisper when no cache exists."""
+        from unittest.mock import patch, MagicMock
+
+        item = self._make_item()
+        plugin = self._make_plugin([item])
+
+        whisper_result = {
+            'language': 'ja',
+            'confidence': 0.88,
+            'tracks': [{'track_index': 0, 'language': 'ja',
+                         'confidence': 0.88, 'tagged_language': ''}],
+        }
+
+        # No whisper cache
+        mock_doc = {'current_fingerprint': '100:abc'}
+
+        with patch.object(plugin, '_get_knowledge', return_value=mock_doc), \
+             patch.object(plugin, '_apply_whisper_result') as mock_apply, \
+             patch.object(plugin, '_mark_fixed'), \
+             patch.object(plugin, '_save_results'), \
+             patch.object(plugin, '_truncate_actions'), \
+             patch('couchpotato.core.plugins.audit.whisper_verify_audio',
+                   return_value=whisper_result) as mock_whisper, \
+             patch('os.path.isfile', return_value=True):
+
+            results = plugin._run_batch_fix(
+                action='verify_audio',
+                items=[item],
+                dry_run=False,
+            )
+
+        # Whisper should have been called
+        mock_whisper.assert_called_once_with('/movies/test.mkv',
+                                             audio_tracks=item['actual']['audio_tracks'])
+        mock_apply.assert_called_once_with(item, whisper_result)
+
+    def test_fixBatchView_verify_audio_respects_severity_filter(self):
+        """verify_audio batch respects filter_severity just like other actions."""
+        from unittest.mock import patch
+
+        items = [
+            self._make_item(item_id='a', fingerprint='1:a', check='unknown_audio'),
+        ]
+        # Override severity to HIGH
+        items[0]['flags'][0]['severity'] = 'HIGH'
+
+        plugin = self._make_plugin(items)
+
+        with patch.object(plugin, '_build_ignored_set', return_value=set()):
+            # Filter for LOW severity only — should not match the HIGH item
+            result = plugin.fixBatchView(
+                action='verify_audio',
+                filter_severity='LOW',
+                confirm='1',
+                dry_run='1',
+            )
+
+        # Item has HIGH severity, filter asks for LOW — no match
+        assert result.get('success') is False or result.get('total', 0) == 0

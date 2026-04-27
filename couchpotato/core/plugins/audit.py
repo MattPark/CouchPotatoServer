@@ -4696,9 +4696,6 @@ class Audit(Plugin if _CP_AVAILABLE else object):
     # Fix progress tracking
     fix_in_progress = False
 
-    # Whisper verification progress tracking
-    verify_in_progress = False
-
     def __init__(self):
         if not _CP_AVAILABLE:
             return
@@ -4815,17 +4812,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             },
         })
 
-        addApiView('audit.verify.batch', self.verifyBatchView, docs={
-            'desc': 'Run whisper verification on all unknown_audio items',
-        })
-
-        addApiView('audit.verify.progress', self.verifyProgressView, docs={
-            'desc': 'Get progress of a running batch verification',
-        })
-
         addEvent('audit.run_scan', self._run_scan)
         addEvent('audit.run_batch_fix', self._run_batch_fix)
-        addEvent('audit.run_verify_batch', self._run_verify_batch)
 
         # Load persisted results on startup
         self._load_results()
@@ -6175,115 +6163,6 @@ class Audit(Plugin if _CP_AVAILABLE else object):
             'recommended_action': item.get('recommended_action'),
         }
 
-    def verifyBatchView(self, **kwargs):
-        """API handler: run whisper verification on all unknown_audio items."""
-        if self.verify_in_progress and self.verify_in_progress.get('active'):
-            return {
-                'success': False,
-                'error': 'A batch verification is already in progress',
-                'verify_progress': self.verify_in_progress,
-            }
-
-        if not self.last_report:
-            return {'success': False, 'error': 'No scan results available'}
-
-        # Find all unfixed items with unknown_audio flags
-        ignored = self._build_ignored_set()
-        items = [
-            i for i in self.last_report.get('flagged', [])
-            if not i.get('fixed')
-            and any(f['check'] == 'unknown_audio' for f in i.get('flags', []))
-            and i.get('file_fingerprint') not in ignored
-        ]
-
-        if not items:
-            return {'success': False, 'error': 'No unknown_audio items to verify'}
-
-        # Start async verification
-        fireEventAsync(
-            'audit.run_verify_batch',
-            items=items,
-        )
-
-        return {
-            'success': True,
-            'total': len(items),
-            'message': 'Batch verification started — check audit.verify.progress for status',
-        }
-
-    def _run_verify_batch(self, items):
-        """Run whisper verification on a batch of items (background thread)."""
-        total = len(items)
-        completed = 0
-        failed = 0
-
-        self.verify_in_progress = {
-            'active': True,
-            'total': total,
-            'completed': 0,
-            'failed': 0,
-            'current_item': '',
-        }
-
-        for item in items:
-            file_path = item.get('file_path', '')
-            self.verify_in_progress['current_item'] = item.get('folder', '')
-
-            if not file_path or not os.path.isfile(file_path):
-                failed += 1
-                log.error('Verify batch: file not accessible: %s', (file_path,))
-                self.verify_in_progress['completed'] = completed + failed
-                self.verify_in_progress['failed'] = failed
-                continue
-
-            # Check cache
-            fingerprint = item.get('file_fingerprint')
-            cached = None
-            if fingerprint:
-                doc = self._get_knowledge(fingerprint)
-                cached = doc.get('whisper') if doc else None
-
-            if cached and cached.get('language'):
-                # Already verified — apply cached result
-                self._apply_whisper_result(item, cached)
-                completed += 1
-            else:
-                audio_tracks = item.get('actual', {}).get('audio_tracks', [])
-                result = whisper_verify_audio(file_path,
-                                              audio_tracks=audio_tracks)
-                if 'error' in result:
-                    failed += 1
-                    log.error('Verify batch failed for %s: %s',
-                              (item.get('folder', ''), result['error']))
-                else:
-                    self._apply_whisper_result(item, result)
-                    completed += 1
-
-            self.verify_in_progress['completed'] = completed + failed
-            self.verify_in_progress['failed'] = failed
-
-        # Save results
-        self._save_results()
-
-        self.verify_in_progress = {
-            'active': False,
-            'total': total,
-            'completed': completed,
-            'failed': failed,
-            'current_item': '',
-        }
-
-        log.info('Batch verification complete: %s/%s verified, %s failed',
-                 (completed, total, failed))
-
-    def verifyProgressView(self, **kwargs):
-        """API handler: return current batch verification progress."""
-        return {
-            'verify_progress': self.verify_in_progress if self.verify_in_progress else {
-                'active': False,
-            },
-        }
-
     def _find_item(self, item_id):
         """Find a flagged item by its item_id.
 
@@ -6869,18 +6748,34 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 elif action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
                     success, details = execute_fix_delete_wrong(item)
                 elif action == 'verify_audio':
-                    # Run whisper inline during batch
                     file_path = item.get('file_path', '')
-                    if file_path and os.path.isfile(file_path):
-                        wr = whisper_verify_audio(file_path)
-                        if 'error' not in wr:
-                            self._apply_whisper_result(item, wr)
-                            success = True
-                            details = {'language': wr['language'], 'confidence': wr['confidence']}
-                        else:
-                            success, details = False, {'error': wr['error']}
-                    else:
+                    if not file_path or not os.path.isfile(file_path):
                         success, details = False, {'error': 'File not accessible'}
+                    else:
+                        # Check whisper cache in file_knowledge
+                        fingerprint = item.get('file_fingerprint')
+                        cached = None
+                        if fingerprint:
+                            doc = self._get_knowledge(fingerprint)
+                            cached = doc.get('whisper') if doc else None
+
+                        if cached and cached.get('language'):
+                            self._apply_whisper_result(item, cached)
+                            success = True
+                            details = {'language': cached['language'],
+                                       'confidence': cached.get('confidence', 0),
+                                       'cached': True}
+                        else:
+                            audio_tracks = item.get('actual', {}).get('audio_tracks', [])
+                            wr = whisper_verify_audio(file_path,
+                                                      audio_tracks=audio_tracks)
+                            if 'error' not in wr:
+                                self._apply_whisper_result(item, wr)
+                                success = True
+                                details = {'language': wr['language'],
+                                           'confidence': wr['confidence']}
+                            else:
+                                success, details = False, {'error': wr['error']}
                 elif action == 'reassign_movie':
                     success, details = execute_fix_reassign_movie(item)
                 elif action == 'set_audio_language':
