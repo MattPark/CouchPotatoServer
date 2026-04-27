@@ -669,6 +669,22 @@ def resolution_label(width, height):
     return h_label or w_label or f'{height}p (SD)'
 
 
+def _quality_label_for_template(width, height):
+    """Map actual resolution to the quality label the CP renamer uses.
+
+    The renamer's <quality> token comes from QualityPlugin.qualities[*]['label'].
+    For HD content that's '2160p', '1080p', '720p' — same as resolution_label().
+    For SD content (480p, 576p, etc.) the renamer uses 'SD', not '480p'.
+    """
+    label = resolution_label(width, height)
+    if not label:
+        return ''
+    # SD resolutions: the renamer quality label is 'SD'
+    if label in ('480p', '480i', '576p', '576i') or '(SD)' in label:
+        return 'SD'
+    return label
+
+
 # ---------------------------------------------------------------------------
 # Edition detection (ported from scanner.py:getEdition)
 # ---------------------------------------------------------------------------
@@ -2033,7 +2049,7 @@ def build_expected_filename(item, template, replace_doubles=True, separator='',
             try:
                 w = int(actual_res.split('x')[0])
                 h = int(actual_res.split('x')[1])
-                quality = resolution_label(w, h)
+                quality = _quality_label_for_template(w, h)
             except (ValueError, IndexError):
                 pass
 
@@ -2179,7 +2195,7 @@ def check_template(item, template, replace_doubles=True, separator='',
             try:
                 w = int(actual_res.split('x')[0])
                 h = int(actual_res.split('x')[1])
-                quality = resolution_label(w, h)
+                quality = _quality_label_for_template(w, h)
             except (ValueError, IndexError):
                 pass
     if quality and '<quality>' in template:
@@ -3994,7 +4010,7 @@ def _apply_renamer_template(item, quality_override=None, edition_override=None,
             try:
                 w = int(actual_res.split('x')[0])
                 h = int(actual_res.split('x')[1])
-                quality = resolution_label(w, h)
+                quality = _quality_label_for_template(w, h)
             except (ValueError, IndexError):
                 pass
     edition = edition_override if edition_override is not None else item.get('detected_edition', '')
@@ -4412,7 +4428,7 @@ def _preview_reassign_movie(item):
                 actual_height = int(actual_res.split('x')[1])
             except (ValueError, IndexError):
                 pass
-        res_label = resolution_label(actual_width, actual_height) if actual_height else ''
+        res_label = _quality_label_for_template(actual_width, actual_height) if actual_height else ''
         safe_title = re.sub(r'[\x00/\\:*?"<>|]', '', id_title)
         parts = [safe_title]
         if id_year:

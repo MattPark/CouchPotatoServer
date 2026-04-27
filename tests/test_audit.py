@@ -6803,3 +6803,71 @@ class TestVerifyAudioNotFixedWhenActionChanges:
 
         # verify_audio record should NOT have been applied as 'fixed'
         assert item['fixed'] is None
+
+
+# ---------------------------------------------------------------------------
+# SD quality label for template — renamer uses 'SD', not '480p'
+# ---------------------------------------------------------------------------
+
+class TestQualityLabelForTemplate:
+    """The <quality> template token should produce 'SD' for SD-resolution
+    content, matching the CouchPotato renamer's quality label."""
+
+    def test_480p_maps_to_sd(self):
+        from couchpotato.core.plugins.audit import _quality_label_for_template
+        assert _quality_label_for_template(720, 480) == 'SD'
+
+    def test_576p_maps_to_sd(self):
+        from couchpotato.core.plugins.audit import _quality_label_for_template
+        assert _quality_label_for_template(720, 576) == 'SD'
+
+    def test_1080p_unchanged(self):
+        from couchpotato.core.plugins.audit import _quality_label_for_template
+        assert _quality_label_for_template(1920, 1080) == '1080p'
+
+    def test_720p_unchanged(self):
+        from couchpotato.core.plugins.audit import _quality_label_for_template
+        assert _quality_label_for_template(1280, 720) == '720p'
+
+    def test_2160p_unchanged(self):
+        from couchpotato.core.plugins.audit import _quality_label_for_template
+        assert _quality_label_for_template(3840, 2160) == '2160p'
+
+    def test_build_expected_filename_uses_sd(self):
+        """build_expected_filename should use 'SD' for 480p content."""
+        from couchpotato.core.plugins.audit import build_expected_filename
+
+        item = {
+            'file': 'Two Front Teeth (2006) SD {imdb-tt0498397}.mkv',
+            'file_path': '/movies/Two Front Teeth (2006)/Two Front Teeth (2006) SD {imdb-tt0498397}.mkv',
+            'imdb_id': 'tt0498397',
+            'expected': {'title': 'Two Front Teeth', 'year': 2006,
+                         'db_title': 'Two Front Teeth', 'resolution': ''},
+            'actual': {'resolution': '720x480'},
+            'guessit_tokens': {'video': '', 'audio': '', 'source': '',
+                               'group': 'imdb-tt0498397', 'audio_channels': '',
+                               'quality_type': 'SD'},
+        }
+        template = '<thename> (<year>) <quality> {imdb-<imdb_id>}.<ext>'
+        result = build_expected_filename(item, template)
+        assert result == 'Two Front Teeth (2006) SD {imdb-tt0498397}.mkv'
+
+    def test_check_template_conformance_no_flag_for_sd(self):
+        """SD file named with 'SD' should not be flagged for template mismatch."""
+        from couchpotato.core.plugins.audit import check_template
+
+        item = {
+            'file': 'Two Front Teeth (2006) SD {imdb-tt0498397}.mkv',
+            'file_path': '/movies/Two Front Teeth (2006)/Two Front Teeth (2006) SD {imdb-tt0498397}.mkv',
+            'imdb_id': 'tt0498397',
+            'expected': {'title': 'Two Front Teeth', 'year': 2006,
+                         'db_title': 'Two Front Teeth', 'resolution': ''},
+            'actual': {'resolution': '720x480'},
+            'guessit_tokens': {'video': '', 'audio': '', 'source': '',
+                               'group': 'imdb-tt0498397', 'audio_channels': '',
+                               'quality_type': 'SD'},
+        }
+        template = '<thename> (<year>) <quality> {imdb-<imdb_id>}.<ext>'
+        result = check_template(item, template)
+        # Should not flag — filename already matches
+        assert result is None
