@@ -6526,3 +6526,281 @@ class TestMultiCDVerifyAudio:
 
         assert result['success'] is True
         assert 'cd_results' in result  # multi-CD path was used
+
+
+# ---------------------------------------------------------------------------
+# Verify audio should NOT mark items as fixed when they still need work
+# ---------------------------------------------------------------------------
+
+class TestVerifyAudioNotFixedWhenActionChanges:
+    """After verify_audio runs, _apply_whisper_result may change
+    recommended_action from verify_audio to set_audio_language or
+    delete_foreign. In that case, the item should NOT be marked as fixed.
+    """
+
+    @staticmethod
+    def _make_plugin(flagged_items):
+        from couchpotato.core.plugins.audit import Audit
+        plugin = object.__new__(Audit)
+        plugin.last_report = {'flagged': flagged_items}
+        plugin.fix_in_progress = False
+        plugin._knowledge_cache = {}
+        return plugin
+
+    @staticmethod
+    def _make_verify_item(item_id='v1', fingerprint='100:abc',
+                          audio_lang='', original_language='en'):
+        """Build an item with recommended_action=verify_audio."""
+        tracks = [{'codec': 'AAC', 'channels': '2.0', 'language': audio_lang}]
+        return {
+            'item_id': item_id,
+            'file_fingerprint': fingerprint,
+            'folder': 'Test Movie (2024)',
+            'file': 'test.mkv',
+            'file_path': '/movies/test.mkv',
+            'original_language': original_language,
+            'actual': {'audio_tracks': tracks},
+            'expected': {'title': 'Test Movie', 'year': 2024},
+            'flags': [{'check': 'unknown_audio', 'severity': 'LOW',
+                        'detail': 'test'}],
+            'flag_count': 1,
+            'recommended_action': 'verify_audio',
+        }
+
+    def test_batch_verify_not_fixed_when_set_audio_language(self):
+        """Batch verify_audio should NOT mark item as fixed when
+        _apply_whisper_result changes recommended_action to set_audio_language."""
+        from unittest.mock import patch
+
+        item = self._make_verify_item()
+        plugin = self._make_plugin([item])
+
+        # Whisper detects English but tag is wrong → audio_mislabeled
+        whisper_result = {
+            'language': 'en',
+            'confidence': 0.95,
+            'tracks': [{'track_index': 0, 'language': 'en',
+                         'confidence': 0.95, 'tagged_language': ''}],
+        }
+
+        mock_doc = {'whisper': whisper_result, 'current_fingerprint': '100:abc'}
+
+        # Don't mock _apply_whisper_result — let it run for real so it
+        # changes recommended_action to set_audio_language
+        with patch.object(plugin, '_get_knowledge', return_value=mock_doc), \
+             patch.object(plugin, '_get_or_create_knowledge', return_value=mock_doc), \
+             patch.object(plugin, '_update_knowledge'), \
+             patch.object(plugin, '_mark_fixed') as mock_mark, \
+             patch.object(plugin, '_save_results'), \
+             patch.object(plugin, '_truncate_actions'), \
+             patch('os.path.isfile', return_value=True):
+
+            results = plugin._run_batch_fix(
+                action='verify_audio',
+                items=[item],
+                dry_run=False,
+            )
+
+        # Whisper found English but tag was empty → audio_mislabeled →
+        # recommended_action is now set_audio_language
+        assert item['recommended_action'] == 'set_audio_language'
+        # Item should NOT be marked as fixed
+        mock_mark.assert_not_called()
+        # But the batch should still report success
+        assert results[0]['success'] is True
+
+    def test_batch_verify_not_fixed_when_delete_foreign(self):
+        """Batch verify_audio should NOT mark item as fixed when
+        _apply_whisper_result changes recommended_action to delete_foreign."""
+        from unittest.mock import patch
+
+        item = self._make_verify_item(original_language='ja')
+        plugin = self._make_plugin([item])
+
+        # Whisper detects Japanese (no English) → foreign_audio → delete_foreign
+        whisper_result = {
+            'language': 'ja',
+            'confidence': 0.90,
+            'tracks': [{'track_index': 0, 'language': 'ja',
+                         'confidence': 0.90, 'tagged_language': 'ja'}],
+        }
+
+        mock_doc = {'whisper': whisper_result, 'current_fingerprint': '100:abc'}
+
+        with patch.object(plugin, '_get_knowledge', return_value=mock_doc), \
+             patch.object(plugin, '_get_or_create_knowledge', return_value=mock_doc), \
+             patch.object(plugin, '_update_knowledge'), \
+             patch.object(plugin, '_mark_fixed') as mock_mark, \
+             patch.object(plugin, '_save_results'), \
+             patch.object(plugin, '_truncate_actions'), \
+             patch('os.path.isfile', return_value=True):
+
+            results = plugin._run_batch_fix(
+                action='verify_audio',
+                items=[item],
+                dry_run=False,
+            )
+
+        assert item['recommended_action'] == 'delete_foreign'
+        mock_mark.assert_not_called()
+        assert results[0]['success'] is True
+
+    def test_batch_verify_still_fixed_when_no_action_change(self):
+        """Batch verify_audio SHOULD mark item as fixed when the item
+        doesn't need further action (e.g. tags are already correct)."""
+        from unittest.mock import patch
+
+        item = self._make_verify_item()
+        # Tag already says 'en' — whisper confirms, no mislabel
+        item['actual']['audio_tracks'] = [
+            {'codec': 'AAC', 'channels': '2.0', 'language': 'en'}
+        ]
+        plugin = self._make_plugin([item])
+
+        whisper_result = {
+            'language': 'en',
+            'confidence': 0.95,
+            'tracks': [{'track_index': 0, 'language': 'en',
+                         'confidence': 0.95, 'tagged_language': 'en'}],
+        }
+
+        mock_doc = {'whisper': whisper_result, 'current_fingerprint': '100:abc'}
+
+        with patch.object(plugin, '_get_knowledge', return_value=mock_doc), \
+             patch.object(plugin, '_get_or_create_knowledge', return_value=mock_doc), \
+             patch.object(plugin, '_update_knowledge'), \
+             patch.object(plugin, '_mark_fixed') as mock_mark, \
+             patch.object(plugin, '_save_results'), \
+             patch.object(plugin, '_truncate_actions'), \
+             patch('os.path.isfile', return_value=True):
+
+            results = plugin._run_batch_fix(
+                action='verify_audio',
+                items=[item],
+                dry_run=False,
+            )
+
+        # Tags matched whisper → no further action needed → mark as fixed
+        assert item['recommended_action'] not in ('set_audio_language', 'delete_foreign')
+        mock_mark.assert_called_once()
+
+    def test_reconcile_clears_stale_verify_audio_fixed(self, tmp_path):
+        """_reconcile_actions clears stale fixed status where verify_audio
+        was applied but item still needs set_audio_language."""
+        from couchpotato.core.plugins.audit import Audit
+        from unittest.mock import patch
+        import json
+
+        plugin = object.__new__(Audit)
+        plugin._knowledge_cache = {}
+
+        # Item already has recommended_action=set_audio_language but was
+        # incorrectly marked fixed by verify_audio
+        item = {
+            'item_id': 'stale1',
+            'file_fingerprint': '100:abc',
+            'folder': 'Movie (2020)',
+            'file': 'movie.mkv',
+            'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW',
+                        'detail': 'test'}],
+            'recommended_action': 'set_audio_language',
+            'fixed': {
+                'action': 'verify_audio',
+                'timestamp': 1000000,
+                'details': {'language': 'en', 'confidence': 0.95},
+            },
+        }
+        plugin.last_report = {'flagged': [item]}
+
+        # Empty actions file (already truncated)
+        actions_file = tmp_path / 'audit_actions.jsonl'
+        actions_file.write_text('')
+
+        with patch.object(plugin, '_get_actions_path',
+                          return_value=str(actions_file)), \
+             patch.object(plugin, '_save_results'), \
+             patch.object(plugin, '_truncate_actions'):
+            plugin._reconcile_actions()
+
+        # Stale fixed should be cleared
+        assert item['fixed'] is None
+
+    def test_reconcile_keeps_valid_verify_audio_fixed(self, tmp_path):
+        """_reconcile_actions does NOT clear fixed for items where
+        verify_audio is actually the final action (no further work needed)."""
+        from couchpotato.core.plugins.audit import Audit
+        from unittest.mock import patch
+
+        plugin = object.__new__(Audit)
+        plugin._knowledge_cache = {}
+
+        # Item has recommended_action that doesn't need further work
+        item = {
+            'item_id': 'valid1',
+            'file_fingerprint': '100:def',
+            'folder': 'Movie (2021)',
+            'file': 'movie.mkv',
+            'flags': [],
+            'recommended_action': 'none',
+            'fixed': {
+                'action': 'verify_audio',
+                'timestamp': 1000000,
+                'details': {'language': 'en', 'confidence': 0.95},
+            },
+        }
+        plugin.last_report = {'flagged': [item]}
+
+        actions_file = tmp_path / 'audit_actions.jsonl'
+        actions_file.write_text('')
+
+        with patch.object(plugin, '_get_actions_path',
+                          return_value=str(actions_file)), \
+             patch.object(plugin, '_save_results'), \
+             patch.object(plugin, '_truncate_actions'):
+            plugin._reconcile_actions()
+
+        # Fixed should remain intact
+        assert item['fixed'] is not None
+        assert item['fixed']['action'] == 'verify_audio'
+
+    def test_reconcile_does_not_apply_verify_audio_to_set_audio_language_items(self, tmp_path):
+        """_reconcile_actions should skip verify_audio action records for
+        items whose recommended_action is set_audio_language."""
+        from couchpotato.core.plugins.audit import Audit
+        from unittest.mock import patch
+        import json
+
+        plugin = object.__new__(Audit)
+        plugin._knowledge_cache = {}
+
+        item = {
+            'item_id': 'new1',
+            'file_fingerprint': '100:ghi',
+            'folder': 'Movie (2022)',
+            'file': 'movie.mkv',
+            'flags': [{'check': 'audio_mislabeled', 'severity': 'LOW',
+                        'detail': 'test'}],
+            'recommended_action': 'set_audio_language',
+            'fixed': None,
+        }
+        plugin.last_report = {'flagged': [item]}
+
+        # Actions file has a verify_audio record for this item
+        actions_file = tmp_path / 'audit_actions.jsonl'
+        record = {
+            'item_id': 'new1',
+            'action': 'verify_audio',
+            'success': True,
+            'timestamp': 1000000,
+            'details': {'language': 'en', 'confidence': 0.95},
+        }
+        actions_file.write_text(json.dumps(record) + '\n')
+
+        with patch.object(plugin, '_get_actions_path',
+                          return_value=str(actions_file)), \
+             patch.object(plugin, '_save_results'), \
+             patch.object(plugin, '_truncate_actions'):
+            plugin._reconcile_actions()
+
+        # verify_audio record should NOT have been applied as 'fixed'
+        assert item['fixed'] is None

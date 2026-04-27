@@ -5931,9 +5931,16 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                     item_id = record.get('item_id', '')
                     if item_id in items_by_id:
                         item = items_by_id[item_id]
+                        rec_action = record.get('action', '')
                         if not item.get('fixed'):
+                            # verify_audio is informational — don't mark as
+                            # fixed if the item still needs further action
+                            if rec_action == 'verify_audio' and item.get('recommended_action') in (
+                                'set_audio_language', 'delete_foreign',
+                            ):
+                                continue
                             item['fixed'] = {
-                                'action': record.get('action', ''),
+                                'action': rec_action,
                                 'timestamp': record.get('timestamp', 0),
                                 'details': record.get('details', {}),
                             }
@@ -5947,6 +5954,23 @@ class Audit(Plugin if _CP_AVAILABLE else object):
 
         if applied:
             log.info('Reconciled %s actions from action log', (applied,))
+            self._save_results()
+
+        # One-time cleanup: clear stale 'fixed' on items that were
+        # incorrectly marked as fixed by verify_audio but still need
+        # further action (set_audio_language or delete_foreign).
+        cleared = 0
+        for item in self.last_report['flagged']:
+            fixed = item.get('fixed')
+            if not fixed:
+                continue
+            if fixed.get('action') == 'verify_audio' and item.get('recommended_action') in (
+                'set_audio_language', 'delete_foreign',
+            ):
+                item['fixed'] = None
+                cleared += 1
+        if cleared:
+            log.info('Cleared stale verify_audio fixed status on %s items', (cleared,))
             self._save_results()
 
         # Truncate the actions file
@@ -7398,7 +7422,19 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                     success, details = False, {'error': 'Unknown action'}
 
                 if success:
-                    self._mark_fixed(item, action, details)
+                    # verify_audio is special: _apply_whisper_result may have
+                    # changed recommended_action (e.g. verify_audio ->
+                    # set_audio_language).  Only mark as fixed if the item
+                    # doesn't require further action.
+                    if action == 'verify_audio' and item.get('recommended_action') in (
+                        'set_audio_language', 'delete_foreign',
+                    ):
+                        # Verification succeeded but item still needs work —
+                        # persist the flag/action update but do NOT mark fixed.
+                        log.info('Batch verify_audio: %s now needs %s, not marking fixed',
+                                 (item.get('folder', ''), item.get('recommended_action')))
+                    else:
+                        self._mark_fixed(item, action, details)
                     # Recalculate duplicate flags for remaining siblings
                     if action in ('delete_wrong', 'delete_duplicate', 'delete_foreign', 'reassign_movie'):
                         self._recalculate_folder_duplicates(item)
