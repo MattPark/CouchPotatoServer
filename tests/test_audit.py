@@ -5243,7 +5243,6 @@ class TestBatchVerifyUnified:
     def _make_plugin(flagged_items):
         """Create a minimal Audit plugin with mocked dependencies."""
         from couchpotato.core.plugins.audit import Audit
-        from unittest.mock import patch, MagicMock
 
         plugin = object.__new__(Audit)
         plugin.last_report = {'flagged': flagged_items}
@@ -5280,7 +5279,6 @@ class TestBatchVerifyUnified:
 
     def test_fixBatchView_accepts_verify_audio(self):
         """fixBatchView accepts action=verify_audio with filters."""
-        from couchpotato.core.plugins.audit import Audit
         from unittest.mock import patch
 
         items = [
@@ -5306,7 +5304,6 @@ class TestBatchVerifyUnified:
     def test_fixBatchView_verify_audio_no_filter_gets_all(self):
         """Without filter_check, verify_audio dry run returns all items with
         verify_audio as recommended action."""
-        from couchpotato.core.plugins.audit import Audit
         from unittest.mock import patch
 
         items = [
@@ -5327,8 +5324,7 @@ class TestBatchVerifyUnified:
 
     def test_run_batch_fix_verify_audio_uses_cache(self):
         """_run_batch_fix with verify_audio checks whisper cache before running."""
-        from couchpotato.core.plugins.audit import Audit
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
 
         item = self._make_item()
         plugin = self._make_plugin([item])
@@ -5365,7 +5361,7 @@ class TestBatchVerifyUnified:
 
     def test_run_batch_fix_verify_audio_runs_whisper_on_cache_miss(self):
         """_run_batch_fix runs whisper when no cache exists."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
 
         item = self._make_item()
         plugin = self._make_plugin([item])
