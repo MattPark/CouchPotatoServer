@@ -54,7 +54,6 @@ from couchpotato.core.plugins.audit import (
     execute_fix_rename_edition,
     generate_fix_preview,
     parse_guessit_tokens,
-    compute_file_fingerprint,
 )
 import json
 import os
