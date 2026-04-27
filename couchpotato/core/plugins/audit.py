@@ -5781,12 +5781,12 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                         '--set', 'language-ietf=%s' % tc['ietf'],
                     ])
                 result = subprocess.run(cmd, capture_output=True, text=True,
-                                        timeout=60)
+                                        timeout=60, errors='replace')
                 if result.returncode != 0:
                     return False, {
                         'error': 'mkvpropedit failed (rc=%d): %s'
                                  % (result.returncode,
-                                    result.stderr[:500] if result.stderr else ''),
+                                    result.stderr[-1000:] if result.stderr else ''),
                     }
                 new_path = file_path  # path unchanged for MKV
             else:
@@ -5810,7 +5810,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                         ])
                 cmd.extend(['-y', new_path])
                 result = subprocess.run(cmd, capture_output=True, text=True,
-                                        timeout=600)
+                                        timeout=600, errors='replace')
                 if result.returncode != 0:
                     # Clean up partial output
                     if os.path.exists(new_path):
@@ -5821,7 +5821,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                     return False, {
                         'error': 'ffmpeg remux failed (rc=%d): %s'
                                  % (result.returncode,
-                                    result.stderr[:500] if result.stderr else ''),
+                                    result.stderr[-1000:] if result.stderr else ''),
                     }
                 # Delete original non-MKV file
                 try:
