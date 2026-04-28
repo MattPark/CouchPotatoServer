@@ -6175,6 +6175,9 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 log.info('Identification cache: %s cached hits, %s new results written',
                          (cached_count, new_idents))
 
+            # Enrich flagged items with Plex Web URLs (if Plex is connected)
+            self._enrich_plex_urls(self.last_report.get('flagged', []))
+
             # Prune stale file_knowledge entries after a complete full-library
             # scan (not cancelled, not a single-folder scan).
             if not report.get('cancelled') and not scan_path:
@@ -6184,6 +6187,66 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         finally:
             self.in_progress = False
             self._cancel[0] = False
+
+    def _enrich_plex_urls(self, flagged_items):
+        """Add plex_url to flagged items by matching file paths to Plex library.
+
+        Uses the Plex plugin's event interface to fetch the server's
+        machineIdentifier and a file-path-to-ratingKey map.  Matches are
+        done by the relative path after the library root (e.g.
+        'Movie (2005)/Movie (2005) 1080p.mkv') so different mount prefixes
+        between CP and Plex don't matter.
+        """
+        if not flagged_items:
+            return
+
+        try:
+            machine_id = fireEvent('plex.get_machine_identifier', single=True)
+            if not machine_id:
+                return
+
+            file_map = fireEvent('plex.get_file_to_rating_key_map', single=True)
+            if not file_map:
+                return
+
+            # Build a lookup keyed by relative path (folder/filename).
+            # Plex paths like /home/plex/media/Movies/Folder/File.mkv and
+            # CP paths like /media/Movies/Folder/File.mkv share the same
+            # last two path components.
+            plex_by_rel = {}
+            for plex_path, info in file_map.items():
+                parts = plex_path.replace('\\', '/').rsplit('/', 2)
+                if len(parts) >= 2:
+                    rel = parts[-2] + '/' + parts[-1]
+                    plex_by_rel[rel] = info
+
+            matched = 0
+            for item in flagged_items:
+                fp = item.get('file_path', '')
+                if not fp:
+                    continue
+                parts = fp.replace('\\', '/').rsplit('/', 2)
+                if len(parts) >= 2:
+                    rel = parts[-2] + '/' + parts[-1]
+                    info = plex_by_rel.get(rel)
+                    if info:
+                        rk = info['ratingKey']
+                        item['plex_url'] = (
+                            'https://app.plex.tv/desktop/#!/server/%s'
+                            '/details?key=%%2Flibrary%%2Fmetadata%%2F%s'
+                            % (machine_id, rk)
+                        )
+                        # Title for tooltip (e.g. "Plex: The Matrix (1999)")
+                        pt = info.get('title', '')
+                        py = info.get('year', '')
+                        if pt:
+                            item['plex_title'] = '%s (%s)' % (pt, py) if py else pt
+                        matched += 1
+
+            log.info('Plex URL enrichment: matched %s of %s flagged items',
+                     (matched, len(flagged_items)))
+        except Exception as e:
+            log.warning('Plex URL enrichment failed (non-fatal): %s', (e,))
 
     def _filter_and_sort(self, filter_check=None, filter_severity=None,
                          filter_action=None, filter_fixed='false',

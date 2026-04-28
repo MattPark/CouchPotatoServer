@@ -7171,3 +7171,131 @@ class TestSingleFolderScanMerge:
         # Old items should be gone
         assert len(plugin.last_report['flagged']) == 1
         assert plugin.last_report['flagged'][0]['item_id'] == 'new'
+
+
+# ---------------------------------------------------------------------------
+# _enrich_plex_urls — Plex URL enrichment on flagged items
+# ---------------------------------------------------------------------------
+
+class TestEnrichPlexUrls:
+    """Tests for _enrich_plex_urls() Plex link enrichment."""
+
+    @staticmethod
+    def _make_plugin():
+        from couchpotato.core.plugins.audit import Audit
+        plugin = object.__new__(Audit)
+        plugin._knowledge_cache = {}
+        return plugin
+
+    def test_matches_by_relative_path(self):
+        """Matches flagged item file_path to Plex file by relative folder/file."""
+        from unittest.mock import patch
+
+        plugin = self._make_plugin()
+        items = [
+            {'file_path': '/media/Movies/King Kong (2005)/King Kong (2005) 1080p.mkv',
+             'folder': 'King Kong (2005)'},
+        ]
+
+        plex_map = {
+            '/home/plex/media/Movies/King Kong (2005)/King Kong (2005) 1080p.mkv': {
+                'ratingKey': '200',
+                'imdb_id': 'tt0360717',
+                'title': 'King Kong',
+                'year': 2005,
+            },
+        }
+
+        with patch('couchpotato.core.plugins.audit.fireEvent') as mock_fire:
+            mock_fire.side_effect = lambda event, **kw: {
+                'plex.get_machine_identifier': 'abc123',
+                'plex.get_file_to_rating_key_map': plex_map,
+            }.get(event)
+            plugin._enrich_plex_urls(items)
+
+        assert 'plex_url' in items[0]
+        assert 'abc123' in items[0]['plex_url']
+        assert '200' in items[0]['plex_url']
+        assert items[0]['plex_title'] == 'King Kong (2005)'
+
+    def test_no_match_no_url(self):
+        """Items that don't match Plex files get no plex_url."""
+        from unittest.mock import patch
+
+        plugin = self._make_plugin()
+        items = [
+            {'file_path': '/media/Movies/Unknown (2020)/Unknown.mkv',
+             'folder': 'Unknown (2020)'},
+        ]
+
+        plex_map = {
+            '/home/plex/media/Movies/Other (2020)/Other.mkv': {
+                'ratingKey': '999',
+                'imdb_id': None,
+                'title': 'Other',
+                'year': 2020,
+            },
+        }
+
+        with patch('couchpotato.core.plugins.audit.fireEvent') as mock_fire:
+            mock_fire.side_effect = lambda event, **kw: {
+                'plex.get_machine_identifier': 'abc123',
+                'plex.get_file_to_rating_key_map': plex_map,
+            }.get(event)
+            plugin._enrich_plex_urls(items)
+
+        assert 'plex_url' not in items[0]
+
+    def test_graceful_when_plex_not_configured(self):
+        """No crash when Plex returns None (not configured)."""
+        from unittest.mock import patch
+
+        plugin = self._make_plugin()
+        items = [
+            {'file_path': '/media/Movies/Test (2020)/Test.mkv',
+             'folder': 'Test (2020)'},
+        ]
+
+        with patch('couchpotato.core.plugins.audit.fireEvent', return_value=None):
+            plugin._enrich_plex_urls(items)
+
+        assert 'plex_url' not in items[0]
+
+    def test_plex_title_without_year(self):
+        """plex_title works when year is missing."""
+        from unittest.mock import patch
+
+        plugin = self._make_plugin()
+        items = [
+            {'file_path': '/media/Movies/Test (2020)/Test.mkv',
+             'folder': 'Test (2020)'},
+        ]
+
+        plex_map = {
+            '/home/plex/media/Movies/Test (2020)/Test.mkv': {
+                'ratingKey': '500',
+                'imdb_id': None,
+                'title': 'Test',
+                'year': '',
+            },
+        }
+
+        with patch('couchpotato.core.plugins.audit.fireEvent') as mock_fire:
+            mock_fire.side_effect = lambda event, **kw: {
+                'plex.get_machine_identifier': 'machine1',
+                'plex.get_file_to_rating_key_map': plex_map,
+            }.get(event)
+            plugin._enrich_plex_urls(items)
+
+        assert items[0]['plex_title'] == 'Test'
+
+    def test_empty_flagged_list_noop(self):
+        """Empty list doesn't trigger any Plex calls."""
+        from unittest.mock import patch
+
+        plugin = self._make_plugin()
+
+        with patch('couchpotato.core.plugins.audit.fireEvent') as mock_fire:
+            plugin._enrich_plex_urls([])
+
+        mock_fire.assert_not_called()

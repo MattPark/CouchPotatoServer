@@ -60,6 +60,10 @@ class Plex(Notification):
         # Library refresh on renamer completion
         addEvent('renamer.after', self.addToLibrary)
 
+        # Audit integration: expose lookup methods via events
+        addEvent('plex.get_machine_identifier', self.getMachineIdentifier)
+        addEvent('plex.get_file_to_rating_key_map', self.getFileToRatingKeyMap)
+
     def _ensureClientId(self):
         """Generate and persist a UUID for X-Plex-Client-Identifier if not set."""
         if not self.conf('client_id'):
@@ -305,6 +309,90 @@ class Plex(Notification):
                 success = False
 
         return success
+
+    # -----------------------------------------------------------------------
+    # Audit integration — library lookups
+    # -----------------------------------------------------------------------
+
+    def getMachineIdentifier(self):
+        """Return the Plex server's machineIdentifier string, or None."""
+        data = self._serverRequest('identity')
+        if data is None:
+            return None
+        container = data if isinstance(data, dict) else {}
+        mc = container.get('MediaContainer', container)
+        return mc.get('machineIdentifier')
+
+    def getFileToRatingKeyMap(self):
+        """Build a mapping of file path -> (ratingKey, imdb_id) for all movies.
+
+        Fetches every item from all movie library sections.  The file path
+        is the on-disk path as Plex sees it (inside its container).
+
+        Returns:
+            dict mapping file_path (str) -> dict with keys:
+                'ratingKey': str
+                'imdb_id':   str or None
+            Returns empty dict on error or if Plex is not configured.
+        """
+        if self.isDisabled() or not self.conf('auth_token'):
+            return {}
+
+        sections_data = self._serverRequest('library/sections')
+        if sections_data is None:
+            return {}
+
+        sections = []
+        if isinstance(sections_data, dict):
+            container = sections_data.get('MediaContainer', {})
+            sections = container.get('Directory', [])
+            if isinstance(sections, dict):
+                sections = [sections]
+
+        movie_section_keys = []
+        for section in sections:
+            if isinstance(section, dict) and section.get('type') == 'movie':
+                movie_section_keys.append(section['key'])
+
+        if not movie_section_keys:
+            return {}
+
+        file_map = {}
+        for sec_key in movie_section_keys:
+            data = self._serverRequest(
+                'library/sections/%s/all?includeGuids=1' % sec_key)
+            if data is None:
+                continue
+            container = data.get('MediaContainer', {}) if isinstance(data, dict) else {}
+            items = container.get('Metadata', [])
+
+            for item in items:
+                rating_key = item.get('ratingKey', '')
+                plex_title = item.get('title', '')
+                plex_year = item.get('year', '')
+                # Extract IMDB ID from Guid array
+                imdb_id = None
+                for g in (item.get('Guid') or []):
+                    gid = g.get('id', '')
+                    if gid.startswith('imdb://'):
+                        imdb_id = gid[7:]
+                        break
+
+                # Map each file path (across all Media/Part entries)
+                for media in (item.get('Media') or []):
+                    for part in (media.get('Part') or []):
+                        fp = part.get('file', '')
+                        if fp:
+                            file_map[fp] = {
+                                'ratingKey': rating_key,
+                                'imdb_id': imdb_id,
+                                'title': plex_title,
+                                'year': plex_year,
+                            }
+
+        log.info('Plex: built file map with %d entries from %d section(s)',
+                 (len(file_map), len(movie_section_keys)))
+        return file_map
 
     # -----------------------------------------------------------------------
     # Notification interface (base class contract)

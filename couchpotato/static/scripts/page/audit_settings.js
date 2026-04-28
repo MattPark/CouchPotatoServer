@@ -632,7 +632,18 @@ var AuditSettingTab = new Class({
 		new Element('span.audit_item_arrow.icon-right-dir').inject(header);
 
 		// Folder name
-		new Element('span.audit_item_folder', { 'text': item.folder || '' }).inject(header);
+		var folder_el = new Element('span.audit_item_folder', { 'text': item.folder || '' }).inject(header);
+
+		// Plex link (tight after movie name)
+		if(item.plex_url){
+			new Element('a.audit_plex_link', {
+				'href': item.plex_url,
+				'target': '_blank',
+				'title': item.plex_title ? ('Plex: ' + item.plex_title) : 'Open in Plex',
+				'text': 'P',
+				'events': { 'click': function(e){ e.stopPropagation(); } }
+			}).inject(folder_el);
+		}
 
 		// Foreign film badge
 		if(item.original_language && item.original_language !== 'en'){

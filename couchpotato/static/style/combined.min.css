@@ -1137,6 +1137,8 @@ input[type=text],textarea{-webkit-appearance:none}
 .dark .page.settings .audit_item_header:hover{background:rgba(255,255,255,.05)}
 .page.settings .audit_item_arrow{font-size:.8em;opacity:.5;transition:transform 150ms;flex-shrink:0}
 .page.settings .audit_item_folder{flex:1;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.page.settings .audit_plex_link{display:inline;padding:1px 4px;border-radius:3px;font-size:.65em;font-weight:700;background:rgba(229,160,13,.2);color:#e5a00d;text-decoration:none;margin-left:6px;cursor:pointer;vertical-align:middle}
+.page.settings .audit_plex_link:hover{background:rgba(229,160,13,.4)}
 .page.settings .audit_severity_badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:.7em;font-weight:700;text-transform:uppercase;flex-shrink:0}
 .page.settings .audit_severity_badge.audit_severity_high{background:rgba(244,67,54,.2);color:#f44336}
 .page.settings .audit_severity_badge.audit_severity_medium{background:rgba(255,152,0,.2);color:#ff9800}

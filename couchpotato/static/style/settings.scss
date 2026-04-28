@@ -1437,6 +1437,24 @@
 		white-space: nowrap;
 	}
 
+	.audit_plex_link {
+		display: inline;
+		padding: 1px 4px;
+		border-radius: 3px;
+		font-size: .65em;
+		font-weight: bold;
+		background: rgba(229,160,13,.2);
+		color: #e5a00d;
+		text-decoration: none;
+		margin-left: 6px;
+		cursor: pointer;
+		vertical-align: middle;
+
+		&:hover {
+			background: rgba(229,160,13,.4);
+		}
+	}
+
 	.audit_severity_badge {
 		display: inline-block;
 		padding: 1px 6px;

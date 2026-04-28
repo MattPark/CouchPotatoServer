@@ -513,3 +513,142 @@ class TestEnsureClientId:
         plex_provider._ensureClientId()
 
         mock_settings.set.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# getMachineIdentifier
+# ---------------------------------------------------------------------------
+
+class TestGetMachineIdentifier:
+
+    @patch.object(Plex, '_serverRequest')
+    def test_returns_identifier(self, mock_req, plex_provider):
+        mock_req.return_value = {
+            'MediaContainer': {
+                'machineIdentifier': 'abc123def',
+                'version': '1.40.0',
+            }
+        }
+        assert plex_provider.getMachineIdentifier() == 'abc123def'
+        mock_req.assert_called_once_with('identity')
+
+    @patch.object(Plex, '_serverRequest')
+    def test_returns_none_on_failure(self, mock_req, plex_provider):
+        mock_req.return_value = None
+        assert plex_provider.getMachineIdentifier() is None
+
+    @patch.object(Plex, '_serverRequest')
+    def test_handles_flat_response(self, mock_req, plex_provider):
+        """Some Plex versions return machineIdentifier at top level."""
+        mock_req.return_value = {'machineIdentifier': 'flat123'}
+        assert plex_provider.getMachineIdentifier() == 'flat123'
+
+
+# ---------------------------------------------------------------------------
+# getFileToRatingKeyMap
+# ---------------------------------------------------------------------------
+
+class TestGetFileToRatingKeyMap:
+
+    @patch.object(Plex, '_serverRequest')
+    def test_builds_map_from_library(self, mock_req, plex_provider):
+        """Builds file path -> ratingKey map from Plex library."""
+        mock_req.side_effect = [
+            # sections response
+            {'MediaContainer': {'Directory': [
+                {'type': 'movie', 'key': '2', 'title': 'Movies'},
+            ]}},
+            # all movies response
+            {'MediaContainer': {'Metadata': [
+                {
+                    'ratingKey': '100',
+                    'title': "The 'Burbs",
+                    'year': 1989,
+                    'Guid': [{'id': 'imdb://tt0096734'}, {'id': 'tmdb://11974'}],
+                    'Media': [{'Part': [
+                        {'file': '/home/plex/media/Movies/Burbs (1989)/Burbs (1989) 1080p.mkv'}
+                    ]}],
+                },
+                {
+                    'ratingKey': '200',
+                    'title': 'King Kong',
+                    'year': 2005,
+                    'Guid': [{'id': 'imdb://tt0360717'}],
+                    'Media': [{'Part': [
+                        {'file': '/home/plex/media/Movies/King Kong (2005)/King Kong (2005) 1080p.mkv'}
+                    ]}],
+                },
+            ]}},
+        ]
+
+        result = plex_provider.getFileToRatingKeyMap()
+        assert len(result) == 2
+        burbs = result['/home/plex/media/Movies/Burbs (1989)/Burbs (1989) 1080p.mkv']
+        assert burbs['ratingKey'] == '100'
+        assert burbs['imdb_id'] == 'tt0096734'
+        assert burbs['title'] == "The 'Burbs"
+        assert burbs['year'] == 1989
+        kong = result['/home/plex/media/Movies/King Kong (2005)/King Kong (2005) 1080p.mkv']
+        assert kong['ratingKey'] == '200'
+
+    @patch.object(Plex, '_serverRequest')
+    def test_empty_when_disabled(self, mock_req, plex_provider):
+        plex_provider.isDisabled = lambda: True
+        assert plex_provider.getFileToRatingKeyMap() == {}
+        mock_req.assert_not_called()
+
+    @patch.object(Plex, '_serverRequest')
+    def test_empty_when_no_token(self, mock_req, plex_provider):
+        plex_provider._conf_values['auth_token'] = ''
+        assert plex_provider.getFileToRatingKeyMap() == {}
+
+    @patch.object(Plex, '_serverRequest')
+    def test_empty_when_sections_fail(self, mock_req, plex_provider):
+        mock_req.return_value = None
+        assert plex_provider.getFileToRatingKeyMap() == {}
+
+    @patch.object(Plex, '_serverRequest')
+    def test_no_movie_sections(self, mock_req, plex_provider):
+        mock_req.return_value = {'MediaContainer': {'Directory': [
+            {'type': 'show', 'key': '1', 'title': 'TV Shows'},
+        ]}}
+        assert plex_provider.getFileToRatingKeyMap() == {}
+
+    @patch.object(Plex, '_serverRequest')
+    def test_movie_without_guid(self, mock_req, plex_provider):
+        """Movie with no Guid array still maps by file path, imdb_id is None."""
+        mock_req.side_effect = [
+            {'MediaContainer': {'Directory': [
+                {'type': 'movie', 'key': '2'},
+            ]}},
+            {'MediaContainer': {'Metadata': [
+                {
+                    'ratingKey': '300',
+                    'Media': [{'Part': [{'file': '/movies/Test (2020)/Test.mkv'}]}],
+                },
+            ]}},
+        ]
+        result = plex_provider.getFileToRatingKeyMap()
+        assert result['/movies/Test (2020)/Test.mkv']['imdb_id'] is None
+        assert result['/movies/Test (2020)/Test.mkv']['ratingKey'] == '300'
+
+    @patch.object(Plex, '_serverRequest')
+    def test_multi_part_movie(self, mock_req, plex_provider):
+        """Multi-part movie maps each file separately."""
+        mock_req.side_effect = [
+            {'MediaContainer': {'Directory': [{'type': 'movie', 'key': '2'}]}},
+            {'MediaContainer': {'Metadata': [
+                {
+                    'ratingKey': '400',
+                    'Guid': [{'id': 'imdb://tt0071381'}],
+                    'Media': [
+                        {'Part': [{'file': '/movies/Movie/Movie CD1.mkv'}]},
+                        {'Part': [{'file': '/movies/Movie/Movie CD2.mkv'}]},
+                    ],
+                },
+            ]}},
+        ]
+        result = plex_provider.getFileToRatingKeyMap()
+        assert len(result) == 2
+        assert result['/movies/Movie/Movie CD1.mkv']['ratingKey'] == '400'
+        assert result['/movies/Movie/Movie CD2.mkv']['ratingKey'] == '400'
