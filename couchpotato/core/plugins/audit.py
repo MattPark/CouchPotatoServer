@@ -2955,11 +2955,17 @@ def detect_duplicates(file_results):
     - They have the exact same file size (bytes), OR
     - They have the same runtime (within 0.1 min) AND same resolution label
 
+    Files with different editions (e.g. Theatrical vs Extended) are never
+    considered duplicates, even if they match on size/runtime/resolution.
+
     Args:
         file_results: List of dicts, each with at minimum:
+            - 'file': str (filename)
             - 'file_size_bytes': int
             - 'actual': {'resolution': str, 'duration_min': float}
             - 'expected': {'resolution': str}
+            Optionally:
+            - 'detected_edition': str or None
 
     Returns:
         List of (index_a, index_b) tuples identifying duplicate pairs.
@@ -2971,6 +2977,13 @@ def detect_duplicates(file_results):
         for j in range(i + 1, n):
             a = file_results[i]
             b = file_results[j]
+
+            # Different editions are intentional copies, not duplicates.
+            # Use pre-detected edition if available, else parse from filename.
+            ed_a = a.get('detected_edition') or get_edition(a.get('file', ''))
+            ed_b = b.get('detected_edition') or get_edition(b.get('file', ''))
+            if ed_a != ed_b:
+                continue
 
             # Check 1: exact same file size
             if a.get('file_size_bytes') and b.get('file_size_bytes'):

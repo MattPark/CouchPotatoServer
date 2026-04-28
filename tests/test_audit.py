@@ -1366,13 +1366,17 @@ class TestDetectDuplicates:
     """Tests for detect_duplicates() pair detection."""
 
     @staticmethod
-    def _result(size=None, duration=None, resolution=None):
+    def _result(size=None, duration=None, resolution=None, file='test.mkv',
+                detected_edition=None):
         """Helper to build a minimal file_result dict."""
         r = {
+            'file': file,
             'file_size_bytes': size,
             'actual': {'duration_min': duration or 0},
             'expected': {'resolution': resolution or ''},
         }
+        if detected_edition is not None:
+            r['detected_edition'] = detected_edition
         return r
 
     def test_empty_list(self):
@@ -1482,6 +1486,66 @@ class TestDetectDuplicates:
         pairs = detect_duplicates(results)
         # Same size → duplicate via size check (different runtime/res don't matter)
         assert pairs == [(0, 1)]
+
+    def test_different_editions_not_duplicate_same_size(self):
+        """Same file size but different editions → NOT duplicates."""
+        results = [
+            self._result(size=5000000000,
+                         file='King Kong (2005) {edition-Extended Edition} 1080p.mkv',
+                         detected_edition='Extended Edition'),
+            self._result(size=5000000000,
+                         file='King Kong (2005) 1080p.mkv'),
+        ]
+        pairs = detect_duplicates(results)
+        assert pairs == []
+
+    def test_different_editions_not_duplicate_same_runtime_resolution(self):
+        """Same runtime+resolution but different editions → NOT duplicates."""
+        results = [
+            self._result(size=8000000000, duration=120.0, resolution='1080p',
+                         file='Movie (2020) {edition-Directors Cut} 1080p.mkv',
+                         detected_edition="Director's Cut"),
+            self._result(size=5000000000, duration=120.0, resolution='1080p',
+                         file='Movie (2020) 1080p.mkv'),
+        ]
+        pairs = detect_duplicates(results)
+        assert pairs == []
+
+    def test_same_edition_still_duplicate(self):
+        """Same edition and same size → still duplicates."""
+        results = [
+            self._result(size=5000000000,
+                         file='Movie (2020) {edition-Extended} 1080p.mkv',
+                         detected_edition='Extended Edition'),
+            self._result(size=5000000000,
+                         file='Movie (2020) {edition-Extended} 720p.mkv',
+                         detected_edition='Extended Edition'),
+        ]
+        pairs = detect_duplicates(results)
+        assert pairs == [(0, 1)]
+
+    def test_both_no_edition_still_duplicate(self):
+        """Two files with no edition and same size → duplicates."""
+        results = [
+            self._result(size=5000000000,
+                         file='Movie (2020) 1080p.mkv'),
+            self._result(size=5000000000,
+                         file='Movie (2020) 720p.mkv'),
+        ]
+        pairs = detect_duplicates(results)
+        assert pairs == [(0, 1)]
+
+    def test_edition_detected_from_filename_fallback(self):
+        """Edition parsed from filename when detected_edition not set."""
+        results = [
+            self._result(size=5000000000,
+                         file='Movie (2020) {edition-Extended Edition} 1080p.mkv'),
+            self._result(size=5000000000,
+                         file='Movie (2020) 1080p.mkv'),
+        ]
+        # No detected_edition set — should parse from filename
+        pairs = detect_duplicates(results)
+        assert pairs == []
 
 
 # ---------------------------------------------------------------------------
