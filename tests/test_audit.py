@@ -6978,7 +6978,7 @@ class TestSingleFolderScanMerge:
     def test_scan_path_merges_into_existing_report(self):
         """A scan_path scan should keep existing items and add/replace
         items for the scanned folder only."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
 
         plugin = self._make_plugin()
 
