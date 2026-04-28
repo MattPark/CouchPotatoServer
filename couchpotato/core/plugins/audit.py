@@ -5138,6 +5138,7 @@ class Audit(Plugin if _CP_AVAILABLE else object):
                 'action': {'desc': 'Fix action to apply'},
                 'filter_check': {'desc': 'Only apply to items with this check type'},
                 'filter_severity': {'desc': 'Only apply to items with this severity'},
+                'filter_action': {'desc': 'Override action filter (verify_audio only); uses current UI filter instead of batch action'},
                 'confirm': {'desc': 'Must be 1 to confirm execution'},
                 'dry_run': {'desc': '1 = preview only, 0 = execute (default 1)'},
             },
@@ -7529,7 +7530,8 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         return results
 
     def fixBatchView(self, action=None, filter_check=None,
-                     filter_severity=None, confirm='0', dry_run='1',
+                     filter_severity=None, filter_action=None,
+                     confirm='0', dry_run='1',
                      reset_status=None, **kwargs):
         """API handler: execute a fix action on multiple items."""
         if not action or action not in VALID_FIX_ACTIONS:
@@ -7555,11 +7557,22 @@ class Audit(Plugin if _CP_AVAILABLE else object):
         if not self.last_report:
             return {'success': False, 'error': 'No scan results available'}
 
+        # verify_audio is non-destructive: allow it to run on items from any
+        # filter set (e.g. set_audio_language items).  Use the caller-supplied
+        # filter_action when present, otherwise fall back to no action filter
+        # so it matches all currently-filtered items.
+        # For destructive actions, always restrict to items whose
+        # recommended_action matches the batch action.
+        if action == 'verify_audio':
+            effective_filter_action = filter_action or None
+        else:
+            effective_filter_action = action
+
         # Get matching items using the filter
         items = self._filter_and_sort(
             filter_check=filter_check,
             filter_severity=filter_severity,
-            filter_action=action,
+            filter_action=effective_filter_action,
             filter_fixed='false',
         )
 

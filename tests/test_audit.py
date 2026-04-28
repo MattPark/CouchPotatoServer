@@ -5314,8 +5314,8 @@ class TestBatchVerifyUnified:
         assert result['previews'][0]['item_id'] == 'a'
 
     def test_fixBatchView_verify_audio_no_filter_gets_all(self):
-        """Without filter_check, verify_audio dry run returns all items with
-        verify_audio as recommended action."""
+        """Without filter_action, verify_audio dry run returns all unfixed items
+        regardless of recommended_action."""
         from unittest.mock import patch
 
         items = [
@@ -5431,6 +5431,91 @@ class TestBatchVerifyUnified:
 
         # Item has HIGH severity, filter asks for LOW — no match
         assert result.get('success') is False or result.get('total', 0) == 0
+
+    def test_fixBatchView_verify_audio_with_filter_action(self):
+        """verify_audio batch with filter_action only returns items matching
+        that action, not just verify_audio items."""
+        from unittest.mock import patch
+
+        item_verify = self._make_item(item_id='a', fingerprint='1:a',
+                                       check='unknown_audio')
+        item_verify['recommended_action'] = 'verify_audio'
+
+        item_set = self._make_item(item_id='b', fingerprint='2:b',
+                                    check='foreign_audio')
+        item_set['recommended_action'] = 'set_audio_language'
+
+        plugin = self._make_plugin([item_verify, item_set])
+
+        with patch.object(plugin, '_build_ignored_set', return_value=set()):
+            result = plugin.fixBatchView(
+                action='verify_audio',
+                filter_action='set_audio_language',
+                confirm='1',
+                dry_run='1',
+            )
+
+        assert result['success'] is True
+        assert result['total'] == 1
+        assert result['previews'][0]['item_id'] == 'b'
+
+    def test_fixBatchView_verify_audio_no_filter_action_returns_all(self):
+        """verify_audio batch with no filter_action returns ALL unfixed items,
+        not just those with recommended_action=verify_audio."""
+        from unittest.mock import patch
+
+        item_verify = self._make_item(item_id='a', fingerprint='1:a',
+                                       check='unknown_audio')
+        item_verify['recommended_action'] = 'verify_audio'
+
+        item_set = self._make_item(item_id='b', fingerprint='2:b',
+                                    check='foreign_audio')
+        item_set['recommended_action'] = 'set_audio_language'
+
+        item_rename = self._make_item(item_id='c', fingerprint='3:c',
+                                       check='resolution')
+        item_rename['recommended_action'] = 'rename_resolution'
+
+        plugin = self._make_plugin([item_verify, item_set, item_rename])
+
+        with patch.object(plugin, '_build_ignored_set', return_value=set()):
+            result = plugin.fixBatchView(
+                action='verify_audio',
+                confirm='1',
+                dry_run='1',
+            )
+
+        assert result['success'] is True
+        assert result['total'] == 3
+
+    def test_fixBatchView_destructive_action_ignores_filter_action(self):
+        """Destructive actions always filter by their own action, ignoring
+        any filter_action parameter to prevent accidental cross-action deletes."""
+        from unittest.mock import patch
+
+        item_delete = self._make_item(item_id='a', fingerprint='1:a',
+                                       check='foreign_audio')
+        item_delete['recommended_action'] = 'delete_foreign'
+
+        item_rename = self._make_item(item_id='b', fingerprint='2:b',
+                                       check='resolution')
+        item_rename['recommended_action'] = 'rename_resolution'
+
+        plugin = self._make_plugin([item_delete, item_rename])
+
+        with patch.object(plugin, '_build_ignored_set', return_value=set()):
+            # Try to pass filter_action that includes both — should be ignored
+            result = plugin.fixBatchView(
+                action='delete_foreign',
+                filter_action='rename_resolution',
+                confirm='1',
+                dry_run='1',
+            )
+
+        # Only the delete_foreign item should match
+        assert result['success'] is True
+        assert result['total'] == 1
+        assert result['previews'][0]['item_id'] == 'a'
 
 
 # ---------------------------------------------------------------------------

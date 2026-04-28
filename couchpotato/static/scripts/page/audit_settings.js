@@ -981,7 +981,7 @@ var AuditSettingTab = new Class({
 			{ action: 'delete_duplicate', label: 'Delete All Duplicates' },
 			{ action: 'delete_foreign', label: 'Delete All Foreign Audio' },
 			{ action: 'set_audio_language', label: 'Set All Audio Language' },
-			{ action: 'verify_audio', label: 'Verify All Unknown Audio (Whisper)' }
+			{ action: 'verify_audio', label: 'Verify All Audio (Whisper)' }
 		];
 
 		batch_actions.each(function(ba){
@@ -1007,6 +1007,9 @@ var AuditSettingTab = new Class({
 		};
 		if(self.current_filter_check) data.filter_check = self.current_filter_check;
 		if(self.current_filter_severity) data.filter_severity = self.current_filter_severity;
+		// verify_audio is non-destructive: pass the current UI action filter
+		// so it runs on whatever set the user is viewing
+		if(action === 'verify_audio' && self.current_filter_action) data.filter_action = self.current_filter_action;
 
 		Api.request('audit.fix.batch', {
 			'data': data,
@@ -1119,6 +1122,7 @@ var AuditSettingTab = new Class({
 		};
 		if(self.current_filter_check) exec_data.filter_check = self.current_filter_check;
 		if(self.current_filter_severity) exec_data.filter_severity = self.current_filter_severity;
+		if(action === 'verify_audio' && self.current_filter_action) exec_data.filter_action = self.current_filter_action;
 		if(reset_status) exec_data.reset_status = reset_status;
 
 		Api.request('audit.fix.batch', {
