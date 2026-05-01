@@ -516,6 +516,23 @@ class QualityPlugin(Plugin):
                     return quality_id
         return None
 
+    @staticmethod
+    def identifier_for_dimensions(width, height):
+        """Map pixel dimensions to a quality identifier.
+
+        Single source of truth for resolution→identifier mapping.
+        Returns '2160p', '1080p', '720p', 'sd', or None.
+        """
+        if width >= 3200 or height >= 2000:
+            return '2160p'
+        if width >= 1800 or height >= 900:
+            return '1080p'
+        if width >= 1100 or height >= 600:
+            return '720p'
+        if width > 0 or height > 0:
+            return 'sd'
+        return None
+
     def _detect_resolution(self, words, extra = None):
         """Detect resolution from words and metadata. Returns quality identifier or None."""
         # Check explicit resolution tokens in words
@@ -533,14 +550,7 @@ class QualityPlugin(Plugin):
         if extra:
             rw = extra.get('resolution_width', 0)
             rh = extra.get('resolution_height', 0)
-            if rw >= 3200 or rh >= 2000:
-                return '2160p'
-            if rw >= 1800 or rh >= 900:
-                return '1080p'
-            if rw >= 1100 or rh >= 600:
-                return '720p'
-            if 0 < rw <= 1100 or 0 < rh < 600:
-                return 'sd'
+            return self.identifier_for_dimensions(rw, rh)
 
         return None
 

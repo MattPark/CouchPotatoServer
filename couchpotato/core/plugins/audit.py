@@ -679,24 +679,14 @@ def resolution_label(width, height):
 def _quality_label_for_template(width, height):
     """Map actual resolution to the quality label the CP renamer uses.
 
-    Delegates to QualityPlugin's resolution thresholds and looks up the label
-    from QualityPlugin.qualities, so changes to the quality definitions
-    automatically propagate here.
+    Delegates entirely to QualityPlugin — identifier_for_dimensions() for
+    the resolution→identifier mapping, and qualities[] for identifier→label.
     """
     if not height and not width:
         return ''
 
-    # Use the same resolution→identifier logic as QualityPlugin._detect_resolution
-    # (thresholds duplicated here; see quality/main.py:532-543 if they ever change)
-    if width >= 3200 or height >= 2000:
-        identifier = '2160p'
-    elif width >= 1800 or height >= 900:
-        identifier = '1080p'
-    elif width >= 1100 or height >= 600:
-        identifier = '720p'
-    elif width > 0 or height > 0:
-        identifier = 'sd'
-    else:
+    identifier = _QP.identifier_for_dimensions(width, height) if _QP else None
+    if not identifier:
         return ''
 
     # Look up the label from the canonical quality definitions
