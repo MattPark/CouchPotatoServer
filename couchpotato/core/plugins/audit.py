@@ -4366,14 +4366,17 @@ def _preview_rename_edition(item):
     return result
 
 
-def _preview_delete_wrong(item):
-    """Generate preview for delete_wrong action."""
+def _preview_delete_wrong(item, action='delete_wrong'):
+    """Generate preview for delete_wrong/delete_duplicate/delete_foreign actions."""
     old_path = item['file_path']
     folder_path = os.path.dirname(old_path)
 
+    # delete_foreign defaults to 'remove' — the movie is foreign, not wanted
+    default_status = 'remove' if action == 'delete_foreign' else 'wanted'
+
     result = {
         'item_id': item['item_id'],
-        'action': 'delete_wrong',
+        'action': action,
         'changes': {
             'filesystem': {
                 'delete_path': old_path,
@@ -4382,7 +4385,7 @@ def _preview_delete_wrong(item):
             'database': {
                 'reset_status': {
                     'movie': item['expected'].get('title', ''),
-                    'default': 'wanted',
+                    'default': default_status,
                     'options': ['wanted', 'done', 'nochange', 'remove'],
                 },
             },
@@ -4612,7 +4615,7 @@ def generate_fix_preview(item, action):
     elif action == 'rename_edition':
         return _preview_rename_edition(item)
     elif action in ('delete_wrong', 'delete_duplicate', 'delete_foreign'):
-        return _preview_delete_wrong(item)
+        return _preview_delete_wrong(item, action=action)
     elif action == 'verify_audio':
         return {
             'action': 'verify_audio',
