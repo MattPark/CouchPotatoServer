@@ -4372,7 +4372,13 @@ def _preview_delete_wrong(item, action='delete_wrong'):
     folder_path = os.path.dirname(old_path)
 
     # delete_foreign defaults to 'remove' — the movie is foreign, not wanted
-    default_status = 'remove' if action == 'delete_foreign' else 'wanted'
+    # delete_duplicate defaults to 'done' — the other copy is the keeper
+    if action == 'delete_foreign':
+        default_status = 'remove'
+    elif action == 'delete_duplicate':
+        default_status = 'done'
+    else:
+        default_status = 'wanted'
 
     result = {
         'item_id': item['item_id'],
