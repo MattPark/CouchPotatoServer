@@ -3957,7 +3957,7 @@ def _build_resolution_rename(item):
     if not actual_height:
         raise ValueError('Cannot determine actual resolution from: %s' % actual_res)
 
-    actual_label = resolution_label(actual_width, actual_height)
+    actual_label = _quality_label_for_template(actual_width, actual_height)
     if actual_label == claimed:
         raise ValueError('Resolution already matches: %s' % claimed)
 

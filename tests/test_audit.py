@@ -7021,6 +7021,29 @@ class TestQualityLabelForTemplate:
         # Should not flag — filename already matches
         assert result is None
 
+    def test_build_resolution_rename_uses_sd(self):
+        """_build_resolution_rename should return 'SD' label for 480p content,
+        not '480p' (fixes #18)."""
+        from couchpotato.core.plugins.audit import _build_resolution_rename
+
+        item = {
+            'item_id': 'test1',
+            'file': 'Christmas in Boston (2005) 1080p {imdb-tt0497270}.mkv',
+            'file_path': '/movies/Christmas in Boston (2005)/Christmas in Boston (2005) 1080p {imdb-tt0497270}.mkv',
+            'imdb_id': 'tt0497270',
+            'expected': {'title': 'Christmas in Boston', 'year': 2005,
+                         'db_title': 'Christmas in Boston', 'resolution': '1080p'},
+            'actual': {'resolution': '720x480'},
+            'detected_edition': None,
+            'guessit_tokens': {'video': '', 'audio': '', 'source': '',
+                               'group': 'imdb-tt0497270', 'audio_channels': '',
+                               'quality_type': 'SD'},
+        }
+        new_file, new_path, actual_label = _build_resolution_rename(item)
+        assert actual_label == 'SD'
+        # The returned label must not be the raw resolution '480p'
+        assert actual_label != '480p'
+
 
 # ---------------------------------------------------------------------------
 # Single-folder scan should merge into existing report, not replace it
