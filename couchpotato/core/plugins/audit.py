@@ -1649,7 +1649,10 @@ _WHISPER_LANG_RE = re.compile(
 
 DEFAULT_WHISPER_MODEL = '/models/ggml-tiny.bin'
 WHISPER_SAMPLE_SECONDS = 30
-WHISPER_MIN_CONFIDENCE = 0.70
+WHISPER_MIN_CONFIDENCE = 0.85
+WHISPER_SAMPLE_OFFSETS = (20, 35, 50, 65, 80)  # percent of file duration
+WHISPER_MIN_RMS = 500  # minimum RMS energy to consider a sample speech-bearing
+WHISPER_MAX_SAMPLE_RETRIES = 3  # retries per offset if sample is silent
 
 
 def _extract_audio_sample(file_path, offset_seconds, duration, output_path,
@@ -1692,6 +1695,33 @@ def _extract_audio_sample(file_path, offset_seconds, duration, output_path,
     except Exception as e:
         log.error('ffmpeg error extracting sample: %s', (e,))
         return False
+
+
+def _wav_rms_energy(wav_path):
+    """Calculate RMS energy of a 16-bit mono WAV file.
+
+    Returns the RMS as an integer (0-32768 range for 16-bit audio).
+    A typical speech signal has RMS > 1000; silence/music-only is usually < 500.
+    Returns 0 on failure.
+    """
+    try:
+        with open(wav_path, 'rb') as f:
+            # Skip WAV header (44 bytes for standard PCM WAV)
+            header = f.read(44)
+            if len(header) < 44:
+                return 0
+            data = f.read()
+        if len(data) < 2:
+            return 0
+        # Parse as 16-bit signed little-endian samples
+        n_samples = len(data) // 2
+        samples = struct.unpack('<%dh' % n_samples, data[:n_samples * 2])
+        # RMS calculation
+        sum_sq = sum(s * s for s in samples)
+        rms = int((sum_sq / n_samples) ** 0.5)
+        return rms
+    except Exception:
+        return 0
 
 
 def _run_whisper_detection(wav_path, model_path):
@@ -1755,44 +1785,104 @@ def _verify_single_track(file_path, duration, track_index, model_path, tmp_dir,
                          basename):
     """Verify one audio track using multi-sample whisper detection.
 
+    Samples at 5 positions (WHISPER_SAMPLE_OFFSETS), skipping silent/low-energy
+    segments. Uses majority voting across successful samples rather than picking
+    the highest-confidence single sample.
+
     Returns {'language': str, 'confidence': float, 'samples': list}
     """
     prefix = 't%d' % track_index if track_index is not None else 'default'
+    samples = []
 
-    # First try: middle of file (50%)
-    offset = max(0, (duration * 0.5) - (WHISPER_SAMPLE_SECONDS / 2))
-    wav_path = os.path.join(tmp_dir, '%s_50.wav' % prefix)
-
-    if not _extract_audio_sample(file_path, offset, WHISPER_SAMPLE_SECONDS,
-                                 wav_path, track_index=track_index):
-        return {'language': None, 'confidence': 0.0, 'samples': [],
-                'error': 'Failed to extract audio'}
-
-    lang, conf = _run_whisper_detection(wav_path, model_path)
-    samples = [{'offset_pct': 50, 'language': lang, 'confidence': conf}]
-    log.info('Whisper track %s @50%%: lang=%s conf=%.3f for %s',
-             (prefix, lang, conf, basename))
-
-    if lang and conf >= WHISPER_MIN_CONFIDENCE:
-        return {'language': lang, 'confidence': conf, 'samples': samples}
-
-    # Multi-sample retry at 25% and 75%
-    for pct in (25, 75):
+    for pct in WHISPER_SAMPLE_OFFSETS:
         offset = max(0, (duration * pct / 100) - (WHISPER_SAMPLE_SECONDS / 2))
         wav_path = os.path.join(tmp_dir, '%s_%d.wav' % (prefix, pct))
 
-        if not _extract_audio_sample(file_path, offset, WHISPER_SAMPLE_SECONDS,
-                                     wav_path, track_index=track_index):
+        # Try this offset, retry with small shifts if sample is silent
+        extracted = False
+        for retry in range(WHISPER_MAX_SAMPLE_RETRIES):
+            attempt_offset = offset + (retry * WHISPER_SAMPLE_SECONDS * 0.5)
+            if attempt_offset + WHISPER_SAMPLE_SECONDS > duration:
+                attempt_offset = max(0, duration - WHISPER_SAMPLE_SECONDS)
+
+            retry_path = wav_path if retry == 0 else \
+                os.path.join(tmp_dir, '%s_%d_r%d.wav' % (prefix, pct, retry))
+
+            if not _extract_audio_sample(file_path, attempt_offset,
+                                         WHISPER_SAMPLE_SECONDS,
+                                         retry_path, track_index=track_index):
+                break
+
+            rms = _wav_rms_energy(retry_path)
+            if rms >= WHISPER_MIN_RMS:
+                wav_path = retry_path
+                extracted = True
+                break
+            else:
+                log.debug('Whisper track %s @%d%% retry %d: RMS %d too low '
+                          '(silence), skipping for %s',
+                          (prefix, pct, retry, rms, basename))
+
+        if not extracted:
             continue
 
-        lang2, conf2 = _run_whisper_detection(wav_path, model_path)
-        samples.append({'offset_pct': pct, 'language': lang2, 'confidence': conf2})
-        log.info('Whisper track %s @%d%%: lang=%s conf=%.3f for %s',
-                 (prefix, pct, lang2, conf2, basename))
+        lang, conf = _run_whisper_detection(wav_path, model_path)
+        if lang:
+            samples.append({'offset_pct': pct, 'language': lang,
+                            'confidence': conf})
+            log.info('Whisper track %s @%d%%: lang=%s conf=%.3f for %s',
+                     (prefix, pct, lang, conf, basename))
 
-    best = max(samples, key=lambda s: s['confidence'])
-    return {'language': best['language'], 'confidence': best['confidence'],
+        # Early exit: if we have 3+ samples agreeing at high confidence, stop
+        if len(samples) >= 3:
+            majority_lang, majority_count = _majority_language(samples)
+            if majority_count >= 3 and _avg_confidence(samples, majority_lang) >= WHISPER_MIN_CONFIDENCE:
+                break
+
+    if not samples:
+        return {'language': None, 'confidence': 0.0, 'samples': [],
+                'error': 'No usable audio samples (all silent)'}
+
+    # Majority voting: pick the language that most samples agree on
+    majority_lang, majority_count = _majority_language(samples)
+    avg_conf = _avg_confidence(samples, majority_lang)
+
+    log.info('Whisper track %s majority: %s (%d/%d samples, avg_conf=%.3f) for %s',
+             (prefix, majority_lang, majority_count, len(samples), avg_conf,
+              basename))
+
+    return {'language': majority_lang, 'confidence': avg_conf,
             'samples': samples}
+
+
+def _majority_language(samples):
+    """Find the language with the most votes in a list of samples.
+
+    Returns (language, count). Ties broken by average confidence.
+    """
+    counts = {}
+    for s in samples:
+        lang = s['language']
+        if lang:
+            counts[lang] = counts.get(lang, 0) + 1
+    if not counts:
+        return None, 0
+    max_count = max(counts.values())
+    # If tie, pick the language with higher average confidence
+    tied = [l for l, c in counts.items() if c == max_count]
+    if len(tied) == 1:
+        return tied[0], max_count
+    # Break tie by average confidence
+    best_lang = max(tied, key=lambda l: _avg_confidence(samples, l))
+    return best_lang, max_count
+
+
+def _avg_confidence(samples, language):
+    """Average confidence of samples matching the given language."""
+    matching = [s['confidence'] for s in samples if s['language'] == language]
+    if not matching:
+        return 0.0
+    return sum(matching) / len(matching)
 
 
 def whisper_verify_audio(file_path, audio_tracks=None,

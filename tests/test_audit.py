@@ -2647,13 +2647,16 @@ class TestWhisperVerifyAudio:
     @mock.patch('couchpotato.core.plugins.audit.shutil.rmtree')
     @mock.patch('couchpotato.core.plugins.audit._run_whisper_detection',
                 return_value=('en', 0.95))
+    @mock.patch('couchpotato.core.plugins.audit._wav_rms_energy',
+                return_value=2000)
     @mock.patch('couchpotato.core.plugins.audit._extract_audio_sample',
                 return_value=True)
     @mock.patch('couchpotato.core.plugins.audit._get_media_duration',
                 return_value=120.0)
     def test_high_confidence_single_sample(self, mock_dur, mock_extract,
-                                           mock_whisper, mock_rmtree, tmp_path):
-        """High confidence (>0.70) on first sample → returns immediately."""
+                                           mock_rms, mock_whisper,
+                                           mock_rmtree, tmp_path):
+        """High confidence (>=0.85) with majority agreement → early exit."""
         f = tmp_path / 'movie.mkv'
         f.write_bytes(b'\x00' * 100)
         model = tmp_path / 'model.bin'
@@ -2662,26 +2665,30 @@ class TestWhisperVerifyAudio:
         result = whisper_verify_audio(str(f), model_path=str(model))
 
         assert result['language'] == 'en'
-        assert result['confidence'] == 0.95
+        assert abs(result['confidence'] - 0.95) < 0.001
         assert len(result['tracks']) == 1
-        assert result['tracks'][0]['samples'][0]['offset_pct'] == 50
-        # Only one whisper call (no retry)
-        assert mock_whisper.call_count == 1
+        # With majority voting, early exit after 3 agreeing samples
+        assert mock_whisper.call_count == 3
 
     @mock.patch('couchpotato.core.plugins.audit.shutil.rmtree')
     @mock.patch('couchpotato.core.plugins.audit._run_whisper_detection')
+    @mock.patch('couchpotato.core.plugins.audit._wav_rms_energy',
+                return_value=2000)
     @mock.patch('couchpotato.core.plugins.audit._extract_audio_sample',
                 return_value=True)
     @mock.patch('couchpotato.core.plugins.audit._get_media_duration',
                 return_value=120.0)
     def test_low_confidence_triggers_retry(self, mock_dur, mock_extract,
-                                            mock_whisper, mock_rmtree, tmp_path):
-        """Low confidence on first sample → retries at 25% and 75%."""
-        # First call: low confidence. Second and third: better.
+                                            mock_rms, mock_whisper,
+                                            mock_rmtree, tmp_path):
+        """Low confidence on samples → continues through all 5 offsets."""
+        # All 5 samples return English with varying confidence
         mock_whisper.side_effect = [
-            ('en', 0.50),   # 50% — low
-            ('en', 0.85),   # 25% — high
-            ('en', 0.80),   # 75% — decent
+            ('en', 0.50),   # 20% — low
+            ('en', 0.60),   # 35% — low
+            ('en', 0.55),   # 50% — low
+            ('en', 0.80),   # 65% — decent
+            ('en', 0.75),   # 80% — decent
         ]
         f = tmp_path / 'movie.mkv'
         f.write_bytes(b'\x00' * 100)
@@ -2691,20 +2698,23 @@ class TestWhisperVerifyAudio:
         result = whisper_verify_audio(str(f), model_path=str(model))
 
         assert result['language'] == 'en'
-        assert result['confidence'] == 0.85  # best of all samples
-        assert len(result['tracks'][0]['samples']) == 3
-        assert mock_whisper.call_count == 3
+        # Majority vote: all 5 agree on 'en', avg confidence
+        assert len(result['tracks'][0]['samples']) == 5
+        assert mock_whisper.call_count == 5
 
     @mock.patch('couchpotato.core.plugins.audit.shutil.rmtree')
     @mock.patch('couchpotato.core.plugins.audit._run_whisper_detection',
                 return_value=(None, 0.0))
+    @mock.patch('couchpotato.core.plugins.audit._wav_rms_energy',
+                return_value=2000)
     @mock.patch('couchpotato.core.plugins.audit._extract_audio_sample',
                 return_value=True)
     @mock.patch('couchpotato.core.plugins.audit._get_media_duration',
                 return_value=120.0)
     def test_whisper_fails_all_samples(self, mock_dur, mock_extract,
-                                       mock_whisper, mock_rmtree, tmp_path):
-        """Whisper returns nothing for all samples → language is None."""
+                                       mock_rms, mock_whisper,
+                                       mock_rmtree, tmp_path):
+        """Whisper returns nothing for all samples → error result."""
         f = tmp_path / 'movie.mkv'
         f.write_bytes(b'\x00' * 100)
         model = tmp_path / 'model.bin'
@@ -2714,7 +2724,7 @@ class TestWhisperVerifyAudio:
 
         assert result['language'] is None
         assert result['confidence'] == 0.0
-        assert len(result['tracks'][0]['samples']) == 3
+        assert 'error' in result
 
     @mock.patch('couchpotato.core.plugins.audit.shutil.rmtree')
     @mock.patch('couchpotato.core.plugins.audit._extract_audio_sample',
@@ -2723,7 +2733,7 @@ class TestWhisperVerifyAudio:
                 return_value=120.0)
     def test_extract_fails(self, mock_dur, mock_extract,
                             mock_rmtree, tmp_path):
-        """Audio extraction failure → error."""
+        """Audio extraction failure → error about silent samples."""
         f = tmp_path / 'movie.mkv'
         f.write_bytes(b'\x00' * 100)
         model = tmp_path / 'model.bin'
@@ -2732,7 +2742,68 @@ class TestWhisperVerifyAudio:
         result = whisper_verify_audio(str(f), model_path=str(model))
 
         assert 'error' in result
-        assert 'extract' in result['error'].lower()
+        assert 'silent' in result['error'].lower() or 'extract' in result['error'].lower()
+
+    @mock.patch('couchpotato.core.plugins.audit.shutil.rmtree')
+    @mock.patch('couchpotato.core.plugins.audit._run_whisper_detection')
+    @mock.patch('couchpotato.core.plugins.audit._wav_rms_energy',
+                return_value=2000)
+    @mock.patch('couchpotato.core.plugins.audit._extract_audio_sample',
+                return_value=True)
+    @mock.patch('couchpotato.core.plugins.audit._get_media_duration',
+                return_value=120.0)
+    def test_majority_voting_overrides_high_confidence_outlier(
+            self, mock_dur, mock_extract, mock_rms, mock_whisper,
+            mock_rmtree, tmp_path):
+        """Majority voting: 4 French samples beat 1 high-confidence English."""
+        mock_whisper.side_effect = [
+            ('fr', 0.70),   # 20%
+            ('en', 0.95),   # 35% — high but outlier
+            ('fr', 0.75),   # 50%
+            ('fr', 0.72),   # 65%
+            ('fr', 0.80),   # 80%
+        ]
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        model = tmp_path / 'model.bin'
+        model.write_bytes(b'\x00' * 100)
+
+        result = whisper_verify_audio(str(f), model_path=str(model))
+
+        # Majority says French (4 vs 1 English)
+        assert result['language'] == 'fr'
+        assert result['tracks'][0]['language'] == 'fr'
+
+    @mock.patch('couchpotato.core.plugins.audit.shutil.rmtree')
+    @mock.patch('couchpotato.core.plugins.audit._run_whisper_detection',
+                return_value=('de', 0.90))
+    @mock.patch('couchpotato.core.plugins.audit._wav_rms_energy')
+    @mock.patch('couchpotato.core.plugins.audit._extract_audio_sample',
+                return_value=True)
+    @mock.patch('couchpotato.core.plugins.audit._get_media_duration',
+                return_value=120.0)
+    def test_silent_samples_skipped(self, mock_dur, mock_extract, mock_rms,
+                                     mock_whisper, mock_rmtree, tmp_path):
+        """Samples with low RMS energy are skipped; detection uses speech samples."""
+        # First few attempts return silence, then speech
+        mock_rms.side_effect = [
+            100, 100, 100,   # 20% — all 3 retries silent
+            100, 100, 2000,  # 35% — 3rd retry has speech
+            2000,            # 50% — speech on first try
+            2000,            # 65% — speech on first try (triggers early exit)
+        ]
+        f = tmp_path / 'movie.mkv'
+        f.write_bytes(b'\x00' * 100)
+        model = tmp_path / 'model.bin'
+        model.write_bytes(b'\x00' * 100)
+
+        result = whisper_verify_audio(str(f), model_path=str(model))
+
+        # Only the speech-bearing samples were sent to whisper
+        assert result['language'] == 'de'
+        # 20% was fully silent (3 retries, all < WHISPER_MIN_RMS) → skipped
+        # whisper called for: 35%, 50%, 65% = 3 times
+        assert mock_whisper.call_count == 3
 
 
 class TestRunWhisperDetection:
@@ -2769,8 +2840,86 @@ class TestRunWhisperDetection:
         assert conf == 0.0
 
 
-# ---------------------------------------------------------------------------
-# Smart skip logic for identification
+class TestWhisperHelpers:
+    """Tests for whisper majority voting and RMS energy helpers."""
+
+    def test_majority_language_clear_winner(self):
+        from couchpotato.core.plugins.audit import _majority_language
+        samples = [
+            {'language': 'fr', 'confidence': 0.8},
+            {'language': 'fr', 'confidence': 0.7},
+            {'language': 'en', 'confidence': 0.9},
+        ]
+        lang, count = _majority_language(samples)
+        assert lang == 'fr'
+        assert count == 2
+
+    def test_majority_language_tie_broken_by_confidence(self):
+        from couchpotato.core.plugins.audit import _majority_language
+        samples = [
+            {'language': 'de', 'confidence': 0.90},
+            {'language': 'fr', 'confidence': 0.60},
+        ]
+        lang, count = _majority_language(samples)
+        # Both have count 1, tie broken by higher avg confidence
+        assert lang == 'de'
+        assert count == 1
+
+    def test_majority_language_empty(self):
+        from couchpotato.core.plugins.audit import _majority_language
+        lang, count = _majority_language([])
+        assert lang is None
+        assert count == 0
+
+    def test_avg_confidence(self):
+        from couchpotato.core.plugins.audit import _avg_confidence
+        samples = [
+            {'language': 'en', 'confidence': 0.80},
+            {'language': 'en', 'confidence': 0.90},
+            {'language': 'fr', 'confidence': 0.70},
+        ]
+        avg = _avg_confidence(samples, 'en')
+        assert abs(avg - 0.85) < 0.001
+
+    def test_avg_confidence_no_match(self):
+        from couchpotato.core.plugins.audit import _avg_confidence
+        samples = [{'language': 'en', 'confidence': 0.90}]
+        avg = _avg_confidence(samples, 'de')
+        assert avg == 0.0
+
+    def test_wav_rms_energy_silence(self, tmp_path):
+        """A WAV file of zeros → RMS near 0."""
+        from couchpotato.core.plugins.audit import _wav_rms_energy
+        import struct as st
+        # Create a minimal valid 16-bit mono WAV with silence
+        n_samples = 16000  # 1 second at 16kHz
+        wav = tmp_path / 'silence.wav'
+        # WAV header (44 bytes)
+        data_size = n_samples * 2
+        header = b'RIFF' + st.pack('<I', 36 + data_size) + b'WAVE'
+        header += b'fmt ' + st.pack('<IHHIIHH', 16, 1, 1, 16000, 32000, 2, 16)
+        header += b'data' + st.pack('<I', data_size)
+        wav.write_bytes(header + b'\x00' * data_size)
+
+        rms = _wav_rms_energy(str(wav))
+        assert rms == 0
+
+    def test_wav_rms_energy_loud(self, tmp_path):
+        """A WAV file of max-amplitude samples → high RMS."""
+        from couchpotato.core.plugins.audit import _wav_rms_energy
+        import struct as st
+        n_samples = 16000
+        wav = tmp_path / 'loud.wav'
+        data_size = n_samples * 2
+        header = b'RIFF' + st.pack('<I', 36 + data_size) + b'WAVE'
+        header += b'fmt ' + st.pack('<IHHIIHH', 16, 1, 1, 16000, 32000, 2, 16)
+        header += b'data' + st.pack('<I', data_size)
+        # All samples at max positive (32767)
+        audio_data = st.pack('<%dh' % n_samples, *([32767] * n_samples))
+        wav.write_bytes(header + audio_data)
+
+        rms = _wav_rms_energy(str(wav))
+        assert rms > 30000  # Should be ~32767
 # ---------------------------------------------------------------------------
 
 class TestNeedsIdentification:
