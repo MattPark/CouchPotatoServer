@@ -58,6 +58,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from guessit import guessit as guessit_parse
 
 try:
+    from couchpotato.core.plugins.quality.main import QualityPlugin as _QP
+    _QUALITIES = _QP.qualities
+except ImportError:
+    _QP = None
+    _QUALITIES = None
+
+try:
     import requests
 except ImportError:
     requests = None
@@ -672,17 +679,33 @@ def resolution_label(width, height):
 def _quality_label_for_template(width, height):
     """Map actual resolution to the quality label the CP renamer uses.
 
-    The renamer's <quality> token comes from QualityPlugin.qualities[*]['label'].
-    For HD content that's '2160p', '1080p', '720p' — same as resolution_label().
-    For SD content (480p, 576p, etc.) the renamer uses 'SD', not '480p'.
+    Delegates to QualityPlugin's resolution thresholds and looks up the label
+    from QualityPlugin.qualities, so changes to the quality definitions
+    automatically propagate here.
     """
-    label = resolution_label(width, height)
-    if not label:
+    if not height and not width:
         return ''
-    # SD resolutions: the renamer quality label is 'SD'
-    if label in ('480p', '480i', '576p', '576i') or '(SD)' in label:
-        return 'SD'
-    return label
+
+    # Use the same resolution→identifier logic as QualityPlugin._detect_resolution
+    # (thresholds duplicated here; see quality/main.py:532-543 if they ever change)
+    if width >= 3200 or height >= 2000:
+        identifier = '2160p'
+    elif width >= 1800 or height >= 900:
+        identifier = '1080p'
+    elif width >= 1100 or height >= 600:
+        identifier = '720p'
+    elif width > 0 or height > 0:
+        identifier = 'sd'
+    else:
+        return ''
+
+    # Look up the label from the canonical quality definitions
+    if _QUALITIES:
+        for q in _QUALITIES:
+            if q['identifier'] == identifier:
+                return q['label']
+    # Fallback (standalone mode without CP imports)
+    return 'SD' if identifier == 'sd' else identifier
 
 
 # ---------------------------------------------------------------------------
