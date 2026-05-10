@@ -7131,6 +7131,23 @@ class TestQualityLabelForTemplate:
         from couchpotato.core.plugins.audit import _quality_label_for_template
         assert _quality_label_for_template(3840, 2160) == '2160p'
 
+    def test_1776x1072_is_1080p(self):
+        """Non-standard 1080p encode (e.g. tt0061612) must classify as 1080p."""
+        from couchpotato.core.plugins.audit import _quality_label_for_template
+        assert _quality_label_for_template(1776, 1072) == '1080p'
+
+    def test_check_resolution_no_false_flag_1776x1072(self):
+        """1776x1072 claimed as 1080p should NOT flag a resolution mismatch."""
+        from couchpotato.core.plugins.audit import check_resolution
+        assert check_resolution('1080p', 1776, 1072) is None
+
+    def test_check_resolution_detects_real_mismatch(self):
+        """720x480 claimed as 1080p should flag a resolution mismatch."""
+        from couchpotato.core.plugins.audit import check_resolution
+        result = check_resolution('1080p', 720, 480)
+        assert result is not None
+        assert result['check'] == 'resolution'
+
     def test_build_expected_filename_uses_sd(self):
         """build_expected_filename should use 'SD' for 480p content."""
         from couchpotato.core.plugins.audit import build_expected_filename

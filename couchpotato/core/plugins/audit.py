@@ -637,45 +637,6 @@ def is_junk_title(title):
     return False
 
 
-def resolution_label(width, height):
-    """Convert pixel dimensions to a human-readable resolution label.
-
-    Uses the higher of the two indicators (width-derived or height-derived)
-    because both widescreen crops (1920x800 → 1080p by width) and narrow
-    aspect ratios (1800x1080 → 1080p by height) are common in movie encodes.
-    """
-    # Derive label from width (handles widescreen crops like 1920x800)
-    if width >= 3800:
-        w_label = '2160p'
-    elif width >= 1900:
-        w_label = '1080p'
-    elif width >= 1260:
-        w_label = '720p'
-    else:
-        w_label = None
-
-    # Derive label from height (handles narrow aspect ratios like 1800x1080)
-    if height >= 2160:
-        h_label = '2160p'
-    elif height >= 1080:
-        h_label = '1080p'
-    elif height >= 720:
-        h_label = '720p'
-    elif height >= 480:
-        h_label = '480p'
-    else:
-        h_label = f'{height}p (SD)' if height else None
-
-    # Use whichever gives the higher resolution
-    rank = {'2160p': 4, '1080p': 3, '720p': 2, '480p': 1}
-    w_rank = rank.get(w_label, 0)
-    h_rank = rank.get(h_label, 0)
-
-    if w_rank >= h_rank:
-        return w_label or h_label or f'{height}p (SD)'
-    return h_label or w_label or f'{height}p (SD)'
-
-
 def _quality_label_for_template(width, height):
     """Map actual resolution to the quality label the CP renamer uses.
 
@@ -1061,9 +1022,9 @@ def pick_best_duplicate(a, b):
 def check_resolution(claimed_label, actual_width, actual_height):
     """Check 1: Resolution mismatch.
 
-    Uses both width and height to classify the actual resolution.  Width is
-    the primary indicator because widescreen crops (e.g. 1920x800) reduce
-    height but the encode is still 1080p.
+    Uses QualityPlugin.identifier_for_dimensions() (via _quality_label_for_template)
+    to classify both the claimed and actual resolution, ensuring the same
+    thresholds are used here as in the renamer and all other resolution logic.
 
     Returns a flag dict or None.
     """
@@ -1074,8 +1035,8 @@ def check_resolution(claimed_label, actual_width, actual_height):
     if expected_height is None:
         return None
 
-    actual_label = resolution_label(actual_width, actual_height)
-    expected_label = resolution_label(0, expected_height)
+    actual_label = _quality_label_for_template(actual_width, actual_height)
+    expected_label = _quality_label_for_template(0, expected_height)
 
     if actual_label != expected_label:
         return {
