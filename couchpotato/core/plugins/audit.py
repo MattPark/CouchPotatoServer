@@ -400,6 +400,27 @@ def titles_match(title_a, title_b):
     return similarity >= 0.7
 
 
+def _is_guessit_truncation(parsed_title, folder_title):
+    """Return True if *parsed_title* looks like a guessit truncation of *folder_title*.
+
+    Guessit frequently splits multi-word titles at ambiguous word boundaries
+    (e.g. ``Captain.Ron.1992`` → title ``Captain``).  When every significant
+    word in the shorter parsed title also appears in the longer folder title
+    (strict subset), the mismatch is almost certainly a parsing limitation
+    rather than a genuinely different movie.
+
+    Only checks word-level containment — callers must also verify year
+    agreement before suppressing a flag.
+    """
+    stopwords = {'the', 'a', 'an', 'of', 'in', 'on', 'at', 'to', 'and', 'or', 'is'}
+    a = set(normalize_title(parsed_title).split()) - stopwords
+    b = set(normalize_title(folder_title).split()) - stopwords
+    if not a or not b:
+        return False
+    # Strict subset — equal sets already pass titles_match()
+    return a < b
+
+
 # ---------------------------------------------------------------------------
 # File metadata extraction
 # ---------------------------------------------------------------------------
@@ -1296,6 +1317,12 @@ def check_container_title(container_title, folder_title, folder_year,
                 f"vs folder '{folder_title} ({folder_year})'"
             ),
         }, parsed_meta
+
+    if not title_same and year_same and _is_guessit_truncation(meta_title, folder_title):
+        # Guessit truncated a multi-word title at an ambiguous word boundary
+        # (e.g. "Captain.Ron.1992" → "Captain").  All parsed words appear in
+        # the folder title and the year agrees — not a real mismatch.
+        return None, parsed_meta
 
     if not title_same:
         return {

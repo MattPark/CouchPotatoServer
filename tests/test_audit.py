@@ -25,6 +25,7 @@ from couchpotato.core.plugins.audit import (
     _edition_fallback_regex,
     compute_recommended_action,
     _check_year_against_imdb,
+    _is_guessit_truncation,
     check_container_title,
     _revalidate_year_flags,
     parse_cd_number,
@@ -1076,6 +1077,104 @@ class TestCheckContainerTitleImdbYear:
         )
         assert flag is not None
         assert flag['severity'] == 'LOW'
+
+
+# ---------------------------------------------------------------------------
+# _is_guessit_truncation() + check_container_title guessit truncation tests
+# ---------------------------------------------------------------------------
+
+class TestIsGuessitTruncation:
+    """Tests for _is_guessit_truncation() subset-containment helper."""
+
+    def test_captain_vs_captain_ron(self):
+        """Guessit splits 'Captain.Ron' → 'Captain'."""
+        assert _is_guessit_truncation('Captain', 'Captain Ron') is True
+
+    def test_rogue_one_vs_full_title(self):
+        """Guessit drops subtitle from scene release name."""
+        assert _is_guessit_truncation('Rogue One', 'Rogue One A Star Wars Story') is True
+
+    def test_found_footage_vs_3d(self):
+        """Guessit drops '3D' (parsed as quality modifier)."""
+        assert _is_guessit_truncation('Found Footage', 'Found Footage 3D') is True
+
+    def test_friday_13th_vs_part_iii(self):
+        """Guessit drops sequel indicator 'Part III'."""
+        assert _is_guessit_truncation('Friday the 13th', 'Friday the 13th Part III') is True
+
+    def test_equal_titles_not_strict_subset(self):
+        """Equal titles → False (already handled by titles_match)."""
+        assert _is_guessit_truncation('Captain Ron', 'Captain Ron') is False
+
+    def test_different_words_not_subset(self):
+        """Different words → False (Alien ≠ Aliens)."""
+        assert _is_guessit_truncation('Alien', 'Aliens') is False
+
+    def test_unrelated_titles(self):
+        """Completely different movie → False."""
+        assert _is_guessit_truncation('Other Movie', 'Captain Ron') is False
+
+    def test_empty_parsed_title(self):
+        """Empty parsed title → False."""
+        assert _is_guessit_truncation('', 'Captain Ron') is False
+
+    def test_empty_folder_title(self):
+        """Empty folder title → False."""
+        assert _is_guessit_truncation('Captain', '') is False
+
+    def test_superset_not_subset(self):
+        """Parsed has MORE words than folder → False."""
+        assert _is_guessit_truncation('Captain Ron Returns', 'Captain Ron') is False
+
+
+class TestCheckContainerTitleGuessitTruncation:
+    """Integration tests: guessit truncation suppression in check_container_title."""
+
+    def test_captain_ron_suppressed(self):
+        """'Captain.Ron.1992' parsed as 'Captain' — year matches folder → no flag."""
+        flag, meta = check_container_title(
+            'Captain.Ron.1992.1080p.WEBRip.x265-RARBG', 'Captain Ron', 1992,
+        )
+        assert flag is None
+        assert meta is not None
+        assert meta['raw'] == 'Captain.Ron.1992.1080p.WEBRip.x265-RARBG'
+
+    def test_rancho_deluxe_suppressed(self):
+        """'Rancho.Deluxe.1975' parsed as 'Rancho' — year matches → no flag."""
+        flag, meta = check_container_title(
+            'Rancho.Deluxe.1975.1080p.BluRay.x264.DTS-FGT', 'Rancho Deluxe', 1975,
+        )
+        assert flag is None
+
+    def test_home_alone_year_mismatch_still_flagged(self):
+        """'Home.Alone.1990' in 'Home Alone 3 (1997)' — year differs → still HIGH."""
+        flag, meta = check_container_title(
+            'Home.Alone.1990.1080p.Blueray.H264.DTS', 'Home Alone 3', 1997,
+        )
+        assert flag is not None
+        assert flag['severity'] == 'HIGH'
+
+    def test_unrelated_title_same_year_still_flagged(self):
+        """Completely different title, same year → still MEDIUM."""
+        flag, meta = check_container_title(
+            'Other.Movie.2020.1080p.BluRay', 'Test Movie', 2020,
+        )
+        assert flag is not None
+        assert flag['severity'] == 'MEDIUM'
+
+    def test_death_collector_suppressed(self):
+        """'Death.Collector.1988' parsed as 'Death' — year matches → no flag."""
+        flag, meta = check_container_title(
+            'Death.Collector.1988.1080p.BluRay.x264.DTS-FGT', 'Death Collector', 1988,
+        )
+        assert flag is None
+
+    def test_snake_eyes_gi_joe_suppressed(self):
+        """'Snake.Eyes.2021' → title 'Snake Eyes', folder 'Snake Eyes G.I. Joe Origins'."""
+        flag, meta = check_container_title(
+            'Snake.Eyes.2021.TrueHD.Atmos.AC3.1080p.BluRay.x264', 'Snake Eyes G.I. Joe Origins', 2021,
+        )
+        assert flag is None
 
 
 # ---------------------------------------------------------------------------
